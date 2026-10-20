@@ -164,9 +164,10 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         task: run.task.clone(),
         model: run.model.clone(),
         cwd,
-        permission_mode: cfg.permission_mode.clone(),
+        permission_mode: run.permission_mode.clone().unwrap_or_else(|| cfg.permission_mode.clone()),
         max_turns: cfg.max_turns,
         extra_args: cfg.extra_args.clone(),
+        resume_session_id: run.resume_session_id.clone(),
     };
 
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);

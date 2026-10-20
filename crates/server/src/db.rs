@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Capabilities, Run, RunEvent, RunStatus, Worker};
+use sidefleet_core::{Capabilities, Run, RunEvent, RunStatus, RunSummary, Worker};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -21,6 +21,11 @@ fn row_to_run(r: &PgRow) -> Run {
         started_at: r.get("started_at"),
         finished_at: r.get("finished_at"),
         result: r.get("result"),
+        parent_id: r.get("parent_id"),
+        session_id: r.get("session_id"),
+        resume_session_id: r.get("resume_session_id"),
+        pinned_worker_id: r.get("pinned_worker_id"),
+        permission_mode: r.get("permission_mode"),
     }
 }
 
@@ -45,7 +50,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result";
+    "id, task, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -85,23 +90,93 @@ pub async fn create_run(
     task: &str,
     model: &str,
     repo: &str,
+    permission_mode: Option<&str>,
 ) -> sqlx::Result<(Run, RunEvent)> {
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status) VALUES ($1, $2, $3, $4, 'queued')
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode) VALUES ($1, $2, $3, $4, 'queued', $5)
          RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
     .bind(model)
     .bind(repo)
+    .bind(permission_mode)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
-    let ev = append_event_locked(&mut tx, id, "status", &status_payload(RunStatus::Queued)).await?;
+    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task})).await?;
     tx.commit().await?;
     Ok((run, ev))
+}
+
+pub enum FollowUpOutcome {
+    Created(Run, RunEvent),
+    NotFound,
+    /// The thread's latest run is still queued or running.
+    Busy(Run),
+    /// The previous run never reported a session id (it failed before starting, or was stopped early).
+    NoSession(Run),
+}
+
+/// Continue a thread with a new message. The new run resumes the latest
+/// session in the thread and is pinned to the worker that holds it.
+pub async fn create_follow_up(
+    pool: &PgPool,
+    run_id: Uuid,
+    task: &str,
+    model: Option<&str>,
+    permission_mode: Option<&str>,
+) -> sqlx::Result<FollowUpOutcome> {
+    let Some(any) = get_run(pool, run_id).await? else {
+        return Ok(FollowUpOutcome::NotFound);
+    };
+    let root_id = any.parent_id.unwrap_or(any.id);
+    let thread = thread_runs(pool, root_id).await?;
+    let Some(latest) = thread.last().cloned() else {
+        return Ok(FollowUpOutcome::NotFound);
+    };
+    if !latest.status.is_terminal() {
+        return Ok(FollowUpOutcome::Busy(latest));
+    }
+    // The most recent session id anywhere in the thread (a stopped follow-up may lack one).
+    let session = thread.iter().rev().find_map(|r| r.session_id.clone());
+    let Some(session) = session else {
+        return Ok(FollowUpOutcome::NoSession(latest));
+    };
+    let worker = thread.iter().rev().find_map(|r| r.worker_id.clone());
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8) RETURNING {RUN_COLS}"
+    ))
+    .bind(id)
+    .bind(task)
+    .bind(model.unwrap_or(&latest.model))
+    .bind(&latest.repo)
+    .bind(root_id)
+    .bind(&session)
+    .bind(&worker)
+    .bind(permission_mode.or(latest.permission_mode.as_deref()))
+    .fetch_one(&mut *tx)
+    .await?;
+    let run = row_to_run(&row);
+    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task, "resumes": session})).await?;
+    tx.commit().await?;
+    Ok(FollowUpOutcome::Created(run, ev))
+}
+
+/// All runs of a thread, root first, in order.
+pub async fn thread_runs(pool: &PgPool, root_id: Uuid) -> sqlx::Result<Vec<Run>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {RUN_COLS} FROM runs WHERE id = $1 OR parent_id = $1 ORDER BY created_at"
+    ))
+    .bind(root_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_run).collect())
 }
 
 pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
@@ -112,14 +187,31 @@ pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
     Ok(row.as_ref().map(row_to_run))
 }
 
-pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Run>> {
+/// Root runs (threads), newest activity first, with thread status and follow-up count.
+pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<RunSummary>> {
+    let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
     let rows = sqlx::query(&format!(
-        "SELECT {RUN_COLS} FROM runs ORDER BY created_at DESC LIMIT $1"
+        "SELECT {cols},
+                (SELECT count(*) FROM runs f WHERE f.parent_id = r.id) AS follow_ups,
+                (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY l.created_at DESC LIMIT 1) AS thread_status,
+                (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at
+         FROM runs r WHERE r.parent_id IS NULL ORDER BY last_activity_at DESC LIMIT $1"
     ))
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows.iter().map(row_to_run).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let ts: String = r.get("thread_status");
+            RunSummary {
+                run: row_to_run(r),
+                follow_ups: r.get("follow_ups"),
+                thread_status: RunStatus::parse(&ts).unwrap_or(RunStatus::Failed),
+                last_activity_at: r.get("last_activity_at"),
+            }
+        })
+        .collect())
 }
 
 pub async fn events_since(pool: &PgPool, run_id: Uuid, from_seq: i64) -> sqlx::Result<Vec<RunEvent>> {
@@ -161,9 +253,22 @@ pub async fn append_events(
         return Ok(AppendOutcome::NotRunning(run));
     }
     let mut stored = Vec::with_capacity(events.len());
+    let mut session: Option<String> = None;
     for e in events {
         let payload = sidefleet_core::redact::redact_json(&e.payload);
+        if matches!(e.kind.as_str(), "agent_init" | "result") {
+            if let Some(sid) = payload.get("session_id").and_then(Value::as_str) {
+                session = Some(sid.to_string());
+            }
+        }
         stored.push(append_event_locked(&mut tx, run_id, &e.kind, &payload).await?);
+    }
+    if let Some(sid) = session {
+        sqlx::query("UPDATE runs SET session_id = $2 WHERE id = $1")
+            .bind(run_id)
+            .bind(sid)
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
     Ok(AppendOutcome::Appended(stored, run))
@@ -223,6 +328,7 @@ pub async fn claim_run(
         "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
          WHERE id = (
             SELECT id FROM runs WHERE status = 'queued' AND repo = ANY($2)
+              AND (pinned_worker_id IS NULL OR pinned_worker_id = $1)
             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
          )
          RETURNING {RUN_COLS}"

@@ -24,6 +24,8 @@ pub struct AgentSpec {
     pub permission_mode: String,
     pub max_turns: Option<u32>,
     pub extra_args: Vec<String>,
+    /// Continue an earlier Claude Code session on this machine.
+    pub resume_session_id: Option<String>,
 }
 
 impl AgentSpec {
@@ -39,6 +41,10 @@ impl AgentSpec {
             "--permission-mode".into(),
             self.permission_mode.clone(),
         ];
+        if let Some(sid) = &self.resume_session_id {
+            a.push("--resume".into());
+            a.push(sid.clone());
+        }
         if let Some(n) = self.max_turns {
             a.push("--max-turns".into());
             a.push(n.to_string());

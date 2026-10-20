@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use sidefleet_server::test_support::{TestEnv, DEV_KEY, WORKER_TOKEN};
-use sidefleet_core::{Capabilities, RepoInfo, Run, RunControl, RunEvent, RunStatus};
+use sidefleet_core::{Capabilities, RepoInfo, Run, RunControl, RunEvent, RunStatus, RunSummary};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
@@ -432,5 +432,89 @@ async fn control_plane_redacts_secrets_in_stored_payloads() {
     assert!(!all.contains("whatever"), "{all}");
     let run = api.get_run(id).await;
     assert!(!run.result.unwrap().to_string().contains("abcdefghijkl"));
+    env.teardown().await;
+}
+
+
+#[tokio::test]
+async fn follow_ups_resume_the_session_on_the_same_worker() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    api.register("w2", &["r"]).await;
+
+    // Root run with an explicit permission mode.
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "first", "model": "claude-haiku-5-5", "repo": "r", "permission_mode": "bypassPermissions"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let root: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.get_run(root).await.permission_mode.as_deref(), Some("bypassPermissions"));
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r", "permission_mode": "sudo"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "unknown permission mode rejected");
+
+    // No session yet: a follow-up is refused while the root is queued (busy), and after a
+    // finish without any session id (no session).
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{root}/messages")).json(&json!({"task": "again"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+
+    let claimed = api.claim("w1", &["r"]).await.unwrap();
+    assert_eq!(claimed.id, root);
+    api.post_events("w1", root, json!([
+        {"kind": "agent_init", "payload": {"model": "claude-haiku-5-5", "session_id": "sess-abc"}},
+        {"kind": "assistant_text", "payload": {"text": "hello"}},
+    ])).await;
+    assert_eq!(api.get_run(root).await.session_id.as_deref(), Some("sess-abc"), "session id captured from agent_init");
+    api.finish("w1", root, "succeeded", json!({"result": "hello"})).await;
+
+    // Follow-up: resumes sess-abc, pinned to w1, inherits model/repo/permissions.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{root}/messages")).json(&json!({"task": "and then?"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let f1: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let f1run = api.get_run(f1).await;
+    assert_eq!(f1run.parent_id, Some(root));
+    assert_eq!(f1run.resume_session_id.as_deref(), Some("sess-abc"));
+    assert_eq!(f1run.pinned_worker_id.as_deref(), Some("w1"));
+    assert_eq!(f1run.model, "claude-haiku-5-5");
+    assert_eq!(f1run.repo, "r");
+    assert_eq!(f1run.permission_mode.as_deref(), Some("bypassPermissions"));
+
+    // Another worker with the repo must not get it; the pinned one does.
+    assert!(api.claim("w2", &["r"]).await.is_none(), "follow-up leaked to a worker without the session");
+    let c = api.claim("w1", &["r"]).await.expect("pinned worker claims the follow-up");
+    assert_eq!(c.id, f1);
+
+    // While it runs, a further message is refused as busy.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{root}/messages")).json(&json!({"task": "more"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    api.post_events("w1", f1, json!([{"kind": "result", "payload": {"subtype": "success", "is_error": false, "result": "ok", "session_id": "sess-abc"}}])).await;
+    api.finish("w1", f1, "succeeded", json!({"result": "ok"})).await;
+
+    // Messages can address any run in the thread and still attach to the root.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{f1}/messages")).json(&json!({"task": "third", "permission_mode": "plan"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let f2: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let f2run = api.get_run(f2).await;
+    assert_eq!(f2run.parent_id, Some(root));
+    assert_eq!(f2run.permission_mode.as_deref(), Some("plan"));
+
+    // Thread lists root first; the runs list shows one thread with two follow-ups.
+    let thread: Vec<Run> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{f2}/thread")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(thread.iter().map(|r| r.id).collect::<Vec<_>>(), vec![root, f1, f2]);
+    let list: Vec<RunSummary> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    let mine: Vec<&RunSummary> = list.iter().filter(|s| s.run.id == root).collect();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].follow_ups, 2);
+    assert_eq!(mine[0].thread_status, RunStatus::Queued);
+    assert!(list.iter().all(|s| s.run.parent_id.is_none()), "follow-ups are not listed as threads");
+
     env.teardown().await;
 }

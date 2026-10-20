@@ -58,6 +58,34 @@ pub struct Run {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub result: Option<Value>,
+    /// Root run of the thread this run continues (None for a root).
+    #[serde(default)]
+    pub parent_id: Option<Uuid>,
+    /// Claude Code session id reported by the agent for this run.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Session to resume (`claude -p --resume`), set on follow-ups.
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
+    /// Only this worker may claim the run (follow-ups must run where the session lives).
+    #[serde(default)]
+    pub pinned_worker_id: Option<String>,
+    /// Permission mode for Claude Code; None means the worker's default.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+}
+
+/// A root run plus what the page needs to list a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSummary {
+    #[serde(flatten)]
+    pub run: Run,
+    /// Number of follow-up messages in the thread.
+    pub follow_ups: i64,
+    /// Status of the most recent run in the thread.
+    pub thread_status: RunStatus,
+    /// Last activity in the thread.
+    pub last_activity_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +164,22 @@ pub struct CreateRunRequest {
     pub task: String,
     pub model: String,
     pub repo: String,
+    /// acceptEdits (default), bypassPermissions, plan, default, dontAsk.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
+
+/// Continue a thread: a new run that resumes the previous Claude Code session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowUpRequest {
+    pub task: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+}
+
+pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "bypassPermissions", "plan", "default", "dontAsk"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRunResponse {

@@ -23,6 +23,7 @@ fn spec(task: &str) -> AgentSpec {
         permission_mode: "acceptEdits".into(),
         max_turns: None,
         extra_args: vec![],
+        resume_session_id: None,
     }
 }
 
@@ -118,6 +119,17 @@ async fn agent_error_result_is_failed() {
     assert_eq!(outcome.result["result"]["subtype"], "error_max_turns");
     let last_stdout = events.iter().rev().find(|e| e.kind != "stderr").unwrap();
     assert_eq!(last_stdout.kind, "result");
+}
+
+#[test]
+fn resume_adds_the_resume_flag() {
+    let mut s = spec("continue");
+    assert!(!s.args().iter().any(|a| a == "--resume"));
+    s.resume_session_id = Some("sess-123".into());
+    let a = s.args();
+    let i = a.iter().position(|x| x == "--resume").expect("--resume present");
+    assert_eq!(a[i + 1], "sess-123");
+    assert!(s.display_command().contains("--resume sess-123"));
 }
 
 #[tokio::test]

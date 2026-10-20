@@ -88,7 +88,13 @@ reboots. The page flips from onboarding to the compose box the moment the first 
 Even lazier: the page has a "Copy prompt" button. Paste that into Claude Code on the other
 machine and it does steps 2 and 3 for you by reading `http://<control plane>/connect.md`.
 
-Then type a task, pick a model and a repo, press the arrow, and watch it run.
+Then type a task, pick a model, a repo and what the agent may do (read and edit files by default,
+full access when it should run commands, read only for questions), press the arrow, and watch it
+run. When it finishes, reply in the box at the bottom: the reply continues the same Claude Code
+session on the same machine, and the page shows the whole thread like a chat.
+
+Hosting the control plane on a VPS or a spare machine, including a prompt you can hand to Claude
+Code there to do the setup: see [HOSTING.md](HOSTING.md).
 
 ### Reaching the control plane from other machines
 
@@ -143,9 +149,11 @@ Developer (bearer `SIDEFLEET_DEV_KEY`):
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/v1/runs` `{task, model, repo}` | `202 {id, status}`; model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` |
-| `GET` | `/v1/runs?limit=50` | recent runs |
+| `POST` | `/v1/runs` `{task, model, repo, permission_mode?}` | `202 {id, status}`; model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk` |
+| `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
+| `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
+| `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?}` | `202`: a follow-up that resumes the thread's session on the same machine; `409` while the previous message runs |
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind; replays then live; ends with `end` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | machines with capabilities and `online` (heartbeat < 45 s) |
@@ -193,7 +201,7 @@ push; tagging `vX.Y.Z` builds release binaries for macOS (arm64, x86_64) and Lin
   network (LAN or Tailscale).
 - Tool permission prompts are not relayed to the page; whatever the permission mode does not
   allow is denied and the agent carries on or gives up.
-- No follow-up messages to a run; each run is a fresh `claude -p` session (the session id is kept
-  in the events for a future `--resume`).
+- A follow-up can only run on the machine that holds the session; if that machine is offline the
+  reply waits as queued until it is back.
 - Redaction is pattern-based. It is a safety net, not a guarantee.
 - Windows is not supported.

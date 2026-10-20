@@ -5,8 +5,9 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sidefleet_core::{
-    ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, HeartbeatRequest,
-    PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent, RunStatus,
+    ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
+    HeartbeatRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    RunStatus, RunSummary, PERMISSION_MODES,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -27,7 +28,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
 use crate::auth::{self, WorkerTokenHash};
-use crate::db::{self, AppendOutcome, FinishOutcome};
+use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome};
 use crate::AppState;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -38,6 +39,8 @@ pub fn router(state: AppState) -> Router {
     let dev = Router::new()
         .route("/v1/runs", post(create_run).get(list_runs))
         .route("/v1/runs/{id}", get(get_run))
+        .route("/v1/runs/{id}/thread", get(get_thread))
+        .route("/v1/runs/{id}/messages", post(follow_up))
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/workers", get(list_workers))
@@ -123,7 +126,8 @@ async fn create_run(
     if repo.is_empty() || repo.contains("..") || repo.starts_with('/') {
         return Err(ApiError(StatusCode::BAD_REQUEST, "repo must be a relative repo name".into()));
     }
-    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo).await?;
+    let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo, mode).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -141,8 +145,56 @@ fn default_limit() -> i64 {
 async fn list_runs(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<Vec<Run>>, ApiError> {
+) -> Result<Json<Vec<RunSummary>>, ApiError> {
     Ok(Json(db::list_runs(&state.pool, q.limit.clamp(1, 500)).await?))
+}
+
+fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
+    match mode {
+        None | Some("") => Ok(None),
+        Some(m) if PERMISSION_MODES.contains(&m) => Ok(Some(m)),
+        Some(_) => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("permission_mode must be one of {}", PERMISSION_MODES.join(", ")),
+        )),
+    }
+}
+
+/// All runs of the thread this run belongs to, root first.
+async fn get_thread(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Run>>, ApiError> {
+    let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
+    Ok(Json(db::thread_runs(&state.pool, run.parent_id.unwrap_or(run.id)).await?))
+}
+
+/// Continue the conversation: queue a run that resumes the thread's Claude Code session.
+async fn follow_up(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<FollowUpRequest>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    let task = req.task.trim();
+    if task.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "message must not be empty".into()));
+    }
+    if let Some(m) = &req.model {
+        if !ALLOWED_MODELS.contains(&m.as_str()) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, format!("model must be one of {}", ALLOWED_MODELS.join(", "))));
+        }
+    }
+    let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    match db::create_follow_up(&state.pool, id, task, req.model.as_deref(), mode).await? {
+        FollowUpOutcome::Created(run, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        FollowUpOutcome::NotFound => Err(not_found()),
+        FollowUpOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the previous message is still running; wait for it to finish or stop it".into())),
+        FollowUpOutcome::NoSession(_) => Err(ApiError(StatusCode::CONFLICT, "this thread has no Claude Code session to resume; start a new task instead".into())),
+    }
 }
 
 async fn get_run(

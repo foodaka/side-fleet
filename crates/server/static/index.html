@@ -83,6 +83,10 @@
   .machine .nm { font-size:15px; font-weight:600; } .machine .os { font-size:12px; margin-top:2px; color:var(--muted); }
   .tags { display:flex; flex-wrap:wrap; gap:4px; }
   .kv { display:flex; justify-content:space-between; font-size:12px; padding:5px 0; border-top:1px solid #F0F0EC; }
+  .bar { height:6px; border-radius:999px; background:#EFEFEB; overflow:hidden; }
+  .bar span { display:block; height:100%; background:var(--fg); border-radius:999px; }
+  .bar span.warn { background:var(--q); } .bar span.hot { background:var(--err); }
+  .gauge { display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; }
 
   /* run detail: the thread scrolls, header and composer stay put */
   main.thread { padding:0; height:100vh; overflow:hidden; }
@@ -724,11 +728,22 @@
       const repos = (c.repos || []).slice().sort((x, y) => isAdded(y) - isAdded(x));
       repos.slice(0, 6).forEach(r => tags.push('<span class="tag">repo:' + esc(r.name) + '</span>'));
       if (repos.length > 6) tags.push('<span class="tag muted">+' + (repos.length - 6) + ' more</span>');
-      const running = runs.filter(r => r.status === 'running' && r.worker_id === w.id).length;
+      const running = runs.filter(r => r.thread_status === 'running' && (r.worker_id === w.id)).length;
+      const sys = c.system, slots = c.slots;
+      const pct = (used, total) => total ? Math.min(100, Math.round(used / total * 100)) : 0;
+      const cls = (p) => p >= 90 ? ' hot' : p >= 70 ? ' warn' : '';
+      const gauge = (label, right, p) => '<div><div class="gauge"><span>' + label + '</span><span class="mono muted">' + esc(right) + '</span></div><div class="bar"><span class="' + cls(p) + '" style="width:' + p + '%"></span></div></div>';
+      const gauges = sys ? [
+        gauge('Memory', (sys.mem_used_mb / 1024).toFixed(1) + ' / ' + (sys.mem_total_mb / 1024).toFixed(0) + ' GB', pct(sys.mem_used_mb, sys.mem_total_mb)),
+        gauge('CPU', Math.round(sys.cpu_percent) + '% of ' + sys.cpu_cores + ' cores · load ' + sys.load_avg_1m.toFixed(1), Math.round(sys.cpu_percent)),
+        gauge('Disk', sys.disk_free_gb.toFixed(0) + ' GB free of ' + sys.disk_total_gb.toFixed(0), pct(sys.disk_total_gb - sys.disk_free_gb, sys.disk_total_gb)),
+      ].join('') : '';
+      const slotsRow = slots ? gauge('Tasks', slots.active + ' / ' + slots.parallel + ' slots', pct(slots.active, slots.parallel)) : '';
       return '<article class="card machine"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px"><div><div class="nm">' + esc(w.display_name) + '</div><div class="os">' + esc(c.os || '') + (c.hostname ? ' · ' + esc(c.hostname) : '') + '</div></div>' +
         '<span class="pill ' + (w.online ? 'succeeded' : 'stopped') + '"><span class="dot"></span>' + (w.online ? 'Online' : 'Offline') + '</span></div>' +
+        gauges + slotsRow +
         '<div class="tags">' + tags.join('') + '</div>' +
-        '<div><div class="kv"><span class="muted">Running</span><span>' + running + ' run' + (running === 1 ? '' : 's') + '</span></div><div class="kv"><span class="muted">Repos</span><span>' + repos.length + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div></div></article>';
+        '<div><div class="kv"><span class="muted">Running</span><span>' + (slots ? slots.active : running) + ' task' + ((slots ? slots.active : running) === 1 ? '' : 's') + '</span></div>' + (sys ? '<div class="kv"><span class="muted">Up</span><span class="mono">' + Math.floor(sys.uptime_secs / 86400) + 'd ' + Math.floor(sys.uptime_secs % 86400 / 3600) + 'h</span></div>' : '') + '<div class="kv"><span class="muted">Repos</span><span>' + repos.length + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div></div></article>';
     }).join('');
   }
 

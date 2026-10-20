@@ -36,3 +36,4 @@ gethostname = "1"
 tempfile = "3"
 bytes = "1"
 rand = "0.8"
+sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }

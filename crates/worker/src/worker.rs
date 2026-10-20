@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sidefleet_core::{Capabilities, NewEvent, Run, RunStatus};
+use sidefleet_core::{Capabilities, NewEvent, Run, RunStatus, Slots};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
@@ -49,9 +50,11 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     };
 
     tracing::info!(worker = %cfg.worker_id, repos_root = %cfg.repos_root.display(), "detecting capabilities");
-    let caps = detect::detect_all(&detect_opts).await;
+    let mut caps = detect::detect_all(&detect_opts).await;
+    caps.slots = Some(Slots { parallel: cfg.parallel.max(1), active: 0 });
     log_caps(&caps);
     let caps = Arc::new(Mutex::new(caps));
+    let active_count = Arc::new(AtomicUsize::new(0));
 
     register_with_backoff(&client, &cfg, &caps).await;
 
@@ -63,12 +66,16 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let root = cfg.repos_root.clone();
         let depth = cfg.scan_depth;
         let cfg2 = cfg.clone();
+        let parallel = cfg.parallel.max(1);
+        let active_count = active_count.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
                 {
                     let mut c = caps.lock().await;
                     c.repos = detect::scan_repos(&root, depth);
+                    c.system = Some(detect::system_stats(&root));
+                    c.slots = Some(Slots { parallel, active: active_count.load(Ordering::Relaxed) });
                 }
                 let snapshot = caps.lock().await.clone();
                 match client.heartbeat(&snapshot).await {
@@ -128,12 +135,15 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                     .find(|r| r.name == run.repo)
                     .map(|r| PathBuf::from(&r.path));
                 active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone()));
+                active_count.fetch_add(1, Ordering::Relaxed);
                 let client = client.clone();
                 let cfg = cfg.clone();
                 let done_tx = done_tx.clone();
+                let active_count = active_count.clone();
                 tokio::spawn(async move {
                     let id = run.id;
                     execute_run(&client, &cfg, run, repo_path).await;
+                    active_count.fetch_sub(1, Ordering::Relaxed);
                     drop(permit);
                     let _ = done_tx.send(id);
                 });

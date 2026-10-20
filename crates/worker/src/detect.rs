@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sidefleet_core::{Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo};
+use sidefleet_core::{Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo, SystemStats};
+use std::sync::Mutex;
 use tokio::process::Command;
 
 /// Environment variables stripped from every child process so a nested
@@ -140,6 +141,35 @@ pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
     out
 }
 
+/// Live machine numbers. Keeps one `sysinfo::System` so CPU usage is measured
+/// between consecutive calls (the first call reports 0%).
+pub fn system_stats(repos_root: &Path) -> SystemStats {
+    use sysinfo::{Disks, System};
+    static SYS: Mutex<Option<System>> = Mutex::new(None);
+    let mut guard = SYS.lock().unwrap_or_else(|e| e.into_inner());
+    let sys = guard.get_or_insert_with(System::new);
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+    let disks = Disks::new_with_refreshed_list();
+    // The disk whose mount point is the longest prefix of the repos folder.
+    let root = std::fs::canonicalize(repos_root).unwrap_or_else(|_| repos_root.to_path_buf());
+    let disk = disks
+        .iter()
+        .filter(|d| root.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len());
+    let gb = |b: u64| (b as f64) / 1_073_741_824.0;
+    SystemStats {
+        cpu_cores: sys.cpus().len(),
+        cpu_percent: sys.global_cpu_usage(),
+        load_avg_1m: System::load_average().one,
+        mem_total_mb: sys.total_memory() / 1_048_576,
+        mem_used_mb: sys.used_memory() / 1_048_576,
+        disk_total_gb: disk.map(|d| gb(d.total_space())).unwrap_or(0.0),
+        disk_free_gb: disk.map(|d| gb(d.available_space())).unwrap_or(0.0),
+        uptime_secs: System::uptime(),
+    }
+}
+
 pub struct DetectOptions {
     pub claude_bin: String,
     pub repos_root: PathBuf,
@@ -158,6 +188,8 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
         repos: scan_repos(&opts.repos_root, opts.scan_depth),
         hostname: gethostname::gethostname().to_string_lossy().to_string(),
         os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        system: Some(system_stats(&opts.repos_root)),
+        slots: None,
     }
 }
 

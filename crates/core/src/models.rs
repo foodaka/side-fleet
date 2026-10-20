@@ -125,6 +125,32 @@ pub struct Capabilities {
     pub hostname: String,
     #[serde(default)]
     pub os: String,
+    /// Live machine numbers, refreshed on every heartbeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemStats>,
+    /// Task slots: how many may run at once and how many are busy right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<Slots>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SystemStats {
+    pub cpu_cores: usize,
+    /// Average CPU busy percentage across cores since the previous sample.
+    pub cpu_percent: f32,
+    pub load_avg_1m: f64,
+    pub mem_total_mb: u64,
+    pub mem_used_mb: u64,
+    /// Disk holding the repos folder.
+    pub disk_total_gb: f64,
+    pub disk_free_gb: f64,
+    pub uptime_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Slots {
+    pub parallel: usize,
+    pub active: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

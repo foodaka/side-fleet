@@ -725,9 +725,8 @@
       if (a.ollama) (a.ollama.models || []).slice(0, 4).forEach(m => tags.push('<span class="tag">ollama:' + esc(m) + '</span>'));
       if (!a.claude && !a.codex && !a.ollama) tags.push('<span class="tag muted" style="border-style:dashed;background:transparent">no agents installed</span>');
       const isAdded = (r) => !!(added && added.has(r.name));
-      const repos = (c.repos || []).slice().sort((x, y) => isAdded(y) - isAdded(x));
-      repos.slice(0, 6).forEach(r => tags.push('<span class="tag">repo:' + esc(r.name) + '</span>'));
-      if (repos.length > 6) tags.push('<span class="tag muted">+' + (repos.length - 6) + ' more</span>');
+      const repos = (c.repos || []);
+      const addedHere = repos.filter(isAdded).length;
       const running = runs.filter(r => r.thread_status === 'running' && (r.worker_id === w.id)).length;
       const sys = c.system, slots = c.slots;
       const pct = (used, total) => total ? Math.min(100, Math.round(used / total * 100)) : 0;
@@ -739,11 +738,12 @@
         gauge('Disk', sys.disk_free_gb.toFixed(0) + ' GB free of ' + sys.disk_total_gb.toFixed(0), pct(sys.disk_total_gb - sys.disk_free_gb, sys.disk_total_gb)),
       ].join('') : '';
       const slotsRow = slots ? gauge('Tasks', slots.active + ' / ' + slots.parallel + ' slots', pct(slots.active, slots.parallel)) : '';
+      const stale = (!sys && w.online) ? '<div class="muted" style="font-size:12px;padding:6px 0">No live stats: this machine runs an older worker. Update it with <span class="mono">git pull && sh install.sh</span>, then <span class="mono">sidefleet disconnect && sidefleet connect …</span> (or restart <span class="mono">serve</span>).</div>' : '';
       return '<article class="card machine"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px"><div><div class="nm">' + esc(w.display_name) + '</div><div class="os">' + esc(c.os || '') + (c.hostname ? ' · ' + esc(c.hostname) : '') + '</div></div>' +
         '<span class="pill ' + (w.online ? 'succeeded' : 'stopped') + '"><span class="dot"></span>' + (w.online ? 'Online' : 'Offline') + '</span></div>' +
-        gauges + slotsRow +
+        gauges + slotsRow + stale +
         '<div class="tags">' + tags.join('') + '</div>' +
-        '<div><div class="kv"><span class="muted">Running</span><span>' + (slots ? slots.active : running) + ' task' + ((slots ? slots.active : running) === 1 ? '' : 's') + '</span></div>' + (sys ? '<div class="kv"><span class="muted">Up</span><span class="mono">' + Math.floor(sys.uptime_secs / 86400) + 'd ' + Math.floor(sys.uptime_secs % 86400 / 3600) + 'h</span></div>' : '') + '<div class="kv"><span class="muted">Repos</span><span>' + repos.length + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div></div></article>';
+        '<div><div class="kv"><span class="muted">Running</span><span>' + (slots ? slots.active : running) + ' task' + ((slots ? slots.active : running) === 1 ? '' : 's') + '</span></div>' + (sys ? '<div class="kv"><span class="muted">Up</span><span class="mono">' + Math.floor(sys.uptime_secs / 86400) + 'd ' + Math.floor(sys.uptime_secs % 86400 / 3600) + 'h</span></div>' : '') + '<div class="kv"><span class="muted">Repos</span><span>' + repos.length + (added ? ' · ' + addedHere + ' chosen' : '') + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div></div></article>';
     }).join('');
   }
 

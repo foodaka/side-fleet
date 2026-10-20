@@ -49,13 +49,10 @@ pub fn map_stream_line(line: &str) -> MappedLine {
                         "cwd": v.get("cwd").cloned().unwrap_or(Value::Null),
                     }),
                 });
-            } else {
-                out.push(NewEvent {
-                    kind: "agent_other".into(),
-                    payload: json!({"type": ty, "subtype": subtype}),
-                });
             }
+            // hook_started / hook_response / compact_boundary etc. are noise for the viewer.
         }
+        "rate_limit_event" => {}
         "assistant" => {
             for block in content_blocks(&v) {
                 match block.get("type").and_then(Value::as_str) {
@@ -249,6 +246,14 @@ mod tests {
         assert_eq!(e[0].payload["result"], "Done.");
         let e = events(r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#);
         assert_eq!(e[0].payload["is_error"], true);
+    }
+
+    #[test]
+    fn drops_hook_and_rate_limit_noise() {
+        assert!(events(r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}"#).is_empty());
+        assert!(events(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#).is_empty());
+        let e = events(r#"{"type":"something_new","subtype":"x"}"#);
+        assert_eq!(e[0].kind, "agent_other");
     }
 
     #[test]

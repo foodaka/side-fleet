@@ -29,5 +29,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 acd = { path = "../acd" }
+chrono.workspace = true
+futures.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true

@@ -112,7 +112,17 @@ class Fleet {
 		workers.forEach((w) => (w.capabilities.repos ?? []).forEach((r) => { if (r.id && r.id !== r.name) byName.set(r.name, r.id); }));
 		if (!byName.size) return; // workers have not reported identities yet
 		this.#migrated = true;
-		const next = [...new Set(added.map((n) => byName.get(n) ?? n))];
+		// Also repair ids whose host was an SSH alias (`github.com-work/org/repo`): same path, real host.
+		const keys = new Set(workers.flatMap((w) => (w.capabilities.repos ?? []).map(repoKey)));
+		const byPath = new Map<string, string[]>();
+		keys.forEach((k) => { const p = k.split('/').slice(1).join('/'); if (p) byPath.set(p, [...(byPath.get(p) ?? []), k]); });
+		const fix = (n: string) => {
+			if (keys.has(n)) return n;
+			if (byName.has(n)) return byName.get(n)!;
+			const same = byPath.get(n.split('/').slice(1).join('/'));
+			return same && same.length === 1 ? same[0] : n;
+		};
+		const next = [...new Set(added.map(fix))];
 		if (next.length !== added.length || next.some((n, i) => n !== added[i])) await this.saveAdded(next);
 	}
 

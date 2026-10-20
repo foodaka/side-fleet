@@ -94,6 +94,43 @@ pub async fn detect_ollama() -> Option<OllamaAgent> {
     Some(OllamaAgent { version, models })
 }
 
+/// Identity for a remote URL. SSH remotes often use a host alias from
+/// `~/.ssh/config` (`git@github.com-work:org/repo.git`); resolve it to the real
+/// host so every machine agrees on the identity.
+pub fn identity_for(url: &str) -> Option<String> {
+    let id = repo_identity(url)?;
+    if url.trim_start().starts_with("http") {
+        return Some(id);
+    }
+    let (host, rest) = id.split_once('/')?;
+    Some(format!("{}/{rest}", ssh_hostname(host)))
+}
+
+/// `ssh -G <alias>` prints the effective config without connecting; cached per host.
+fn ssh_hostname(alias: &str) -> String {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(h) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(alias) {
+        return h.clone();
+    }
+    let resolved = std::process::Command::new("ssh")
+        .args(["-G", alias])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .find_map(|l| l.strip_prefix("hostname ").map(|h| h.trim().to_ascii_lowercase()))
+        })
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| alias.to_string());
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(alias.to_string(), resolved.clone());
+    resolved
+}
+
 /// The `origin` remote URL of a checkout, read from its git config without
 /// spawning git (a machine can have hundreds of checkouts).
 pub fn origin_url(repo: &Path) -> Option<String> {
@@ -151,7 +188,7 @@ pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
             } else {
                 dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string()
             };
-            let id = origin_url(dir).and_then(|u| repo_identity(&u)).unwrap_or_else(|| name.clone());
+            let id = origin_url(dir).and_then(|u| identity_for(&u)).unwrap_or_else(|| name.clone());
             out.push(RepoInfo { name, path: dir.to_string_lossy().to_string(), id });
             return; // do not descend into nested repos / submodules
         }
@@ -250,6 +287,16 @@ mod tests {
         let by = |n: &str| repos.iter().find(|r| r.name == n).unwrap().clone();
         assert_eq!(by("code/side-fleet").id, "github.com/foodaka/side-fleet");
         assert_eq!(by("scratch").id, "scratch", "no remote: the folder name is the identity");
+    }
+
+    #[test]
+    fn https_remotes_skip_ssh_resolution_and_unknown_aliases_stay() {
+        assert_eq!(identity_for("https://github.com/foodaka/side-fleet.git").as_deref(), Some("github.com/foodaka/side-fleet"));
+        // An alias ssh can't resolve keeps its name rather than failing.
+        assert_eq!(
+            identity_for("git@no-such-alias.invalid:foodaka/side-fleet.git").as_deref(),
+            Some("no-such-alias.invalid/foodaka/side-fleet")
+        );
     }
 
     #[test]

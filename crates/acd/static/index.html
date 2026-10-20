@@ -4,293 +4,573 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AgentCloud</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg: #0f1115; --panel: #171a21; --line: #272b36; --fg: #e6e8ee; --muted: #8b93a7;
-    --accent: #7aa2f7; --ok: #9ece6a; --warn: #e0af68; --err: #f7768e; --tool: #bb9af7;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
-  header .spacer { flex: 1; }
-  header button { font-size: 12px; }
-  main { display: grid; grid-template-columns: 360px 1fr; gap: 0; min-height: calc(100vh - 49px); }
-  aside { border-right: 1px solid var(--line); padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }
-  section.view { padding: 16px 20px; display: flex; flex-direction: column; min-width: 0; }
-  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-  textarea, select, input { width: 100%; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; }
-  textarea { min-height: 120px; resize: vertical; }
-  button { background: var(--accent); color: #0b0d12; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
-  button.secondary { background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
-  button.danger { background: var(--err); }
-  button:disabled { opacity: .5; cursor: default; }
-  .row { display: flex; gap: 8px; align-items: center; }
-  .workers { display: flex; flex-direction: column; gap: 8px; }
-  .worker { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
-  .worker .name { font-weight: 600; font-size: 13px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
-  .dot.on { background: var(--ok); }
-  .muted { color: var(--muted); }
-  .runs { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow: auto; }
-  .run { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-  .run:hover { background: var(--panel); }
-  .run .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  .chip.queued { color: var(--warn); border-color: var(--warn); }
-  .chip.running { color: var(--accent); border-color: var(--accent); }
-  .chip.succeeded { color: var(--ok); border-color: var(--ok); }
-  .chip.failed, .chip.stopped { color: var(--err); border-color: var(--err); }
-  .viewhead { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
-  .viewhead .task { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
-  #narration { flex: 1; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-  .ev { animation: fade .2s ease-in; }
-  @keyframes fade { from { opacity: 0; transform: translateY(2px);} to { opacity: 1; transform: none; } }
-  .ev.text { white-space: pre-wrap; word-break: break-word; }
-  .ev.tool { font-family: var(--mono); font-size: 12.5px; color: var(--tool); }
-  .ev.tool .name { font-weight: 700; }
-  .ev.tool .sum { color: var(--fg); opacity: .85; }
-  .ev.toolres details { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-  .ev.toolres summary { cursor: pointer; user-select: none; }
-  .ev.toolres pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; background: var(--bg); padding: 8px; border-radius: 6px; color: var(--fg); }
-  .ev.toolres.error summary { color: var(--err); }
-  .ev.status { font-size: 12px; color: var(--muted); }
-  .ev.result { border-top: 1px solid var(--line); padding-top: 10px; white-space: pre-wrap; word-break: break-word; }
-  .ev.result.error { color: var(--err); }
-  .ev.result .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
-  .ev.stderr { font-family: var(--mono); font-size: 12px; color: var(--warn); white-space: pre-wrap; }
-  .thinking { color: var(--muted); font-style: italic; font-size: 12px; }
-  .empty { color: var(--muted); margin: auto; text-align: center; }
-  @media (max-width: 860px) { main { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+  :root { --bg:#F7F7F5; --fg:#191919; --muted:rgba(25,25,25,.56); --faint:rgba(25,25,25,.4); --line:#E8E8E4; --line2:#E6E6E2; --card:#fff; --hover:#F1F1ED; --chip:#EFEFEB;
+    --run:#956CDE; --run-bg:#F1EAFB; --run-fg:#5B3AA8; --q:#F58E3A; --q-bg:#FDF1E6; --q-fg:#9A4B0C; --ok:#00A558; --ok-bg:#E6F6EE; --ok-fg:#0B6B3A; --err:#F53B3A; --err-bg:#FDECEC; --err-fg:#A32323;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); font-family:Inter,system-ui,sans-serif; color:var(--fg); -webkit-font-smoothing:antialiased; font-size:13px; line-height:1.5; }
+  a { color:var(--fg); text-decoration:none; } a:hover { color:#000; }
+  button { font-family:inherit; cursor:pointer; }
+  .app { display:flex; flex-wrap:wrap; min-height:100vh; }
+  nav.side { width:224px; padding:18px 14px; border-right:1px solid var(--line); display:flex; flex-direction:column; gap:6px; }
+  .logo { display:flex; align-items:center; gap:9px; padding:4px 10px 14px; font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .nav { display:flex; flex-direction:column; gap:2px; }
+  .nav a { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; font-size:13px; color:rgba(25,25,25,.72); }
+  .nav a:hover { background:#ECECE8; } .nav a.on { background:#E9E9E4; color:var(--fg); font-weight:500; }
+  .navfoot { padding:12px 10px; border-top:1px solid var(--line); font-size:12px; display:flex; flex-direction:column; gap:6px; }
+  main { flex:999 1 560px; min-width:0; padding:28px 36px 40px; display:flex; flex-direction:column; gap:22px; }
+  .dot { width:6px; height:6px; border-radius:50%; display:inline-block; flex-shrink:0; }
+  .mono { font-family:var(--mono); } .muted { color:var(--muted); }
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:999px; font-size:12px; font-weight:500; white-space:nowrap; }
+  .pill.running { background:var(--run-bg); color:var(--run-fg); } .pill.running .dot { background:var(--run); }
+  .pill.queued { background:var(--q-bg); color:var(--q-fg); } .pill.queued .dot { background:var(--q); }
+  .pill.succeeded { background:var(--ok-bg); color:var(--ok-fg); } .pill.succeeded .dot { background:var(--ok); }
+  .pill.failed, .pill.stopped { background:var(--err-bg); color:var(--err-fg); } .pill.failed .dot, .pill.stopped .dot { background:var(--err); }
+  .dot.running { background:var(--run); } .dot.queued { background:var(--q); } .dot.succeeded { background:var(--ok); } .dot.failed, .dot.stopped { background:var(--err); } .dot.on { background:var(--ok); } .dot.off { background:#B4B2A9; }
+  .tag { display:inline-flex; align-items:center; padding:2px 7px; border-radius:6px; background:#F0F0EC; border:1px solid #E4E4DF; font-size:11px; font-family:var(--mono); color:#3D3D3A; white-space:nowrap; }
+  .tag.dark { background:var(--fg); border-color:var(--fg); color:#fff; }
+  .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid #E4E4DF; background:#fff; border-radius:999px; padding:5px 10px; font-size:12px; color:#3D3D3A; }
+  .chip:hover { border-color:#C9C9C3; }
+  .chip.danger { color:var(--err-fg); border-color:#F3D2D2; }
+  .chip:disabled { opacity:.4; cursor:default; }
+  select.chip { appearance:none; -webkit-appearance:none; padding-right:24px; background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%23191919' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='M2 4l3 3 3-3'/%3E%3C/svg%3E") no-repeat right 9px center; max-width:260px; text-overflow:ellipsis; }
+  h1 { margin:0; font-size:22px; font-weight:600; letter-spacing:-.015em; }
+  .sub { font-size:13px; margin-top:3px; color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line2); border-radius:12px; }
+  .view { display:none; } .view.on { display:flex; flex-direction:column; gap:22px; }
+  .empty { padding:28px; text-align:center; color:var(--muted); }
+
+  /* compose */
+  #v-new { align-items:center; padding-top:110px; gap:56px; }
+  .compose { width:100%; max-width:680px; display:flex; flex-direction:column; gap:18px; }
+  .compose h1 { font-size:30px; font-weight:500; letter-spacing:-.02em; text-align:center; }
+  .box { background:#fff; border:1px solid #E0E0DB; border-radius:18px; padding:18px 18px 12px; display:flex; flex-direction:column; gap:10px; box-shadow:0 1px 2px rgba(25,25,25,.04); }
+  .box textarea { width:100%; border:0; outline:0; resize:none; font-family:inherit; font-size:16px; line-height:1.55; color:var(--fg); background:transparent; padding:0; min-height:76px; }
+  .box .row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+  .go { width:36px; height:36px; border-radius:50%; background:var(--fg); border:0; display:inline-flex; align-items:center; justify-content:center; }
+  .go:disabled { opacity:.35; cursor:default; }
+  .willrun { display:flex; align-items:center; justify-content:center; gap:8px; font-size:12px; color:var(--muted); text-align:center; flex-wrap:wrap; }
+  .recent { width:100%; max-width:680px; display:flex; flex-direction:column; }
+  .recent .lbl { font-size:12px; font-weight:500; padding:0 4px 8px; color:var(--muted); }
+  .rrow { display:flex; align-items:center; gap:12px; padding:12px 4px; border-top:1px solid #ECECE8; font-size:13px; border-radius:8px; cursor:pointer; }
+  .rrow:first-of-type { border-top:0; } .rrow:hover { background:var(--hover); }
+  .rrow .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rrow .m { font-size:12px; white-space:nowrap; color:var(--muted); } .rrow .w { font-size:12px; width:72px; text-align:right; color:var(--muted); }
+
+  /* runs */
+  .head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; }
+  .ftabs { display:flex; align-items:center; gap:4px; background:var(--chip); border-radius:999px; padding:3px; }
+  .ftab { padding:5px 11px; border-radius:999px; font-size:13px; border:1px solid transparent; background:transparent; color:rgba(25,25,25,.64); }
+  .ftab.on { background:var(--fg); color:#fff; }
+  .stats { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; }
+  .stat { padding:16px 18px; } .stat .n { font-size:26px; font-weight:500; margin-top:6px; letter-spacing:-.02em; } .stat .l, .stat .s { font-size:12px; color:var(--muted); } .stat .s { margin-top:4px; }
+  .table { overflow:hidden; }
+  .trow { display:grid; grid-template-columns:2.4fr 1.2fr 1.1fr 1fr .8fr .8fr; gap:16px; align-items:center; padding:14px 20px; border-top:1px solid #ECECE8; font-size:13px; cursor:pointer; }
+  .trow.hdr { border-top:0; font-size:12px; padding:11px 20px; cursor:default; color:var(--muted); }
+  .trow:not(.hdr):hover { background:#FAFAF8; }
+  .trow .t { min-width:0; } .trow .t .n { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .trow .t .id { font-size:11px; margin-top:2px; color:var(--muted); font-family:var(--mono); }
+  .trow .r { text-align:right; }
+
+  /* machines */
+  .install { background:var(--fg); color:#E8E8E4; border-radius:12px; padding:14px 18px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; }
+  .install .l { font-size:12px; color:rgba(255,255,255,.56); } .install code { font-size:13px; }
+  .install button { font-size:12px; font-weight:500; background:rgba(255,255,255,.1); color:#fff; border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:6px 12px; }
+  .mgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:16px; }
+  .machine { padding:18px 20px; display:flex; flex-direction:column; gap:12px; }
+  .machine .nm { font-size:15px; font-weight:600; } .machine .os { font-size:12px; margin-top:2px; color:var(--muted); }
+  .tags { display:flex; flex-wrap:wrap; gap:4px; }
+  .kv { display:flex; justify-content:space-between; font-size:12px; padding:5px 0; border-top:1px solid #F0F0EC; }
+
+  /* run detail */
+  #v-run { align-items:center; padding-top:40px; }
+  .detail { width:100%; max-width:760px; display:flex; flex-direction:column; gap:22px; }
+  .detail h1 { font-size:22px; font-weight:500; line-height:1.35; }
+  .meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+  .meta b { color:var(--fg); font-weight:500; }
+  .timeline { padding:6px 20px; display:flex; flex-direction:column; }
+  .ev { display:flex; gap:14px; align-items:flex-start; padding:10px 0; font-size:13px; line-height:1.5; animation:fade .2s ease-in; }
+  .ev + .ev { border-top:1px solid #F5F5F2; }
+  @keyframes fade { from { opacity:0; transform:translateY(2px);} to { opacity:1; transform:none; } }
+  .ev .tm { font-family:var(--mono); font-size:11px; color:var(--faint); width:60px; flex-shrink:0; padding-top:2px; }
+  .ev .ic { width:18px; height:18px; border-radius:5px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; background:var(--chip); }
+  .ev .ic.err { background:var(--err-bg); } .ev .ic.ok { background:var(--ok-bg); } .ev .ic.run { background:var(--run-bg); }
+  .ev .body { min-width:0; flex:1; white-space:pre-wrap; word-break:break-word; }
+  .ev.quiet .body { color:var(--muted); }
+  .ev.stderr .body { font-family:var(--mono); font-size:12px; color:var(--muted); }
+  .code { font-family:var(--mono); font-size:12px; background:#F1F1ED; border-radius:6px; padding:1px 6px; color:#3D3D3A; word-break:break-all; }
+  .out { margin-top:6px; background:var(--fg); color:#E8E8E4; border-radius:8px; padding:10px 12px; font-family:var(--mono); font-size:11.5px; line-height:1.6; white-space:pre-wrap; max-height:150px; overflow:hidden; cursor:pointer; position:relative; }
+  .out.open { max-height:none; } .out.err { color:#F9C2C2; }
+  .out.more:not(.open)::after { content:"show more"; position:absolute; right:10px; bottom:6px; font-size:10px; color:rgba(255,255,255,.5); }
+  .cursor { display:inline-block; width:6px; height:12px; background:var(--fg); vertical-align:text-bottom; margin-left:3px; animation:blink 1s steps(2) infinite; }
+  @keyframes blink { to { visibility:hidden; } }
+  .foot { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; font-size:12px; color:var(--muted); }
+  .result { padding:14px 18px; display:flex; flex-direction:column; gap:8px; white-space:pre-wrap; word-break:break-word; }
+  .result.err { border-color:#F3D2D2; }
+  /* onboarding */
+  .gate { position:fixed; inset:0; background:var(--bg); display:none; align-items:center; justify-content:center; padding:24px; z-index:10; }
+  .gate.on { display:flex; }
+  .gate .box { max-width:520px; width:100%; gap:14px; padding:26px 28px 22px; }
+  .gate h1 { font-size:22px; font-weight:500; letter-spacing:-.02em; }
+  .gate p { margin:0; font-size:13px; color:var(--muted); line-height:1.55; }
+  .gate input { width:100%; border:1px solid #DEDEDA; border-radius:8px; padding:10px 12px; font:inherit; font-family:var(--mono); font-size:13px; }
+  .gate input:focus { outline:2px solid var(--fg); outline-offset:-1px; }
+  .gate .err { color:var(--err-fg); font-size:12px; min-height:16px; }
+  .btn { background:var(--fg); color:#fff; border:0; border-radius:999px; padding:10px 18px; font-size:13px; font-weight:500; }
+  .btn.light { background:#fff; color:var(--fg); border:1px solid #DEDEDA; }
+  .how { width:100%; max-width:680px; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; }
+  .how .card { padding:14px 16px; font-size:12px; color:var(--muted); line-height:1.5; }
+  .how .card b { display:block; font-size:13px; color:var(--fg); font-weight:500; margin-bottom:4px; }
+  .how .card .n { font-family:var(--mono); font-size:11px; color:var(--faint); margin-bottom:8px; }
+  .steps { display:flex; flex-direction:column; }
+  .step { display:flex; gap:14px; padding:14px 0; border-top:1px solid #F0F0EC; }
+  .step:first-child { border-top:0; padding-top:4px; }
+  .step .num { width:22px; height:22px; border-radius:50%; background:var(--chip); font-size:11px; font-weight:600; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
+  .step .num.done { background:var(--ok-bg); color:var(--ok-fg); }
+  .step .body { flex:1; min-width:0; font-size:13px; } .step .body p { margin:0 0 8px; } .step .body .muted { font-size:12px; }
+  .cmd { display:flex; align-items:center; gap:10px; background:var(--fg); color:#E8E8E4; border-radius:8px; padding:9px 12px; font-family:var(--mono); font-size:12px; line-height:1.5; }
+  .cmd code { flex:1; min-width:0; white-space:pre-wrap; word-break:break-all; }
+  .cmd button { font-size:11px; font-weight:500; background:rgba(255,255,255,.1); color:#fff; border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:4px 10px; flex-shrink:0; }
+  .waiting { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+  @media (max-width:860px) { .how { grid-template-columns:1fr; } nav.side { width:100%; border-right:0; border-bottom:1px solid var(--line); } .nav { flex-direction:row; } .navfoot { display:none; } main { padding:20px 16px; } .stats { grid-template-columns:repeat(2, minmax(0,1fr)); } .trow { grid-template-columns:2fr 1fr 1fr; } .trow > :nth-child(n+4) { display:none; } #v-new { padding-top:40px; } }
 </style>
 </head>
 <body>
-<header>
-  <h1>AgentCloud</h1>
-  <span class="muted" id="conn">not connected</span>
-  <span class="spacer"></span>
-  <button class="secondary" id="keybtn">Set developer key</button>
-</header>
-<main>
-  <aside>
-    <form id="form">
-      <label for="task">Task</label>
-      <textarea id="task" placeholder="e.g. Summarise what this repository does in three sentences."></textarea>
-      <div class="row" style="margin-top:10px">
-        <div style="flex:1">
-          <label for="model">Model</label>
-          <select id="model">
-            <option value="claude-sonnet-5-5" selected>claude-sonnet-5-5</option>
-            <option value="claude-opus-5-5">claude-opus-5-5</option>
-            <option value="claude-haiku-5-5">claude-haiku-5-5</option>
-          </select>
-        </div>
-        <div style="flex:1">
-          <label for="repo">Repo</label>
-          <select id="repo"><option value="">(no workers yet)</option></select>
-        </div>
+<div class="gate" id="gate">
+  <form class="box" id="gateform">
+    <h1>Connect to your control plane</h1>
+    <p>This page is served by <span class="mono">acd</span>, the AgentCloud control plane, and it needs the developer key to talk to its API. The key is <span class="mono">ACD_DEV_KEY</span> in the <span class="mono">.env</span> file next to where you started <span class="mono">acd</span>. It never leaves this browser except as a header to this same origin.</p>
+    <label for="gatekey" style="font-size:12px;font-weight:500">Developer key</label>
+    <input id="gatekey" type="password" autocomplete="off" placeholder="paste ACD_DEV_KEY">
+    <div class="err" id="gateerr"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" type="submit">Connect</button></div>
+  </form>
+</div>
+<div class="app">
+  <nav class="side">
+    <div class="logo"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="5" cy="10" r="3.2" fill="#191919"/><circle cx="14" cy="5.5" r="3.2" fill="#191919"/><circle cx="14" cy="14.5" r="3.2" fill="#191919"/></svg>AgentCloud</div>
+    <div class="nav">
+      <a href="#/" data-nav="new"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 2v12M2 8h12"/></svg>New</a>
+      <a href="#/runs" data-nav="runs"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7h6M5 10h4"/></svg>Runs</a>
+      <a href="#/machines" data-nav="machines"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="4.5" rx="1.5"/><rect x="2" y="9" width="12" height="4.5" rx="1.5"/><path d="M5 4.75h.01M5 11.25h.01"/></svg>Machines</a>
+    </div>
+    <div style="flex-grow:1"></div>
+    <div class="navfoot">
+      <div style="display:flex;align-items:center;gap:7px"><span class="dot off" id="nf-dot"></span><span id="nf-text">connecting…</span></div>
+      <div class="muted" id="nf-sub"><button class="chip" id="keybtn" style="padding:2px 8px">developer key</button></div>
+    </div>
+  </nav>
+
+  <main>
+    <!-- New / compose -->
+    <section class="view" id="v-new">
+      <div class="compose" id="onboard" style="display:none">
+        <h1>Connect your first machine</h1>
+        <section class="card" style="padding:18px 22px 10px">
+          <div class="steps">
+            <div class="step"><span class="num">1</span><div class="body"><p>Pick a machine that already has <b>Claude Code installed and signed in</b> and your repos checked out. Your laptop is fine. It needs no open ports, only a way to reach this page's address.</p><div class="muted">Check with <span class="mono">claude --version</span> on that machine.</div></div></div>
+            <div class="step"><span class="num">2</span><div class="body"><p>Build the worker there (Rust 1.80+), from this repository:</p><div class="cmd"><code>cargo build --release -p acw</code><button type="button" data-copy="cargo build --release -p acw">Copy</button></div></div></div>
+            <div class="step"><span class="num">3</span><div class="body"><p>Start it, pointed at this control plane. The token is the one this control plane was started with; the command below has it filled in.</p><div class="cmd"><code id="ob-cmd">acw run --control … --token … --repos ~/Code</code><button type="button" id="ob-copy">Copy</button></div><div class="muted" style="margin-top:8px">If this page's address is only reachable from this machine, use the control plane's Tailscale or LAN address instead of <span class="mono" id="ob-origin"></span>.</div></div></div>
+            <div class="step"><span class="num" id="ob-num4">4</span><div class="body"><p>Watch it appear. The worker checks Claude Code, Codex and Ollama, scans your repos, and registers within a few seconds.</p><div class="waiting" id="ob-wait"><span class="dot off"></span><span>Waiting for the first heartbeat…</span></div></div></div>
+          </div>
+        </section>
       </div>
-      <div class="row" style="margin-top:12px">
-        <button type="submit" id="runbtn">Run</button>
-        <span class="muted" id="formmsg"></span>
+      <div class="how" id="how">
+        <div class="card"><div class="n">1</div><b>You type a task here</b>The page queues it with a model and a repo. Nothing runs on this server.</div>
+        <div class="card"><div class="n">2</div><b>Your machine picks it up</b>A worker on a machine with that repo runs Claude Code there, with the sign-in it already has. No API keys.</div>
+        <div class="card"><div class="n">3</div><b>You watch it live</b>Every message and tool call streams back here as it happens. Stop at any time.</div>
       </div>
-    </form>
-    <div>
-      <label>Workers</label>
-      <div class="workers" id="workers"><span class="muted">none registered</span></div>
-    </div>
-    <div>
-      <label>Recent runs</label>
-      <div class="runs" id="runs"></div>
-    </div>
-  </aside>
-  <section class="view">
-    <div class="viewhead">
-      <span class="chip" id="status">idle</span>
-      <div class="task" id="viewtask">Pick a repo, type a task, press Run.</div>
-      <span class="muted" id="viewmeta"></span>
-      <button class="danger" id="stopbtn" disabled>Stop</button>
-    </div>
-    <div id="narration"><div class="empty">The agent's narration will appear here, live.</div></div>
-  </section>
-</main>
+      <div class="compose" id="composebox">
+        <h1>What should run?</h1>
+        <form class="box" id="form">
+          <label for="task" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">What should run</label>
+          <textarea id="task" rows="3" placeholder="Fix the failing CI on main, get the tests green, open a PR."></textarea>
+          <div class="row">
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <select class="chip" id="model" aria-label="Model">
+                <option value="claude-sonnet-5-5" selected>Claude Sonnet 5.5</option>
+                <option value="claude-opus-5-5">Claude Opus 5.5</option>
+                <option value="claude-haiku-5-5">Claude Haiku 5.5</option>
+              </select>
+              <select class="chip" id="repo" aria-label="Repo"><option value="">no online workers</option></select>
+            </div>
+            <button class="go" type="submit" id="runbtn" aria-label="Run"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button>
+          </div>
+        </form>
+        <div class="willrun" id="willrun"></div>
+      </div>
+      <div class="recent" id="recent"></div>
+    </section>
+
+    <!-- Runs -->
+    <section class="view" id="v-runs">
+      <header class="head">
+        <div><h1>Runs</h1><div class="sub">Work lands on whichever of your machines has the repo and the agent</div></div>
+        <div class="ftabs" id="ftabs">
+          <button class="ftab on" data-f="all">All</button><button class="ftab" data-f="running">Running</button><button class="ftab" data-f="queued">Queued</button><button class="ftab" data-f="failed">Failed</button>
+        </div>
+      </header>
+      <section class="stats" id="stats"></section>
+      <section class="card table" id="runtable"></section>
+    </section>
+
+    <!-- Machines -->
+    <section class="view" id="v-machines">
+      <header class="head">
+        <div><h1>Machines</h1><div class="sub">Each worker reports what it is on every heartbeat</div></div>
+      </header>
+      <section class="install">
+        <div><div class="l">Install a worker on any machine you own</div><code class="mono" id="installcmd">acw run --control … --token … --repos ~/Code</code></div>
+        <button id="copyinstall">Copy</button>
+      </section>
+      <section class="mgrid" id="mgrid"></section>
+    </section>
+
+    <!-- Run detail -->
+    <section class="view" id="v-run">
+      <div class="detail">
+        <header style="display:flex;flex-direction:column;gap:10px">
+          <a href="#/runs" class="muted" style="font-size:12px">← Runs</a>
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+            <h1 id="d-task"></h1>
+            <button class="chip danger" id="stopbtn" style="flex-shrink:0" disabled>Stop</button>
+          </div>
+          <div class="meta" id="d-meta"></div>
+        </header>
+        <section class="card timeline" id="timeline"></section>
+        <section class="card result" id="d-result" style="display:none"></section>
+        <div class="foot"><span id="d-foot"></span><span class="mono" id="d-id"></span></div>
+      </div>
+    </section>
+  </main>
+</div>
+
 <script>
 (function () {
   'use strict';
   const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const MODEL_NAMES = { 'claude-opus-5-5': 'Opus 5.5', 'claude-sonnet-5-5': 'Sonnet 5.5', 'claude-haiku-5-5': 'Haiku 5.5' };
+  const modelName = (m) => MODEL_NAMES[m] || m;
+
+  // ---- auth ----
   let key = '';
   try { key = localStorage.getItem('acd_dev_key') || ''; } catch (_) {}
-  let currentRun = null;
-  let abort = null;
-
-  function askKey(force) {
-    if (key && !force) return key;
-    const k = window.prompt('Developer key (ACD_DEV_KEY on the control plane):', '');
-    if (k) { key = k.trim(); try { localStorage.setItem('acd_dev_key', key); } catch (_) {} }
-    return key;
-  }
-  $('keybtn').onclick = () => { askKey(true); refresh(); };
+  function askKey() { return key; }
+  function showGate(msg) { $('gate').classList.add('on'); $('gateerr').textContent = msg || ''; $('gatekey').focus(); }
+  $('keybtn').onclick = () => showGate('');
+  $('gateform').onsubmit = async (e) => {
+    e.preventDefault();
+    const k = $('gatekey').value.trim();
+    if (!k) return;
+    const r = await fetch('/v1/workers', { headers: { 'Authorization': 'Bearer ' + k } });
+    if (r.status === 401) { $('gateerr').textContent = 'That key was not accepted. Check ACD_DEV_KEY in .env on the control plane.'; return; }
+    key = k; try { localStorage.setItem('acd_dev_key', key); } catch (_) {}
+    $('gate').classList.remove('on'); $('gatekey').value = '';
+    refresh();
+  };
 
   async function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ 'Authorization': 'Bearer ' + askKey(false) }, opts.headers || {});
     const r = await fetch(path, opts);
-    if (r.status === 401) { $('conn').textContent = 'unauthorised: set the developer key'; throw new Error('unauthorised'); }
+    if (r.status === 401) { setConn(false, 'not connected'); showGate(key ? 'The saved key was rejected. Paste the current ACD_DEV_KEY.' : ''); throw new Error('unauthorised'); }
     if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
     return r.status === 204 ? null : r.json();
   }
 
-  // ---- workers & repo dropdown ----
-  function renderWorkers(ws) {
-    const box = $('workers');
-    box.innerHTML = '';
-    if (!ws.length) { box.innerHTML = '<span class="muted">none registered</span>'; }
-    const repoSel = $('repo');
-    const prev = repoSel.value;
-    repoSel.innerHTML = '';
-    const seen = new Set();
-    ws.forEach(w => {
-      const c = w.capabilities || {};
-      const a = c.agents || {};
-      const d = document.createElement('div');
-      d.className = 'worker';
-      const claude = a.claude ? ('Claude Code ' + a.claude.version + (a.claude.signed_in ? ' · signed in' : ' · NOT signed in')) : 'no Claude Code';
-      const extras = [a.codex ? 'Codex ' + a.codex.version : null, a.ollama ? 'Ollama (' + (a.ollama.models || []).length + ' models)' : null].filter(Boolean).join(' · ');
-      d.innerHTML = '<div class="name"><span class="dot ' + (w.online ? 'on' : '') + '"></span>' + esc(w.display_name) + ' <span class="muted">' + esc(w.id) + '</span></div>'
-        + '<div>' + esc(claude) + (extras ? ' · ' + esc(extras) : '') + '</div>'
-        + '<div class="muted">' + (c.repos || []).length + ' repos' + (w.online ? '' : ' · offline') + '</div>';
-      box.appendChild(d);
-      if (w.online) (c.repos || []).forEach(r => {
-        if (seen.has(r.name)) return; seen.add(r.name);
-        const o = document.createElement('option'); o.value = r.name; o.textContent = r.name + '  (' + w.display_name + ')';
-        repoSel.appendChild(o);
-      });
-    });
-    if (!seen.size) { const o = document.createElement('option'); o.value = ''; o.textContent = '(no online workers)'; repoSel.appendChild(o); }
-    if (prev && seen.has(prev)) repoSel.value = prev;
-  }
+  // ---- state ----
+  let workers = [], runs = [], filter = 'all', setup = null;
+  let currentRun = null, abort = null;
 
-  function renderRuns(rs) {
-    const box = $('runs');
-    box.innerHTML = '';
-    rs.forEach(r => {
-      const d = document.createElement('div');
-      d.className = 'run';
-      d.innerHTML = '<span class="chip ' + r.status + '">' + r.status + '</span><span class="t">' + esc(r.task) + '</span><span class="muted">' + esc(r.repo) + '</span>';
-      d.onclick = () => openRun(r.id);
-      box.appendChild(d);
-    });
+  function setConn(ok, text) {
+    $('nf-dot').className = 'dot ' + (ok ? 'on' : 'off');
+    $('nf-text').textContent = text;
   }
+  function rel(iso) {
+    if (!iso) return '';
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return Math.round(s) + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return Math.round(s / 86400) + 'd ago';
+  }
+  function dur(run) {
+    if (!run.started_at) return '—';
+    const end = run.finished_at ? new Date(run.finished_at) : new Date();
+    const s = Math.max(0, (end - new Date(run.started_at)) / 1000);
+    return s < 60 ? Math.round(s) + 's' : Math.floor(s / 60) + 'm ' + String(Math.round(s % 60)).padStart(2, '0') + 's';
+  }
+  const hhmmss = (iso) => new Date(iso).toLocaleTimeString([], { hour12: false });
+  const onlineWorkers = () => workers.filter(w => w.online);
+  function workerFor(repo) { return onlineWorkers().find(w => (w.capabilities.repos || []).some(r => r.name === repo)); }
 
+  // ---- routing ----
+  function route() {
+    const h = location.hash || '#/';
+    const m = h.match(/^#\/runs\/([0-9a-f-]{36})$/);
+    let view = 'new';
+    if (m) view = 'run'; else if (h === '#/runs') view = 'runs'; else if (h === '#/machines') view = 'machines';
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + view));
+    document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === view || (view === 'run' && a.dataset.nav === 'runs')));
+    if (view === 'run') openRun(m[1]); else if (abort) { abort.abort(); abort = null; currentRun = null; }
+  }
+  window.addEventListener('hashchange', route);
+
+  // ---- data refresh ----
   async function refresh() {
     try {
-      const [ws, rs] = await Promise.all([api('/v1/workers'), api('/v1/runs?limit=30')]);
-      renderWorkers(ws); renderRuns(rs);
-      $('conn').textContent = ws.filter(w => w.online).length + ' worker(s) online';
-    } catch (e) { if (e.message !== 'unauthorised') $('conn').textContent = 'control plane unreachable: ' + e.message; }
+      [workers, runs] = await Promise.all([api('/v1/workers'), api('/v1/runs?limit=50')]);
+      if (!setup) { try { setup = await api('/v1/setup'); } catch (_) {} }
+      const on = onlineWorkers().length;
+      setConn(on > 0, on + ' machine' + (on === 1 ? '' : 's') + ' online');
+      renderOnboarding(on);
+      renderRepoSelect(); renderWillRun(); renderRecent(); renderRuns(); renderMachines();
+      $('installcmd').textContent = connectCmd(true);
+    } catch (e) { if (e.message !== 'unauthorised') setConn(false, 'control plane unreachable'); }
   }
 
-  // ---- submit ----
+  // ---- onboarding ----
+  function connectCmd(masked) {
+    const tok = setup && setup.worker_token ? (masked ? setup.worker_token.slice(0, 4) + '••••••••' : setup.worker_token) : '<worker token>';
+    return 'acw run --control ' + location.origin + ' --token ' + tok + ' --repos ~/Code';
+  }
+  function copyText(t, btn) { try { navigator.clipboard.writeText(t); const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = o, 1500); } catch (_) {} }
+  document.addEventListener('click', (e) => { const b = e.target.closest('[data-copy]'); if (b) copyText(b.dataset.copy, b); });
+  $('ob-copy').onclick = (e) => copyText(connectCmd(false), e.target);
+  function renderOnboarding(online) {
+    const first = workers.length === 0;
+    const show = online === 0;
+    $('onboard').style.display = show ? '' : 'none';
+    $('composebox').style.display = show ? 'none' : '';
+    $('how').style.display = (show || runs.length === 0) ? '' : 'none';
+    if (!show) return;
+    $('ob-cmd').textContent = connectCmd(true);
+    $('ob-origin').textContent = location.origin;
+    $('onboard').querySelector('h1').textContent = first ? 'Connect your first machine' : 'No machine is online';
+    $('ob-wait').innerHTML = first ? '<span class="dot off"></span><span>Waiting for the first heartbeat…</span>'
+      : '<span class="dot off"></span><span>' + workers.length + ' machine' + (workers.length === 1 ? ' is' : 's are') + ' registered but silent. Start <span class="mono">acw run</span> again on ' + esc(workers.map(w => w.display_name).join(', ')) + '.</span>';
+  }
+
+  // ---- compose ----
+  function renderRepoSelect() {
+    const sel = $('repo'); const prev = sel.value; sel.innerHTML = '';
+    const seen = new Set();
+    onlineWorkers().forEach(w => (w.capabilities.repos || []).forEach(r => {
+      if (seen.has(r.name)) return; seen.add(r.name);
+      const o = document.createElement('option'); o.value = r.name; o.textContent = r.name; sel.appendChild(o);
+    }));
+    if (!seen.size) { const o = document.createElement('option'); o.value = ''; o.textContent = 'no online workers'; sel.appendChild(o); }
+    if (prev && seen.has(prev)) sel.value = prev;
+    $('runbtn').disabled = !seen.size;
+  }
+  function renderWillRun() {
+    const repo = $('repo').value; const w = repo && workerFor(repo); const el = $('willrun');
+    if (!w) { el.innerHTML = onlineWorkers().length ? '' : '<span class="dot off"></span><span>No machine online yet. Start <span class="mono">acw run</span> on one and it will appear here.</span>'; return; }
+    const c = (w.capabilities.agents || {}).claude;
+    const signed = c && c.signed_in;
+    el.innerHTML = '<span class="dot ' + (signed ? 'on' : 'off') + '"></span><span>Will run on <b style="color:#191919;font-weight:500">' + esc(w.display_name) + '</b> · ' + (signed ? 'Claude Code is signed in' : 'Claude Code is <b style="color:#A32323">not signed in</b>') + ' and ' + esc(repo) + ' is checked out there</span>';
+  }
+  $('repo').addEventListener('change', renderWillRun);
+  function renderRecent() {
+    const el = $('recent');
+    if (!runs.length) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="lbl">Recent</div>' + runs.slice(0, 6).map(r =>
+      '<a class="rrow" href="#/runs/' + r.id + '"><span class="dot ' + r.status + '"></span><span class="t">' + esc(r.task) + '</span><span class="m">' + esc(modelName(r.model)) + ' · ' + esc(r.worker_id || r.repo) + '</span><span class="w mono">' + (r.status === 'running' ? dur(r) : rel(r.finished_at || r.created_at)) + '</span></a>'
+    ).join('');
+  }
   $('form').onsubmit = async (ev) => {
     ev.preventDefault();
     const task = $('task').value.trim(), model = $('model').value, repo = $('repo').value;
-    if (!task || !repo) { $('formmsg').textContent = 'task and repo are required'; return; }
-    $('runbtn').disabled = true; $('formmsg').textContent = 'queueing…';
+    if (!task || !repo) return;
+    $('runbtn').disabled = true;
     try {
       const r = await api('/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task, model, repo }) });
-      $('formmsg').textContent = '';
-      openRun(r.id);
+      $('task').value = '';
+      location.hash = '#/runs/' + r.id;
       refresh();
-    } catch (e) { $('formmsg').textContent = e.message; }
+    } catch (e) { $('willrun').innerHTML = '<span class="dot failed"></span><span>' + esc(e.message) + '</span>'; }
     $('runbtn').disabled = false;
   };
 
-  $('stopbtn').onclick = async () => {
-    if (!currentRun) return;
-    $('stopbtn').disabled = true;
-    try { await api('/v1/runs/' + currentRun + '/stop', { method: 'POST' }); } catch (e) { addStatus('stop failed: ' + e.message); }
-  };
-
-  // ---- live view ----
-  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-  function add(html, cls) {
-    const n = $('narration');
-    if (n.firstElementChild && n.firstElementChild.classList.contains('empty')) n.innerHTML = '';
-    const d = document.createElement('div'); d.className = 'ev ' + cls; d.innerHTML = html; n.appendChild(d);
-    n.scrollTop = n.scrollHeight;
-    return d;
+  // ---- runs ----
+  $('ftabs').addEventListener('click', (e) => {
+    const b = e.target.closest('.ftab'); if (!b) return;
+    filter = b.dataset.f; document.querySelectorAll('.ftab').forEach(x => x.classList.toggle('on', x === b)); renderRuns();
+  });
+  function renderRuns() {
+    const today = new Date().toDateString();
+    const n = (s) => runs.filter(r => r.status === s).length;
+    const ok = runs.filter(r => r.status === 'succeeded' && new Date(r.finished_at).toDateString() === today).length;
+    const bad = runs.filter(r => (r.status === 'failed' || r.status === 'stopped') && new Date(r.finished_at).toDateString() === today).length;
+    const cost = runs.reduce((a, r) => a + ((r.result && r.result.total_cost_usd) || 0), 0);
+    const machines = new Set(runs.filter(r => r.status === 'running').map(r => r.worker_id)).size;
+    $('stats').innerHTML =
+      '<div class="card stat"><div class="l">Running</div><div class="n">' + n('running') + '</div><div class="s">on ' + machines + ' machine' + (machines === 1 ? '' : 's') + '</div></div>' +
+      '<div class="card stat"><div class="l">Queued</div><div class="n">' + n('queued') + '</div><div class="s">' + (n('queued') ? 'waiting for a machine with the repo' : 'nothing waiting') + '</div></div>' +
+      '<div class="card stat"><div class="l">Succeeded today</div><div class="n">' + ok + '</div><div class="s">' + bad + ' failed or stopped</div></div>' +
+      '<div class="card stat"><div class="l">Agent cost</div><div class="n">$' + cost.toFixed(2) + '</div><div class="s">reported by Claude Code, last ' + runs.length + ' runs</div></div>';
+    const list = runs.filter(r => filter === 'all' || (filter === 'failed' ? (r.status === 'failed' || r.status === 'stopped') : r.status === filter));
+    $('runtable').innerHTML =
+      '<div class="trow hdr"><div>Task</div><div>Repo</div><div>Machine</div><div>Status</div><div>Duration</div><div class="r">Cost</div></div>' +
+      (list.length ? list.map(r => {
+        const w = workers.find(x => x.id === r.worker_id);
+        const c = r.result && r.result.total_cost_usd;
+        return '<a class="trow" href="#/runs/' + r.id + '"><div class="t"><div class="n">' + esc(r.task) + '</div><div class="id">' + r.id.slice(0, 8) + ' · ' + esc(r.model) + '</div></div>' +
+          '<div><span class="tag">' + esc(r.repo) + '</span></div>' +
+          '<div style="display:flex;align-items:center;gap:7px">' + (r.worker_id ? '<span class="dot ' + (w && w.online ? 'on' : 'off') + '"></span>' + esc(r.worker_id) : '<span class="muted">waiting for a machine</span>') + '</div>' +
+          '<div><span class="pill ' + r.status + '"><span class="dot"></span>' + r.status[0].toUpperCase() + r.status.slice(1) + '</span></div>' +
+          '<div class="mono muted">' + dur(r) + '</div><div class="mono r">' + (c != null ? '$' + Number(c).toFixed(3) : '<span class="muted">—</span>') + '</div></a>';
+      }).join('') : '<div class="empty">No runs' + (filter !== 'all' ? ' in this state' : ' yet') + '.</div>') +
+      '<div class="trow hdr" style="border-top:1px solid #ECECE8;display:flex;justify-content:space-between"><span>Showing ' + list.length + ' of ' + runs.length + ' runs</span><span class="mono">GET /v1/runs?limit=50</span></div>';
   }
-  function addStatus(t) { add(esc(t), 'status'); }
-  function setStatus(s) { const c = $('status'); c.className = 'chip ' + s; c.textContent = s; $('stopbtn').disabled = !(s === 'queued' || s === 'running'); }
 
-  const toolNames = {};
-  let lastAssistantText = '';
-  function render(ev) {
-    const p = ev.payload || {};
+  // ---- machines ----
+  $('copyinstall').onclick = () => { try { navigator.clipboard.writeText($('installcmd').textContent); $('copyinstall').textContent = 'Copied'; setTimeout(() => $('copyinstall').textContent = 'Copy', 1500); } catch (_) {} };
+  function renderMachines() {
+    const el = $('mgrid');
+    if (!workers.length) { el.innerHTML = '<div class="card empty">No machines yet. Run the install line above on one you own.</div>'; return; }
+    el.innerHTML = workers.map(w => {
+      const c = w.capabilities || {}, a = c.agents || {};
+      const tags = [];
+      if (a.claude) tags.push('<span class="tag dark">claude-code ' + esc(a.claude.version) + (a.claude.signed_in ? ' · signed in' : ' · not signed in') + '</span>');
+      if (a.codex) tags.push('<span class="tag dark">codex ' + esc(a.codex.version) + '</span>');
+      if (a.ollama) (a.ollama.models || []).slice(0, 4).forEach(m => tags.push('<span class="tag">ollama:' + esc(m) + '</span>'));
+      if (!a.claude && !a.codex && !a.ollama) tags.push('<span class="tag muted" style="border-style:dashed;background:transparent">no agents installed</span>');
+      const repos = c.repos || [];
+      repos.slice(0, 6).forEach(r => tags.push('<span class="tag">repo:' + esc(r.name) + '</span>'));
+      if (repos.length > 6) tags.push('<span class="tag muted">+' + (repos.length - 6) + ' more</span>');
+      const running = runs.filter(r => r.status === 'running' && r.worker_id === w.id).length;
+      return '<article class="card machine"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px"><div><div class="nm">' + esc(w.display_name) + '</div><div class="os">' + esc(c.os || '') + (c.hostname ? ' · ' + esc(c.hostname) : '') + '</div></div>' +
+        '<span class="pill ' + (w.online ? 'succeeded' : 'stopped') + '"><span class="dot"></span>' + (w.online ? 'Online' : 'Offline') + '</span></div>' +
+        '<div class="tags">' + tags.join('') + '</div>' +
+        '<div><div class="kv"><span class="muted">Running</span><span>' + running + ' run' + (running === 1 ? '' : 's') + '</span></div><div class="kv"><span class="muted">Repos</span><span>' + repos.length + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div></div></article>';
+    }).join('');
+  }
+
+  // ---- run detail ----
+  const ICONS = {
+    start: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round"><path d="M2 5h6M5 2l3 3-3 3"/></svg>',
+    text: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round"><path d="M2 3h6M2 5.5h6M2 8h4"/></svg>',
+    tool: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round"><path d="M2 2l6 3-6 3z"/></svg>',
+    edit: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round"><path d="M2 8l1.5-5h3L8 8M3 6h4"/></svg>',
+    read: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round"><circle cx="4.5" cy="4.5" r="3"/><path d="M7 7l2 2"/></svg>',
+    ok: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#0B6B3A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.5l2 2 4-4.5"/></svg>',
+    err: '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#A32323" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l4 4M7 3l-4 4"/></svg>',
+    dot: '<span class="dot running"></span>'
+  };
+  const toolIcon = (name) => /^(Read|Grep|Glob|WebFetch|WebSearch)$/.test(name) ? ICONS.read : /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) ? ICONS.edit : ICONS.tool;
+  const toolVerb = (name) => ({ Bash: 'Ran', Read: 'Read', Grep: 'Searched', Glob: 'Listed', Edit: 'Edited', Write: 'Wrote', MultiEdit: 'Edited', WebFetch: 'Fetched', WebSearch: 'Searched the web for', Agent: 'Delegated', Task: 'Delegated' }[name] || ('Called ' + name));
+
+  const tools = {}; let lastText = ''; let cursorRow = null;
+  function row(at, icon, bodyHtml, cls, iconCls) {
+    const tl = $('timeline');
+    if (cursorRow) { cursorRow.remove(); cursorRow = null; }
+    const d = document.createElement('div'); d.className = 'ev ' + (cls || '');
+    d.innerHTML = '<span class="tm">' + (at ? hhmmss(at) : '') + '</span><span class="ic ' + (iconCls || '') + '" aria-hidden="true">' + icon + '</span><div class="body">' + bodyHtml + '</div>';
+    tl.appendChild(d); return d;
+  }
+  function showCursor(text) {
+    if (cursorRow) cursorRow.remove();
+    cursorRow = document.createElement('div'); cursorRow.className = 'ev quiet';
+    cursorRow.innerHTML = '<span class="tm"></span><span class="ic run" aria-hidden="true">' + ICONS.dot + '</span><div class="body">' + esc(text) + '<span class="cursor"></span></div>';
+    $('timeline').appendChild(cursorRow);
+  }
+  function setStatus(run, status) {
+    run.status = status;
+    $('stopbtn').disabled = !(status === 'queued' || status === 'running');
+    renderMeta(run);
+  }
+  function renderMeta(run) {
+    const w = workers.find(x => x.id === run.worker_id);
+    const live = run.status === 'running' || run.status === 'queued';
+    $('d-meta').innerHTML = '<span class="pill ' + run.status + '"><span class="dot"></span>' + run.status[0].toUpperCase() + run.status.slice(1) + (run.started_at ? ' · ' + dur(run) : '') + '</span>' +
+      '<span>Claude ' + esc(modelName(run.model)) + '</span><span>·</span>' +
+      (run.worker_id ? '<span style="display:inline-flex;align-items:center;gap:6px"><span class="dot ' + (w && w.online ? 'on' : 'off') + '"></span><b>' + esc(run.worker_id) + '</b></span><span>·</span><span>picked because Claude Code is signed in and ' + esc(run.repo) + ' is checked out there</span>'
+        : '<span>waiting for a machine that has ' + esc(run.repo) + '</span>');
+    $('d-foot').textContent = live ? 'The narration updates live; you can close this page and come back.' : 'Finished ' + rel(run.finished_at) + '. Reopen any time; the full narration is kept.';
+  }
+
+  function render(run, ev) {
+    const p = ev.payload || {}, at = ev.at;
     switch (ev.kind) {
       case 'status':
-        setStatus(p.status);
-        addStatus('status → ' + p.status + (p.worker_id ? ' on ' + p.worker_id : '') + (p.reason ? ' (' + p.reason + ')' : ''));
+        setStatus(run, p.status);
+        if (p.status === 'running') { run.started_at = run.started_at || at; row(at, ICONS.start, 'Started on <b>' + esc(p.worker_id || run.worker_id || '') + '</b> in <span class="code">' + esc(run.repo) + '</span>', 'quiet'); showCursor('Starting Claude Code'); }
+        else if (p.status === 'queued') { row(at, ICONS.dot, 'Queued. Waiting for a machine that has <span class="code">' + esc(run.repo) + '</span>', 'quiet', 'run'); }
+        else { run.finished_at = run.finished_at || at; row(at, p.status === 'succeeded' ? ICONS.ok : ICONS.err, p.status[0].toUpperCase() + p.status.slice(1) + (p.reason ? ' (' + esc(p.reason) + ')' : ''), 'quiet', p.status === 'succeeded' ? 'ok' : 'err'); }
         break;
-      case 'stop_requested': addStatus('stop requested, waiting for the worker to kill the agent…'); break;
-      case 'started': addStatus('worker started ' + (p.command || 'the agent') + ' in ' + (p.cwd || '')); break;
-      case 'agent_init': addStatus('Claude Code session ' + (p.session_id || '') + ' with model ' + (p.model || '')); break;
-      case 'assistant_text': lastAssistantText = p.text || ''; add(esc(p.text), 'text'); break;
-      case 'assistant_thinking': add('thinking…', 'thinking'); break;
-      case 'tool_use':
-        toolNames[p.id] = p.name;
-        add('<span class="name">▶ ' + esc(p.name) + '</span> <span class="sum">' + esc(p.summary) + '</span>', 'tool');
-        break;
+      case 'stop_requested': row(at, ICONS.err, 'Stop requested. Waiting for the machine to end the agent.', 'quiet', 'err'); showCursor('Stopping'); break;
+      case 'stopped': row(at, ICONS.err, 'Agent process ended with ' + esc(p.signal || 'a signal'), 'quiet', 'err'); break;
+      case 'started': row(at, ICONS.start, 'Launched <span class="code">' + esc(p.command) + '</span>', 'quiet'); showCursor('Waiting for the first message'); break;
+      case 'agent_init': row(at, ICONS.start, 'Claude Code session started with ' + esc(p.model || run.model), 'quiet'); showCursor('Thinking'); break;
+      case 'assistant_thinking': showCursor('Thinking'); break;
+      case 'assistant_text': lastText = p.text || ''; row(at, ICONS.text, esc(p.text)); showCursor('Working'); break;
+      case 'tool_use': {
+        tools[p.id] = { name: p.name, row: row(at, toolIcon(p.name), toolVerb(p.name) + ' <span class="code">' + esc(p.summary) + '</span>') };
+        showCursor('Running ' + p.name); break;
+      }
       case 'tool_result': {
-        const name = toolNames[p.tool_use_id] || 'tool';
-        const c = p.content || '';
-        const first = c.split('\n')[0].slice(0, 120);
-        add('<details><summary>' + (p.is_error ? '✖ ' : '✔ ') + esc(name) + ' result' + (p.truncated ? ' (truncated)' : '') + (first ? ': <span class="muted">' + esc(first) + '</span>' : '') + '</summary><pre>' + esc(c) + '</pre></details>', 'toolres' + (p.is_error ? ' error' : ''));
-        break;
+        const t = tools[p.tool_use_id];
+        const html = '<div class="out' + (p.is_error ? ' err' : '') + '">' + esc(p.content || '(no output)') + (p.truncated ? '\n… truncated to 2 KB' : '') + '</div>';
+        let holder;
+        if (t) { t.row.querySelector('.body').insertAdjacentHTML('beforeend', html); if (p.is_error) t.row.querySelector('.ic').classList.add('err'); holder = t.row; }
+        else holder = row(at, p.is_error ? ICONS.err : ICONS.ok, html, '', p.is_error ? 'err' : '');
+        const o = holder.querySelector('.out:last-child'); if (o && o.scrollHeight > o.clientHeight + 2) o.classList.add('more');
+        showCursor('Thinking'); break;
       }
       case 'result': {
         const meta = [];
         if (p.duration_ms != null) meta.push((p.duration_ms / 1000).toFixed(1) + 's');
         if (p.num_turns != null) meta.push(p.num_turns + ' turns');
         if (p.total_cost_usd != null) meta.push('$' + Number(p.total_cost_usd).toFixed(4));
-        // The CLI's final result repeats the last assistant message; show it once.
-        const text = (p.result && p.result !== lastAssistantText) ? p.result : (p.is_error ? 'agent reported an error (' + p.subtype + ')' : '');
-        add(esc(text) + '<div class="meta">' + esc(['finished'].concat(meta).join(' · ')) + '</div>', 'result' + (p.is_error ? ' error' : ''));
+        const text = p.result && p.result !== lastText ? p.result : '';
+        const box = $('d-result'); box.style.display = '';
+        box.className = 'card result' + (p.is_error ? ' err' : '');
+        box.innerHTML = (p.is_error ? '<div style="color:#A32323;font-weight:500">Claude Code reported an error (' + esc(p.subtype) + ')</div>' : '<div style="font-weight:500">Finished</div>') + (text ? '<div>' + esc(text) + '</div>' : '') + '<div class="muted" style="font-size:12px">' + esc(meta.join(' · ')) + '</div>';
+        if (cursorRow) { cursorRow.remove(); cursorRow = null; }
         break;
       }
-      case 'stderr': add(esc(p.text), 'stderr'); break;
-      case 'error': add('error: ' + esc(p.message || JSON.stringify(p)), 'result error'); break;
-      case 'stopped': addStatus('agent process killed (' + (p.signal || 'signal') + ')'); break;
-      case 'agent_other': addStatus('agent event ' + (p.type || '') + ' ' + (p.subtype || '')); break;
-      default: addStatus(ev.kind + ' ' + JSON.stringify(p));
+      case 'stderr': row(at, ICONS.text, esc(p.text), 'stderr'); break;
+      case 'error': row(at, ICONS.err, esc(p.message || JSON.stringify(p)), '', 'err'); if (cursorRow) { cursorRow.remove(); cursorRow = null; } break;
+      case 'agent_other': break;
+      default: row(at, ICONS.text, esc(ev.kind + ' ' + JSON.stringify(p)), 'quiet');
     }
+    const tl = $('timeline'); tl.scrollTop = tl.scrollHeight;
   }
+  $('timeline').addEventListener('click', (e) => { const o = e.target.closest('.out'); if (o) o.classList.toggle('open'); });
+
+  $('stopbtn').onclick = async () => {
+    if (!currentRun) return;
+    $('stopbtn').disabled = true;
+    try { await api('/v1/runs/' + currentRun + '/stop', { method: 'POST' }); } catch (e) { row(null, ICONS.err, 'Stop failed: ' + esc(e.message), 'quiet', 'err'); }
+  };
 
   async function openRun(id) {
+    if (currentRun === id) return;
     if (abort) abort.abort();
-    abort = new AbortController();
-    currentRun = id;
-    $('narration').innerHTML = '';
-    lastAssistantText = '';
-    const run = await api('/v1/runs/' + id);
-    $('viewtask').textContent = run.task;
-    $('viewmeta').textContent = run.model + ' · ' + run.repo + (run.worker_id ? ' · ' + run.worker_id : '');
-    setStatus(run.status);
-    subscribe(id, 0, abort.signal);
+    abort = new AbortController(); currentRun = id;
+    $('timeline').innerHTML = ''; $('d-result').style.display = 'none'; lastText = ''; cursorRow = null;
+    for (const k in tools) delete tools[k];
+    let run;
+    try { run = await api('/v1/runs/' + id); } catch (e) { $('d-task').textContent = 'Run not found'; return; }
+    if (!workers.length) { try { workers = await api('/v1/workers'); } catch (_) {} }
+    $('d-task').textContent = run.task; $('d-id').textContent = run.id;
+    setStatus(run, run.status);
+    subscribe(run, abort.signal);
+    const tick = setInterval(() => { if (abort.signal.aborted || !(run.status === 'running' || run.status === 'queued')) { clearInterval(tick); return; } renderMeta(run); }, 1000);
   }
 
   // SSE over fetch so the Authorization header can be sent (EventSource cannot).
-  async function subscribe(id, from, signal) {
-    let lastSeq = from - 1;
+  async function subscribe(run, signal) {
+    let lastSeq = -1;
     while (!signal.aborted) {
       try {
-        const r = await fetch('/v1/runs/' + id + '/events', { headers: { 'Authorization': 'Bearer ' + askKey(false), 'Last-Event-ID': String(lastSeq) }, signal });
-        if (!r.ok) { addStatus('stream error ' + r.status); return; }
-        const reader = r.body.getReader();
-        const dec = new TextDecoder();
-        let buf = '';
-        let ended = false;
+        const r = await fetch('/v1/runs/' + run.id + '/events', { headers: { 'Authorization': 'Bearer ' + askKey(false), 'Last-Event-ID': String(lastSeq) }, signal });
+        if (!r.ok) { row(null, ICONS.err, 'Stream error ' + r.status, 'quiet', 'err'); return; }
+        const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '', ended = false;
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -305,20 +585,21 @@
               else if (line.startsWith('id:')) evId = line.slice(3).trim();
             });
             if (evName === 'end') { ended = true; continue; }
-            if (!data || evName === 'error') { if (evName === 'error') addStatus(data); continue; }
-            try { const ev = JSON.parse(data); if (evId != null) lastSeq = Number(evId); render(ev); } catch (e) { console.warn('bad event', e, data); }
+            if (!data || evName === 'error') continue;
+            try { const ev = JSON.parse(data); if (evId != null) lastSeq = Number(evId); render(run, ev); } catch (e) { console.warn('bad event', e, data); }
           }
         }
         if (ended) { refresh(); return; }
       } catch (e) {
         if (signal.aborted) return;
-        addStatus('stream disconnected, retrying…');
+        row(null, ICONS.dot, 'Stream disconnected, reconnecting…', 'quiet', 'run');
       }
       await new Promise(res => setTimeout(res, 1500));
     }
   }
 
-  askKey(false);
+  if (!key) showGate('');
+  route();
   refresh();
   setInterval(refresh, 5000);
 })();

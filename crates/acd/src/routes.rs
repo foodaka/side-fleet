@@ -40,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/workers", get(list_workers))
+        .route("/v1/setup", get(setup))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()
@@ -148,6 +149,18 @@ async fn stop_run(
     }
     tracing::info!(run_id = %id, status = run.status.as_str(), "stop requested");
     Ok(Json(run))
+}
+
+/// What the page needs to show a copy-paste "connect a machine" command.
+/// Only the developer key holder can read it; it hands out the first worker token.
+async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:8080");
+    Json(json!({
+        "control_url": format!("http://{host}"),
+        "worker_token": state.config.worker_tokens.first().cloned().unwrap_or_default(),
+        "worker_token_count": state.config.worker_tokens.len(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {

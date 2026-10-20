@@ -90,6 +90,14 @@ if you want the agent to run shell commands unattended, `default` for read-only 
 `--max-turns N`, `--claude-arg <extra>` (repeatable), `--id`/`--name`,
 `--skip-sign-in-check`.
 
+### First open and onboarding
+
+The page is served at `/`. On first open it asks for `ACD_DEV_KEY` and explains where it
+comes from. With no machine online it shows "Connect your first machine": the build and
+`acw run` commands with this control plane's address and worker token filled in (read from
+`GET /v1/setup`, developer-key only), and it flips to the compose box the moment the first
+heartbeat arrives. The Machines page keeps the same install line with a Copy button.
+
 ### Browser auth
 
 The page asks for the developer key once and keeps it in `localStorage`. It talks to the
@@ -146,6 +154,7 @@ Developer (bearer `ACD_DEV_KEY`):
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind, replays from 0 or `Last-Event-ID`+1, then live; ends with `end` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` immediately; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | workers with capabilities and `online` (heartbeat < 45 s) |
+| `GET` | `/v1/setup` | control URL and the first worker token, for the page's connect command |
 
 Worker (bearer one of `ACD_WORKER_TOKENS`): `POST /v1/worker/register`,
 `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (`200` run or `204`),

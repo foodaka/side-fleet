@@ -43,6 +43,15 @@ enum Cmd {
         /// Comma-separated worker tokens. Generated and saved on first run if omitted.
         #[arg(long, env = "SIDEFLEET_WORKER_TOKENS", hide_env_values = true)]
         worker_tokens: Option<String>,
+        /// Do not run a worker on this machine as well (by default it does when a coding agent is installed).
+        #[arg(long)]
+        no_worker: bool,
+        /// Folder with this machine's git checkouts, for the built-in worker.
+        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~/Code")]
+        repos: String,
+        /// Permission mode for the built-in worker's Claude Code runs.
+        #[arg(long, env = "SIDEFLEET_PERMISSION_MODE", default_value = "acceptEdits")]
+        permission_mode: String,
     },
     /// Make this machine a worker: check it, register once, save the settings and
     /// install a background service so it keeps running after reboots.
@@ -166,6 +175,12 @@ fn mask(s: &str) -> String {
     }
 }
 
+fn which(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+        .unwrap_or(false)
+}
+
 /// This machine's Tailscale address, if the tailscale CLI is installed and up.
 fn tailscale_ip() -> Option<String> {
     let out = std::process::Command::new("tailscale").args(["ip", "-4"]).output().ok()?;
@@ -198,7 +213,9 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.cmd {
-        Cmd::Serve { bind, database_url, dev_key, worker_tokens } => serve(bind, database_url, dev_key, worker_tokens).await,
+        Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode } => {
+            serve(bind, database_url, dev_key, worker_tokens, no_worker, expand_home(&repos), permission_mode).await
+        }
         Cmd::Connect { control, token, repos, name, permission_mode, no_service } => connect(control, token, repos, name, permission_mode, no_service).await,
         Cmd::Run { control, token, repos, id, name, claude_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth } => {
             let control = control.context("no control plane address: run `sidefleet connect --control <url> --token <token>` first, or pass --control")?;
@@ -240,7 +257,15 @@ async fn main() -> Result<()> {
 
 // ---- serve ----
 
-async fn serve(bind: String, database_url: String, dev_key: Option<String>, worker_tokens: Option<String>) -> Result<()> {
+async fn serve(
+    bind: String,
+    database_url: String,
+    dev_key: Option<String>,
+    worker_tokens: Option<String>,
+    no_worker: bool,
+    repos: PathBuf,
+    permission_mode: String,
+) -> Result<()> {
     // First run: generate keys and keep them so the next start reuses them.
     let (dev_key, worker_tokens, generated) = match (dev_key, worker_tokens) {
         (Some(d), Some(w)) => (d, w, false),
@@ -298,6 +323,48 @@ async fn serve(bind: String, database_url: String, dev_key: Option<String>, work
     match ts {
         Some(_) => println!("  That is this machine's Tailscale address, reachable from your other devices on the tailnet. On the same LAN http://{lan}:{port} also works."),
         None => println!("  Other machines must be able to reach this address (same LAN). For access from anywhere, install Tailscale on both ends and restart serve."),
+    }
+    println!();
+
+    // This machine is a worker too when it has any coding agent, so one box is one command.
+    let agents: Vec<&str> = [("claude", "Claude Code"), ("codex", "Codex"), ("ollama", "Ollama")]
+        .iter()
+        .filter(|(bin, _)| which(bin))
+        .map(|(_, name)| *name)
+        .collect();
+    if no_worker {
+        println!("  Built-in worker: off (--no-worker).");
+    } else if agents.is_empty() {
+        println!("  Built-in worker: off, no coding agent found here (claude, codex or ollama). Connect machines that have one.");
+    } else if !repos.is_dir() {
+        println!("  Built-in worker: off, {} does not exist. Pass --repos <folder with your git checkouts>.", repos.display());
+    } else {
+        println!("  Built-in worker: on ({} found). This machine will run tasks for the checkouts under {}.", agents.join(", "), repos.display());
+        if !which("claude") {
+            println!("  Note: only Claude Code can execute tasks in this version; Codex and Ollama are listed as capabilities for now.");
+        }
+        let id = default_worker_id();
+        let cfg = WorkerConfig {
+            control_url: format!("http://127.0.0.1:{port}"),
+            token: first_token.clone(),
+            display_name: id.clone(),
+            worker_id: id,
+            repos_root: repos,
+            claude_bin: "claude".into(),
+            permission_mode,
+            max_turns: None,
+            extra_args: vec![],
+            poll_interval: Duration::from_secs(2),
+            heartbeat_interval: Duration::from_secs(15),
+            check_sign_in: true,
+            scan_depth: 2,
+            max_runs: None,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = sidefleet_worker::worker::run(cfg).await {
+                tracing::error!(error = %e, "built-in worker stopped");
+            }
+        });
     }
     println!();
 

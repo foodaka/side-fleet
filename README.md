@@ -57,6 +57,11 @@ sidefleet serve
 On first run it generates a developer key and a worker token, saves them to
 `~/.sidefleet/server.env`, and prints:
 
+If that machine has a coding agent installed (Claude Code, Codex or Ollama), `serve` also runs
+a worker on it, so a single box is one command (`--no-worker` turns that off, `--repos` says
+where its checkouts are). Only Claude Code executes tasks in this version; the others are
+reported as capabilities.
+
 ```
 Sidefleet control plane is running.
 
@@ -106,8 +111,9 @@ to run commands unattended. Logs: `~/.sidefleet/logs/worker.log`.
 
 ### Server options
 
-`sidefleet serve` takes `--bind` (default `0.0.0.0:7373`), `--database-url`, `--dev-key` and
-`--worker-tokens` (comma-separated, one per machine if you want to revoke individually). All are
+`sidefleet serve` takes `--bind` (default `0.0.0.0:7373`), `--database-url`, `--dev-key`,
+`--worker-tokens` (comma-separated, one per machine if you want to revoke individually),
+`--no-worker`, `--repos` and `--permission-mode` for the built-in worker. All are
 also read from the environment (`SIDEFLEET_BIND`, `DATABASE_URL`, `SIDEFLEET_DEV_KEY`,
 `SIDEFLEET_WORKER_TOKENS`), from a `.env` in the current directory, and from
 `~/.sidefleet/server.env`. Tokens are compared as SHA-256 digests in constant time and never logged.

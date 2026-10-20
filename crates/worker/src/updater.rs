@@ -83,6 +83,7 @@ pub fn update(restart: bool) -> Result<UpdateReport> {
     Ok(report)
 }
 
+#[cfg(target_os = "macos")]
 fn uid() -> String {
     Command::new("id").arg("-u").output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())

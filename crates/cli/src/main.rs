@@ -166,6 +166,16 @@ fn mask(s: &str) -> String {
     }
 }
 
+/// This machine's Tailscale address, if the tailscale CLI is installed and up.
+fn tailscale_ip() -> Option<String> {
+    let out = std::process::Command::new("tailscale").args(["ip", "-4"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let ip = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    (!ip.is_empty()).then_some(ip)
+}
+
 /// The LAN address other machines can use to reach this one (best effort).
 fn lan_ip() -> Option<String> {
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -269,7 +279,10 @@ async fn serve(bind: String, database_url: String, dev_key: Option<String>, work
         Err(e) => return Err(e).with_context(|| format!("binding {bind}")),
     };
     let port = listener.local_addr()?.port();
-    let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".into());
+    let lan = lan_ip().unwrap_or_else(|| "127.0.0.1".into());
+    let ts = tailscale_ip();
+    // Prefer the Tailscale address: it works from anywhere the user's devices are.
+    let ip = ts.clone().unwrap_or_else(|| lan.clone());
 
     println!();
     println!("Sidefleet control plane is running.");
@@ -282,7 +295,10 @@ async fn serve(bind: String, database_url: String, dev_key: Option<String>, work
     if generated {
         println!("  Keys were generated and saved to {}", server_env_path().display());
     }
-    println!("  Other machines must be able to reach this address (same LAN or Tailscale).");
+    match ts {
+        Some(_) => println!("  That is this machine's Tailscale address, reachable from your other devices on the tailnet. On the same LAN http://{lan}:{port} also works."),
+        None => println!("  Other machines must be able to reach this address (same LAN). For access from anywhere, install Tailscale on both ends and restart serve."),
+    }
     println!();
 
     axum::serve(listener, sidefleet_server::router(state))

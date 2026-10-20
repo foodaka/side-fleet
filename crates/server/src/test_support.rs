@@ -39,7 +39,7 @@ impl TestEnv {
 
         let url = replace_db_name(&base, &db_name);
         let pool = crate::connect_and_migrate(&url).await.expect("migrate test database");
-        let config = Config { dev_key: DEV_KEY.into(), worker_tokens: vec![WORKER_TOKEN.into()], build: "test".into() };
+        let config = Config { dev_key: DEV_KEY.into(), worker_tokens: vec![WORKER_TOKEN.into()], build: "test".into(), host_worker: None };
         let state = AppState::new(pool.clone(), config);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

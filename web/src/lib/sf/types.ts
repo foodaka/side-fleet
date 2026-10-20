@@ -77,4 +77,6 @@ export interface Setup {
 	worker_token_count: number;
 	version: string;
 	build?: string;
+	/** Worker id of the machine hosting the control plane, if it also runs tasks. */
+	host_worker?: string | null;
 }

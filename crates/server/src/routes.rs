@@ -267,6 +267,7 @@ async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_
         "worker_token_count": state.config.worker_tokens.len(),
         "version": env!("CARGO_PKG_VERSION"),
         "build": state.config.build,
+        "host_worker": state.config.host_worker,
     }))
 }
 

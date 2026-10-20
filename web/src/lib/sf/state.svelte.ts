@@ -1,5 +1,6 @@
 import { api, getKey, keyWorks, setKey, Unauthorized } from './api';
 import type { RunSummary, Setup, Worker } from './types';
+import { telemetry } from './telemetry.svelte';
 
 type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 
@@ -47,6 +48,7 @@ class Fleet {
 			]);
 			this.workers = workers;
 			this.runs = runs;
+			telemetry.ingest(workers, runs);
 			this.added = new Set(repos.added);
 			if (!this.setup) this.setup = await api<Setup>('/v1/setup');
 			this.conn = 'ok';

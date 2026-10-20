@@ -22,6 +22,9 @@ pub struct Config {
     pub worker_tokens: Vec<String>,
     /// Build of this control plane, shown on the page and sent to workers.
     pub build: String,
+    /// Worker id of the machine hosting this control plane, when `serve` runs a
+    /// built-in worker. The page puts it at the centre of the fleet map.
+    pub host_worker: Option<String>,
 }
 
 impl Config {
@@ -39,7 +42,8 @@ impl Config {
         anyhow::ensure!(!worker_tokens.is_empty(), "SIDEFLEET_WORKER_TOKENS is empty");
         anyhow::ensure!(dev_key.len() >= 8, "SIDEFLEET_DEV_KEY must be at least 8 characters");
         let build = std::env::var("SIDEFLEET_BUILD").unwrap_or_else(|_| "dev".into());
-        Ok(Self { dev_key, worker_tokens, build })
+        let host_worker = std::env::var("SIDEFLEET_HOST_WORKER").ok().filter(|s| !s.is_empty());
+        Ok(Self { dev_key, worker_tokens, build, host_worker })
     }
 }
 

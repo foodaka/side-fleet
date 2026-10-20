@@ -178,3 +178,8 @@
 .sf-md .whitespace-normal > :is(h1, h2, h3, h4):first-child { margin-top: 0; }
 .sf-md li + li { margin-top: 0.15em; }
 .sf-md :not(pre) > code { font-size: 0.86em; padding: 0.1em 0.35em; border-radius: 0.3em; background: var(--code-bg); }
+
+/* A busy task slot: moving stripes in the running colour. */
+.sf-slot-busy { background-image: repeating-linear-gradient(-45deg, var(--run) 0 6px, color-mix(in oklab, var(--run) 55%, transparent) 6px 12px); background-size: 17px 100%; animation: sf-stripes 0.9s linear infinite; }
+@keyframes sf-stripes { to { background-position: 17px 0; } }
+@media (prefers-reduced-motion: reduce) { .sf-slot-busy { animation: none; } }

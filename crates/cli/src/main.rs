@@ -343,6 +343,11 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     std::env::set_var("SIDEFLEET_DEV_KEY", &dev_key);
     std::env::set_var("SIDEFLEET_WORKER_TOKENS", &worker_tokens);
     std::env::set_var("SIDEFLEET_BUILD", version_string());
+    // Tell the page which machine hosts the control plane (when it runs a worker too).
+    let builtin_worker = !no_worker && ["claude", "codex", "ollama"].iter().any(|b| which(b)) && repos.is_dir();
+    if builtin_worker {
+        std::env::set_var("SIDEFLEET_HOST_WORKER", default_worker_id());
+    }
     let config = Config::from_env()?;
     let first_token = config.worker_tokens[0].clone();
 

@@ -178,7 +178,7 @@ impl Backoff {
     pub fn reset(&mut self) {
         self.current = Duration::from_secs(1);
     }
-    pub fn next(&mut self) -> Duration {
+    pub fn next_delay(&mut self) -> Duration {
         let d = self.current;
         self.current = (self.current * 2).min(self.max);
         d

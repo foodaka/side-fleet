@@ -107,7 +107,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 register_with_backoff(&client, &cfg, &caps).await;
             }
             Err(e) => {
-                let wait = backoff.next();
+                let wait = backoff.next_delay();
                 tracing::warn!(error = %e, retry_in = ?wait, "claim failed");
                 tokio::time::sleep(wait).await;
             }
@@ -125,7 +125,7 @@ async fn register_with_backoff(client: &ControlClient, cfg: &WorkerConfig, caps:
                 return;
             }
             Err(e) => {
-                let wait = backoff.next();
+                let wait = backoff.next_delay();
                 tracing::warn!(error = %e, retry_in = ?wait, "register failed");
                 tokio::time::sleep(wait).await;
             }
@@ -203,7 +203,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                                     break;
                                 }
                                 Err(e) => {
-                                    let wait = backoff.next();
+                                    let wait = backoff.next_delay();
                                     tracing::warn!(error = %e, retry_in = ?wait, "posting events failed");
                                     tokio::time::sleep(wait).await;
                                 }
@@ -242,7 +242,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                 return;
             }
             Err(e) => {
-                let wait = backoff.next();
+                let wait = backoff.next_delay();
                 tracing::warn!(error = %e, attempt, retry_in = ?wait, "finish failed");
                 tokio::time::sleep(wait).await;
             }

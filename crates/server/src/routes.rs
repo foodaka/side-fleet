@@ -72,7 +72,7 @@ async fn index() -> Html<&'static str> {
 /// worker. Contains no secrets, so it is public; the token travels in the
 /// prompt the user pastes, never in this document.
 async fn connect_md(headers: HeaderMap) -> ([(axum::http::HeaderName, &'static str); 1], String) {
-    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:8080");
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:7373");
     (
         [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
         CONNECT_MD.replace("{{ORIGIN}}", &format!("http://{host}")),
@@ -167,7 +167,7 @@ async fn stop_run(
 /// What the page needs to show a copy-paste "connect a machine" command.
 /// Only the developer key holder can read it; it hands out the first worker token.
 async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
-    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:8080");
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:7373");
     Json(json!({
         "control_url": format!("http://{host}"),
         "worker_token": state.config.worker_tokens.first().cloned().unwrap_or_default(),

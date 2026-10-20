@@ -98,4 +98,4 @@ esac
 echo
 echo "Next:"
 echo "  on the machine that will host the page:   sidefleet serve"
-echo "  on each machine that should run tasks:    sidefleet connect --control http://<host>:8080 --token <token>"
+echo "  on each machine that should run tasks:    sidefleet connect --control http://<host>:7373 --token <token>"

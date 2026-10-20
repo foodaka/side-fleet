@@ -60,9 +60,9 @@ On first run it generates a developer key and a worker token, saves them to
 ```
 Sidefleet control plane is running.
 
-  Open the page:        http://192.168.1.20:8080/
+  Open the page:        http://192.168.1.20:7373/
   Developer key:        3f9c…
-  Connect a machine:    sidefleet connect --control http://192.168.1.20:8080 --token 7b2e…
+  Connect a machine:    sidefleet connect --control http://192.168.1.20:7373 --token 7b2e…
 ```
 
 **2. Open the page** and paste the developer key. You land on "Connect your first machine".
@@ -71,7 +71,7 @@ Sidefleet control plane is running.
 itself is fine), run the install line, then the connect line the page shows you:
 
 ```bash
-sidefleet connect --control http://192.168.1.20:8080 --token 7b2e… --repos ~/Code
+sidefleet connect --control http://192.168.1.20:7373 --token 7b2e… --repos ~/Code
 ```
 
 `connect` checks Claude Code and its sign-in, finds your git checkouts under `--repos`, registers
@@ -106,7 +106,7 @@ to run commands unattended. Logs: `~/.sidefleet/logs/worker.log`.
 
 ### Server options
 
-`sidefleet serve` takes `--bind` (default `0.0.0.0:8080`), `--database-url`, `--dev-key` and
+`sidefleet serve` takes `--bind` (default `0.0.0.0:7373`), `--database-url`, `--dev-key` and
 `--worker-tokens` (comma-separated, one per machine if you want to revoke individually). All are
 also read from the environment (`SIDEFLEET_BIND`, `DATABASE_URL`, `SIDEFLEET_DEV_KEY`,
 `SIDEFLEET_WORKER_TOKENS`), from a `.env` in the current directory, and from

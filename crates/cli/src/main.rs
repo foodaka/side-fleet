@@ -32,7 +32,7 @@ enum Cmd {
     /// Run the control plane: the web page and API that workers connect to. Needs Postgres.
     Serve {
         /// Address to listen on.
-        #[arg(long, env = "SIDEFLEET_BIND", default_value = "0.0.0.0:8080")]
+        #[arg(long, env = "SIDEFLEET_BIND", default_value = "0.0.0.0:7373")]
         bind: String,
         /// Postgres connection string.
         #[arg(long, env = "DATABASE_URL", default_value = DEFAULT_DB)]
@@ -47,7 +47,7 @@ enum Cmd {
     /// Make this machine a worker: check it, register once, save the settings and
     /// install a background service so it keeps running after reboots.
     Connect {
-        /// Control plane address, e.g. http://100.64.0.1:8080
+        /// Control plane address, e.g. http://100.64.0.1:7373
         #[arg(long, env = "SIDEFLEET_CONTROL")]
         control: String,
         /// Worker token (shown by `sidefleet serve` and on the Machines page).
@@ -258,7 +258,16 @@ async fn serve(bind: String, database_url: String, dev_key: Option<String>, work
     };
     let state = AppState::new(pool, config);
     tokio::spawn(sidefleet_server::reaper(state.clone()));
-    let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| format!("binding {bind}"))?;
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("Port {bind} is already in use by another program.");
+            eprintln!("Pick another with:  sidefleet serve --bind 0.0.0.0:7374");
+            eprintln!("(then use that port in the page URL and in `sidefleet connect --control …`)");
+            std::process::exit(2);
+        }
+        Err(e) => return Err(e).with_context(|| format!("binding {bind}")),
+    };
     let port = listener.local_addr()?.port();
     let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".into());
 

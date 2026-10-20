@@ -53,7 +53,8 @@ export interface Capabilities {
 		codex?: { version: string };
 		ollama?: { version: string; models: string[] };
 	};
-	repos: { name: string; path: string }[];
+	/** `id` is the project's identity across machines (normalised git remote, or the folder name). */
+	repos: { name: string; path: string; id?: string }[];
 	hostname: string;
 	os: string;
 	version: string;

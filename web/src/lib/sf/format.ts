@@ -63,3 +63,13 @@ export function parseBuild(b: string | undefined) {
 	const m = /^(\S+)\s+\((\S+)\s+(\S+)\)$/.exec(b ?? '');
 	return m ? { version: m[1], date: m[2], sha: m[3] } : { version: b ?? '', date: '', sha: '' };
 }
+
+/** A repo's identity across machines; older workers only report the folder name. */
+export const repoKey = (r: { name: string; id?: string }) => r.id || r.name;
+
+/** How a repo identity reads: `github.com/foodaka/side-fleet` -> `foodaka/side-fleet`. */
+export function repoLabel(key: string | null | undefined): string {
+	if (!key) return '';
+	const [first, ...rest] = key.split('/');
+	return rest.length >= 2 && first.includes('.') ? rest.join('/') : key;
+}

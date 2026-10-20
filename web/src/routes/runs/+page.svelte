@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { fleet } from '#lib/sf/state.svelte';
-	import { duration, money, modelName, rel } from '#lib/sf/format';
+	import { duration, money, modelName, rel, repoLabel } from '#lib/sf/format';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import type { RunSummary } from '#lib/sf/types';
@@ -88,7 +88,7 @@
 				<span class="min-w-0">
 					<span class="block truncate text-[13.5px] font-medium">{r.task}</span>
 					<span class="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-						<span class="truncate font-mono text-[11.5px]">{r.repo}</span>
+						<span class="truncate font-mono text-[11.5px]">{repoLabel(r.repo)}</span>
 						<span class="shrink-0">{modelName(r.model)}</span>
 						{#if r.follow_ups}<span class="tnum shrink-0">{r.follow_ups + 1} messages</span>{/if}
 					</span>

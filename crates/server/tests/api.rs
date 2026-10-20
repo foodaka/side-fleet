@@ -43,7 +43,7 @@ impl Api {
     }
     async fn register(&self, id: &str, repos: &[&str]) {
         let caps = Capabilities {
-            repos: repos.iter().map(|r| RepoInfo { name: r.to_string(), path: format!("/tmp/{r}") }).collect(),
+            repos: repos.iter().map(|r| RepoInfo { name: r.to_string(), path: format!("/tmp/{r}"), id: String::new() }).collect(),
             ..Default::default()
         };
         let r = self

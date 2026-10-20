@@ -193,6 +193,75 @@ pub struct RepoInfo {
     pub name: String,
     /// Absolute path on the worker machine.
     pub path: String,
+    /// The project's identity across machines: the normalised `origin` remote
+    /// (`github.com/foodaka/side-fleet`), or `name` when there is no remote.
+    /// Empty from older workers; treat as `name`.
+    #[serde(default)]
+    pub id: String,
+}
+
+impl RepoInfo {
+    /// Identity used to match tasks to machines (falls back to the path name).
+    pub fn key(&self) -> &str {
+        if self.id.is_empty() { &self.name } else { &self.id }
+    }
+}
+
+/// Normalise a git remote URL into a host/path identity, so the same project
+/// matches on every machine whatever its folder is called. Credentials, ports,
+/// `.git` and trailing slashes are dropped; the result is lower-case.
+///
+/// `git@github.com:Foo/Bar.git`, `https://user:tok@github.com/foo/bar`,
+/// `ssh://git@github.com:22/foo/bar.git` all become `github.com/foo/bar`.
+pub fn repo_identity(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let (host, path) = if let Some(rest) = url.split_once("://").map(|(_, r)| r) {
+        // scheme://[user[:pass]@]host[:port]/path
+        let rest = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+        let (hostport, path) = rest.split_once('/')?;
+        (hostport.split(':').next().unwrap_or(hostport), path)
+    } else if let Some((left, path)) = url.split_once(':') {
+        // scp-like: [user@]host:path (but not a Windows drive or a local path)
+        if left.contains('/') || left.len() <= 1 {
+            return None;
+        }
+        (left.rsplit_once('@').map(|(_, h)| h).unwrap_or(left), path)
+    } else {
+        return None; // a local path remote: no cross-machine identity
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git").trim_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", host.to_ascii_lowercase(), path.to_ascii_lowercase()))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::repo_identity;
+
+    #[test]
+    fn normalises_common_remote_forms() {
+        let want = Some("github.com/foodaka/side-fleet".to_string());
+        assert_eq!(repo_identity("git@github.com:foodaka/side-fleet.git"), want);
+        assert_eq!(repo_identity("git@github.com:Foodaka/Side-Fleet"), want);
+        assert_eq!(repo_identity("https://github.com/foodaka/side-fleet.git"), want);
+        assert_eq!(repo_identity("https://github.com/foodaka/side-fleet/"), want);
+        assert_eq!(repo_identity("https://x-access-token:ghp_secret@github.com/foodaka/side-fleet.git"), want);
+        assert_eq!(repo_identity("ssh://git@github.com:22/foodaka/side-fleet.git"), want);
+        assert_eq!(repo_identity("https://gitlab.example.com:8443/group/sub/proj.git"), Some("gitlab.example.com/group/sub/proj".into()));
+    }
+
+    #[test]
+    fn local_paths_have_no_identity() {
+        assert_eq!(repo_identity("/srv/git/project.git"), None);
+        assert_eq!(repo_identity("../other"), None);
+        assert_eq!(repo_identity("C:/repos/x"), None);
+        assert_eq!(repo_identity(""), None);
+    }
 }
 
 // ---- developer API wire types ----

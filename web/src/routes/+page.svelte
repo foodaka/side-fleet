@@ -6,7 +6,7 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { MODELS, PERMISSIONS, WORKSPACES, modelName, rel, duration } from '#lib/sf/format';
+	import { MODELS, PERMISSIONS, WORKSPACES, modelName, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
@@ -29,11 +29,14 @@
 	// Keep the selection valid as machines come and go.
 	$effect(() => {
 		if (repo && repos.includes(repo) && online.has(repo)) return;
+		// A repo remembered by folder name (before identities): switch to its identity.
+		const renamed = fleet.workers.flatMap((w) => w.capabilities.repos ?? []).find((r) => r.name === repo && repoKey(r) !== repo);
+		if (renamed && repos.includes(repoKey(renamed))) { repo = repoKey(renamed); save('sidefleet_repo', repo); return; }
 		const first = repos.find((r) => online.has(r));
 		if (first) repo = first;
 	});
 	/** Online machines that have the repo; the menu only shows when there is a choice. */
-	const machines = $derived(repo ? fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => r.name === repo)) : []);
+	const machines = $derived(repo ? fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo)) : []);
 	// The remembered machine applies only where it has the repo; otherwise any machine.
 	const pinned = $derived(machines.find((w) => w.id === machine));
 	const target = $derived(pinned ?? (repo ? fleet.workerFor(repo) : undefined));
@@ -150,11 +153,11 @@
 
 					<Select.Root type="single" value={repo} onValueChange={pickRepo}>
 						<Select.Trigger size="sm" class="h-8 max-w-[15rem] rounded-full border-transparent bg-muted font-mono text-[12.5px] shadow-none hover:bg-accent" aria-label="Repo">
-							<span class="truncate">{repo || 'Choose a repo'}</span>
+							<span class="truncate">{repoLabel(repo) || 'Choose a repo'}</span>
 						</Select.Trigger>
 						<Select.Content class="max-h-80">
 							{#each repos as r (r)}
-								<Select.Item value={r} label={r} disabled={!online.has(r)}><span class="font-mono text-[12.5px]">{r}</span>{#if !online.has(r)}<span class="ml-2 text-xs text-muted-foreground">offline</span>{/if}</Select.Item>
+								<Select.Item value={r} label={repoLabel(r)} disabled={!online.has(r)}><span class="font-mono text-[12.5px]">{repoLabel(r)}</span>{#if !online.has(r)}<span class="ml-2 text-xs text-muted-foreground">offline</span>{/if}</Select.Item>
 							{/each}
 							{#if repos.length}<Select.Separator />{/if}
 							<Select.Item value={PICK} label="Choose repos">{repos.length ? 'Add or remove repos…' : `Choose from ${online.size} repos…`}</Select.Item>
@@ -228,7 +231,7 @@
 								<StatusDot status={r.thread_status} />
 								<span class="min-w-0 flex-1 truncate">{r.task}</span>
 								{#if r.follow_ups}<span class="tnum shrink-0 text-xs text-muted-foreground">{r.follow_ups + 1} messages</span>{/if}
-								<span class="hidden shrink-0 font-mono text-[12px] text-muted-foreground sm:inline">{r.repo}</span>
+								<span class="hidden shrink-0 font-mono text-[12px] text-muted-foreground sm:inline">{repoLabel(r.repo)}</span>
 								<span class="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">
 									{r.thread_status === 'running' ? duration(r.started_at, null, fleet.now) : rel(r.last_activity_at, fleet.now)}
 								</span>

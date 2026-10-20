@@ -7,7 +7,7 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '../api';
 	import { fleet } from '../state.svelte';
-	import { parseBuild, pct, rel, uptime } from '../format';
+	import { parseBuild, pct, rel, repoKey, uptime } from '../format';
 	import Gauge from './Gauge.svelte';
 	import { telemetry } from '../telemetry.svelte';
 	import { duration } from '../format';
@@ -19,8 +19,10 @@
 	const sys = $derived(c.system);
 	const slots = $derived(c.slots);
 	const build = $derived(parseBuild(c.version));
-	const repos = $derived(c.repos?.length ?? 0);
-	const chosen = $derived(fleet.added ? (c.repos ?? []).filter((r) => fleet.added!.has(r.name)).length : 0);
+	// Count projects, not folders: several clones of one project count once.
+	const keys = $derived(new Set((c.repos ?? []).map(repoKey)));
+	const repos = $derived(keys.size);
+	const chosen = $derived(fleet.added ? [...keys].filter((k) => fleet.added!.has(k)).length : 0);
 	let requesting = $state(false);
 	const tasks = $derived(fleet.runs.filter((r) => r.thread_status === 'running' && r.worker_id === w.id));
 	const history = $derived(telemetry.cpu[w.id] ?? []);

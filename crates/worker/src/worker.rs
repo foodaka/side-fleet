@@ -138,7 +138,15 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 continue;
             }
         };
-        let repos: Vec<String> = caps.lock().await.repos.iter().map(|r| r.name.clone()).collect();
+        // Offer both identities (shared across machines) and path names (what tasks
+        // created before identities existed refer to).
+        let repos: Vec<String> = {
+            let c = caps.lock().await;
+            let mut v: Vec<String> = c.repos.iter().flat_map(|r| [r.key().to_string(), r.name.clone()]).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
         let busy: Vec<String> = active
             .lock()
             .await
@@ -149,13 +157,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         match client.claim(&repos, &busy).await {
             Ok(Some(run)) => {
                 backoff.reset();
-                let repo_path = caps
-                    .lock()
-                    .await
-                    .repos
-                    .iter()
-                    .find(|r| r.name == run.repo)
-                    .map(|r| PathBuf::from(&r.path));
+                let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
                 active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone()));
                 active_count.fetch_add(1, Ordering::Relaxed);
                 let client = client.clone();
@@ -187,6 +189,24 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             }
         }
     }
+}
+
+/// The checkout a task should run in. An exact path name wins; otherwise the
+/// checkouts with that identity, preferring the one whose folder is named after
+/// the project, then the shortest path (a machine can hold several clones).
+pub fn resolve_repo(repos: &[sidefleet_core::RepoInfo], wanted: &str) -> Option<PathBuf> {
+    if let Some(r) = repos.iter().find(|r| r.name == wanted) {
+        return Some(PathBuf::from(&r.path));
+    }
+    let project = wanted.rsplit('/').next().unwrap_or(wanted);
+    repos
+        .iter()
+        .filter(|r| r.key() == wanted)
+        .min_by_key(|r| {
+            let folder = r.name.rsplit('/').next().unwrap_or(&r.name).to_ascii_lowercase();
+            (folder != project, r.path.len(), r.path.clone())
+        })
+        .map(|r| PathBuf::from(&r.path))
 }
 
 async fn register_with_backoff(
@@ -409,5 +429,28 @@ pub fn default_worker_id() -> String {
         Uuid::new_v4().to_string()
     } else {
         host
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_repo;
+    use sidefleet_core::RepoInfo;
+    use std::path::PathBuf;
+
+    fn r(name: &str, id: &str) -> RepoInfo {
+        RepoInfo { name: name.into(), path: format!("/home/u/{name}"), id: id.into() }
+    }
+
+    #[test]
+    fn resolves_by_path_name_then_identity() {
+        let id = "github.com/foodaka/side-fleet";
+        let repos = vec![r("code/side-fleet-old-copy", id), r("code/side-fleet", id), r("scratch", "scratch")];
+        // exact path name (tasks from before identities existed)
+        assert_eq!(resolve_repo(&repos, "code/side-fleet-old-copy"), Some(PathBuf::from("/home/u/code/side-fleet-old-copy")));
+        // identity: prefer the clone whose folder is named after the project
+        assert_eq!(resolve_repo(&repos, id), Some(PathBuf::from("/home/u/code/side-fleet")));
+        assert_eq!(resolve_repo(&repos, "scratch"), Some(PathBuf::from("/home/u/scratch")));
+        assert_eq!(resolve_repo(&repos, "github.com/someone/else"), None);
     }
 }

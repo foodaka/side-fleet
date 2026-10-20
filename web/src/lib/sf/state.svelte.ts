@@ -1,6 +1,7 @@
 import { api, getKey, keyWorks, setKey, Unauthorized } from './api';
 import type { RunSummary, Setup, Worker } from './types';
 import { telemetry } from './telemetry.svelte';
+import { repoKey } from './format';
 
 type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 
@@ -50,6 +51,7 @@ class Fleet {
 			this.runs = runs;
 			telemetry.ingest(workers, runs);
 			this.added = new Set(repos.added);
+			void this.#migrateAdded(workers, repos.added);
 			if (!this.setup) this.setup = await api<Setup>('/v1/setup');
 			this.conn = 'ok';
 			this.loaded = true;
@@ -79,14 +81,16 @@ class Fleet {
 			.sort((a, b) => Number(b.online) - Number(a.online))
 			.forEach((w) =>
 				(w.capabilities.repos ?? []).forEach((r) => {
-					if (!m.has(r.name)) m.set(r.name, []);
-					m.get(r.name)!.push(w);
+					const k = repoKey(r);
+					const list = m.get(k) ?? [];
+					if (!list.includes(w)) list.push(w); // a machine can hold several clones
+					m.set(k, list);
 				})
 			);
 		return m;
 	});
 
-	onlineRepos = $derived(new Set(this.online.flatMap((w) => (w.capabilities.repos ?? []).map((r) => r.name))));
+	onlineRepos = $derived(new Set(this.online.flatMap((w) => (w.capabilities.repos ?? []).map(repoKey))));
 
 	/** What the composer's repo menu offers: the chosen repos, or all of them when there are only a few. */
 	composerRepos = $derived.by(() => {
@@ -97,7 +101,19 @@ class Fleet {
 	});
 
 	workerFor(repo: string) {
-		return this.online.find((w) => (w.capabilities.repos ?? []).some((r) => r.name === repo));
+		return this.online.find((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo || r.name === repo));
+	}
+
+	#migrated = false;
+	/** Repos chosen before identities existed are stored by folder name; convert them once. */
+	async #migrateAdded(workers: Worker[], added: string[]) {
+		if (this.#migrated || !added.length) return;
+		const byName = new Map<string, string>();
+		workers.forEach((w) => (w.capabilities.repos ?? []).forEach((r) => { if (r.id && r.id !== r.name) byName.set(r.name, r.id); }));
+		if (!byName.size) return; // workers have not reported identities yet
+		this.#migrated = true;
+		const next = [...new Set(added.map((n) => byName.get(n) ?? n))];
+		if (next.length !== added.length || next.some((n, i) => n !== added[i])) await this.saveAdded(next);
 	}
 
 	async saveAdded(names: string[]) {

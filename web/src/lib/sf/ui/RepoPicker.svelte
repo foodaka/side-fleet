@@ -4,6 +4,7 @@
 	import { Kbd } from '#lib/components/ui/kbd';
 	import Search from '@lucide/svelte/icons/search';
 	import { fleet } from '../state.svelte';
+	import { repoKey, repoLabel } from '../format';
 	import { toast } from 'svelte-sonner';
 	import { untrack } from 'svelte';
 
@@ -25,14 +26,24 @@
 			const repos = fleet.allRepos;
 			const added = fleet.added ?? new Set();
 			sel = new Set([...added].filter((n) => repos.has(n)));
-			order = [...repos.keys()].sort((a, b) => Number(sel.has(b)) - Number(sel.has(a)) || a.localeCompare(b));
+			order = [...repos.keys()].sort((a, b) => Number(sel.has(b)) - Number(sel.has(a)) || repoLabel(a).localeCompare(repoLabel(b)));
 			q = '';
 			act = 0;
 		});
 	});
 
 	const terms = $derived(q.trim().toLowerCase().split(/\s+/).filter(Boolean));
-	const shown = $derived(order.filter((n) => terms.every((t) => n.toLowerCase().includes(t))));
+	// Search the readable name and each machine's folder name for the project.
+	const folders = $derived.by(() => {
+		const m = new Map<string, string[]>();
+		fleet.workers.forEach((w) => (w.capabilities.repos ?? []).forEach((r) => {
+			const k = repoKey(r);
+			m.set(k, [...(m.get(k) ?? []), r.name]);
+		}));
+		return m;
+	});
+	const haystack = (n: string) => (repoLabel(n) + ' ' + (folders.get(n) ?? []).join(' ')).toLowerCase();
+	const shown = $derived(order.filter((n) => terms.every((t) => haystack(n).includes(t))));
 	const wasAdded = (n: string) => !!fleet.added?.has(n);
 	const sections = $derived(!terms.length && order.some(wasAdded));
 
@@ -129,7 +140,7 @@
 					onkeydown={() => {}}
 				>
 					<input type="checkbox" tabindex="-1" checked={sel.has(n)} class="size-4 accent-foreground" />
-					<span class="min-w-0 truncate font-mono text-[12.5px]">{#each parts(n) as p}{#if p.m}<mark class="rounded-sm bg-queue-soft text-inherit">{p.t}</mark>{:else}{p.t}{/if}{/each}</span>
+					<span class="min-w-0 truncate font-mono text-[12.5px]">{#each parts(repoLabel(n)) as p}{#if p.m}<mark class="rounded-sm bg-queue-soft text-inherit">{p.t}</mark>{:else}{p.t}{/if}{/each}</span>
 					<span class="ml-auto shrink-0 text-xs text-faint">{where.length ? where.join(', ') : 'offline'}</span>
 				</div>
 			{:else}

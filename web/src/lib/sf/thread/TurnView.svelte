@@ -4,7 +4,7 @@
 	import { Shimmer } from '#lib/components/ai-elements/shimmer';
 	import * as Collapsible from '#lib/components/ui/collapsible';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
-	import { clock, modelName, permName } from '../format';
+	import { clock, modelName, permName, repoLabel } from '../format';
 	import ToolRow from './ToolRow.svelte';
 	import type { Turn } from '../thread.svelte';
 
@@ -40,7 +40,7 @@
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
-						Waiting for {run.pinned_worker_id ?? 'a machine that has ' + run.repo}…
+						Waiting for {run.pinned_worker_id ?? 'a machine that has ' + repoLabel(run.repo)}…
 					{:else}
 						{run.resume_session_id ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
 						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}

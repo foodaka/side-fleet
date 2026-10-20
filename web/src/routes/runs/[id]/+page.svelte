@@ -11,7 +11,7 @@
 	import GitBranch from '@lucide/svelte/icons/git-branch';
 	import Square from '@lucide/svelte/icons/square';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { duration, PERMISSIONS, permName } from '#lib/sf/format';
+	import { duration, PERMISSIONS, permName, repoLabel } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
@@ -98,7 +98,7 @@
 					{#if thread.machine}
 						<span class="inline-flex items-center gap-1.5"><StatusDot status={machineOnline ? 'online' : 'offline'} /><span class="text-foreground/80">{thread.machine}</span></span>
 					{/if}
-					<span class="font-mono text-[11.5px]">{root.repo}</span>
+					<span class="font-mono text-[11.5px]">{repoLabel(root.repo)}</span>
 					{#if thread.branch}
 						<span class="inline-flex items-center gap-1 rounded-md bg-muted py-0.5 pr-0.5 pl-1.5">
 							<GitBranch class="size-3" /><span class="font-mono text-[11.5px] text-foreground/80">{thread.branch}</span>
@@ -123,7 +123,7 @@
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}
 						<p class="rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground">
-							The changes are on branch <span class="font-mono text-foreground/80">{thread.branch}</span> in {root?.repo} on {thread.machine}. Review, merge or push it from there.
+							The changes are on branch <span class="font-mono text-foreground/80">{thread.branch}</span> in {repoLabel(root?.repo)} on {thread.machine}. Review, merge or push it from there.
 						</p>
 					{/if}
 				{/if}

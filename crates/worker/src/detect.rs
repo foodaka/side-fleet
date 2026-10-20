@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sidefleet_core::{Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo, SystemStats};
+use sidefleet_core::{repo_identity, Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo, SystemStats};
 use std::sync::Mutex;
 use tokio::process::Command;
 
@@ -94,6 +94,41 @@ pub async fn detect_ollama() -> Option<OllamaAgent> {
     Some(OllamaAgent { version, models })
 }
 
+/// The `origin` remote URL of a checkout, read from its git config without
+/// spawning git (a machine can have hundreds of checkouts).
+pub fn origin_url(repo: &Path) -> Option<String> {
+    let dotgit = repo.join(".git");
+    let config = if dotgit.is_dir() {
+        dotgit.join("config")
+    } else {
+        // A linked worktree or submodule: `.git` is a file pointing at the real git dir.
+        let text = std::fs::read_to_string(&dotgit).ok()?;
+        let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        let gitdir = if gitdir.is_absolute() { gitdir } else { repo.join(gitdir) };
+        // Worktrees keep the shared config in their `commondir`.
+        let common = std::fs::read_to_string(gitdir.join("commondir")).ok().map(|c| gitdir.join(c.trim()));
+        common.unwrap_or(gitdir).join("config")
+    };
+    parse_origin(&std::fs::read_to_string(config).ok()?)
+}
+
+fn parse_origin(config: &str) -> Option<String> {
+    let mut in_origin = false;
+    for line in config.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_origin = l.replace(char::is_whitespace, "") == "[remote\"origin\"]";
+        } else if in_origin {
+            if let Some((k, v)) = l.split_once('=') {
+                if k.trim() == "url" {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Folders never worth descending into when looking for git checkouts.
 const SKIP_DIRS: &[&str] = &[
     "Library", "Applications", "Music", "Movies", "Pictures", "Public", "Desktop.localized",
@@ -116,7 +151,8 @@ pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
             } else {
                 dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string()
             };
-            out.push(RepoInfo { name, path: dir.to_string_lossy().to_string() });
+            let id = origin_url(dir).and_then(|u| repo_identity(&u)).unwrap_or_else(|| name.clone());
+            out.push(RepoInfo { name, path: dir.to_string_lossy().to_string(), id });
             return; // do not descend into nested repos / submodules
         }
         if depth >= max_depth {
@@ -197,6 +233,24 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_origin_and_derives_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("code/side-fleet/.git")).unwrap();
+        std::fs::write(
+            root.join("code/side-fleet/.git/config"),
+            "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = git@github.com:other/x.git\n[remote \"origin\"]\n\turl = git@github.com:foodaka/side-fleet.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("scratch/.git")).unwrap();
+        std::fs::write(root.join("scratch/.git/config"), "[core]\n\tbare = false\n").unwrap();
+        let repos = scan_repos(root, 3);
+        let by = |n: &str| repos.iter().find(|r| r.name == n).unwrap().clone();
+        assert_eq!(by("code/side-fleet").id, "github.com/foodaka/side-fleet");
+        assert_eq!(by("scratch").id, "scratch", "no remote: the folder name is the identity");
+    }
 
     #[test]
     fn parses_versions() {

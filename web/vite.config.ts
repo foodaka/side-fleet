@@ -64,6 +64,8 @@ export default defineConfig({
 				strict: false
 			}),
 			router: { type: 'hash' },
+			// A fixed version keeps builds byte-for-byte reproducible (CI checks the committed build).
+			version: { name: 'sidefleet', pollInterval: 0 },
 			paths: { relative: true }
 		})
 	],

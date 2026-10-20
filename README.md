@@ -98,6 +98,12 @@ comes from. With no machine online it shows "Connect your first machine": the bu
 `GET /v1/setup`, developer-key only), and it flips to the compose box the moment the first
 heartbeat arrives. The Machines page keeps the same install line with a Copy button.
 
+The lazy way to add a machine: the page also offers a one-paragraph prompt to paste into
+Claude Code on that machine. It points the agent at `GET /connect.md` (public, no secrets),
+which walks it through checking the sign-in, installing Rust, building `acw`, starting it with
+the token in the environment, and installing a launchd or systemd user service so it survives
+reboots. The token travels only in the pasted prompt.
+
 ### Browser auth
 
 The page asks for the developer key once and keeps it in `localStorage`. It talks to the

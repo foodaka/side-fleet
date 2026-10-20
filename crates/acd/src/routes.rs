@@ -31,6 +31,7 @@ use crate::db::{self, AppendOutcome, FinishOutcome};
 use crate::AppState;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
+const CONNECT_MD: &str = include_str!("../static/connect.md");
 pub const ALLOWED_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 pub fn router(state: AppState) -> Router {
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/connect.md", get(connect_md))
         .merge(dev)
         .merge(worker)
         .layer(CorsLayer::permissive())
@@ -64,6 +66,17 @@ pub fn router(state: AppState) -> Router {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+/// Instructions an agent on another machine can read to set itself up as a
+/// worker. Contains no secrets, so it is public; the token travels in the
+/// prompt the user pastes, never in this document.
+async fn connect_md(headers: HeaderMap) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:8080");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        CONNECT_MD.replace("{{ORIGIN}}", &format!("http://{host}")),
+    )
 }
 
 // ---- errors ----

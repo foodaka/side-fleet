@@ -172,7 +172,8 @@
           <div class="steps">
             <div class="step"><span class="num">1</span><div class="body"><p>Pick a machine that already has <b>Claude Code installed and signed in</b> and your repos checked out. Your laptop is fine. It needs no open ports, only a way to reach this page's address.</p><div class="muted">Check with <span class="mono">claude --version</span> on that machine.</div></div></div>
             <div class="step"><span class="num">2</span><div class="body"><p>Build the worker there (Rust 1.80+), from this repository:</p><div class="cmd"><code>cargo build --release -p acw</code><button type="button" data-copy="cargo build --release -p acw">Copy</button></div></div></div>
-            <div class="step"><span class="num">3</span><div class="body"><p>Start it, pointed at this control plane. The token is the one this control plane was started with; the command below has it filled in.</p><div class="cmd"><code id="ob-cmd">acw run --control … --token … --repos ~/Code</code><button type="button" id="ob-copy">Copy</button></div><div class="muted" style="margin-top:8px">If this page's address is only reachable from this machine, use the control plane's Tailscale or LAN address instead of <span class="mono" id="ob-origin"></span>.</div></div></div>
+            <div class="step"><span class="num">3</span><div class="body"><p>Start it, pointed at this control plane. The token is the one this control plane was started with; the command below has it filled in.</p><div class="cmd"><code id="ob-cmd">acw run --control … --token … --repos ~/Code</code><button type="button" id="ob-copy">Copy</button></div><div class="muted" style="margin-top:8px">If this page's address is only reachable from this machine, use the control plane's Tailscale or LAN address instead of <span class="mono" id="ob-origin"></span>.</div>
+            <p style="margin-top:12px"><b>Or let an agent do steps 2 to 4.</b> Paste this into Claude Code on that machine; it reads the instructions at <a href="/connect.md" target="_blank" class="mono">/connect.md</a>, builds the worker, starts it and makes it survive reboots.</p><div class="cmd"><code id="ob-prompt"></code><button type="button" id="ob-prompt-copy">Copy prompt</button></div></div></div>
             <div class="step"><span class="num" id="ob-num4">4</span><div class="body"><p>Watch it appear. The worker checks Claude Code, Codex and Ollama, scans your repos, and registers within a few seconds.</p><div class="waiting" id="ob-wait"><span class="dot off"></span><span>Waiting for the first heartbeat…</span></div></div></div>
           </div>
         </section>
@@ -224,6 +225,10 @@
       <section class="install">
         <div><div class="l">Install a worker on any machine you own</div><code class="mono" id="installcmd">acw run --control … --token … --repos ~/Code</code></div>
         <button id="copyinstall">Copy</button>
+      </section>
+      <section class="install" style="background:#fff;color:var(--fg);border:1px solid var(--line2)">
+        <div style="min-width:0"><div class="l" style="color:var(--muted)">Or paste this into Claude Code on that machine and let it do the install</div><code class="mono" id="agentprompt" style="font-size:12px;white-space:pre-wrap;word-break:break-word"></code></div>
+        <button id="copyprompt" style="background:var(--fg);border-color:var(--fg)">Copy prompt</button>
       </section>
       <section class="mgrid" id="mgrid"></section>
     </section>
@@ -329,6 +334,7 @@
       renderOnboarding(on);
       renderRepoSelect(); renderWillRun(); renderRecent(); renderRuns(); renderMachines();
       $('installcmd').textContent = connectCmd(true);
+      $('agentprompt').textContent = agentPrompt(true);
     } catch (e) { if (e.message !== 'unauthorised') setConn(false, 'control plane unreachable'); }
   }
 
@@ -337,9 +343,15 @@
     const tok = setup && setup.worker_token ? (masked ? setup.worker_token.slice(0, 4) + '••••••••' : setup.worker_token) : '<worker token>';
     return 'acw run --control ' + location.origin + ' --token ' + tok + ' --repos ~/Code';
   }
+  function agentPrompt(masked) {
+    const tok = setup && setup.worker_token ? (masked ? setup.worker_token.slice(0, 4) + '••••••••' : setup.worker_token) : '<worker token>';
+    return 'Read ' + location.origin + '/connect.md and follow it to set up this machine as an AgentCloud worker. Control plane: ' + location.origin + '. Worker token: ' + tok + ' (keep it out of logs and your summary). Scan ~/Code for repos.';
+  }
   function copyText(t, btn) { try { navigator.clipboard.writeText(t); const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = o, 1500); } catch (_) {} }
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-copy]'); if (b) copyText(b.dataset.copy, b); });
   $('ob-copy').onclick = (e) => copyText(connectCmd(false), e.target);
+  $('ob-prompt-copy').onclick = (e) => copyText(agentPrompt(false), e.target);
+  $('copyprompt').onclick = (e) => copyText(agentPrompt(false), e.target);
   function renderOnboarding(online) {
     const first = workers.length === 0;
     const show = online === 0;
@@ -348,6 +360,7 @@
     $('how').style.display = (show || runs.length === 0) ? '' : 'none';
     if (!show) return;
     $('ob-cmd').textContent = connectCmd(true);
+    $('ob-prompt').textContent = agentPrompt(true);
     $('ob-origin').textContent = location.origin;
     $('onboard').querySelector('h1').textContent = first ? 'Connect your first machine' : 'No machine is online';
     $('ob-wait').innerHTML = first ? '<span class="dot off"></span><span>Waiting for the first heartbeat…</span>'

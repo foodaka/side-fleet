@@ -1,0 +1,384 @@
+//! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
+//! workspace builds without a database.
+
+use ac_core::{Capabilities, Run, RunEvent, RunStatus, Worker};
+use chrono::{DateTime, Utc};
+use serde_json::{json, Value};
+use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use uuid::Uuid;
+
+fn row_to_run(r: &PgRow) -> Run {
+    let status: String = r.get("status");
+    Run {
+        id: r.get("id"),
+        task: r.get("task"),
+        model: r.get("model"),
+        repo: r.get("repo"),
+        status: RunStatus::parse(&status).unwrap_or(RunStatus::Failed),
+        worker_id: r.get("worker_id"),
+        stop_requested: r.get("stop_requested"),
+        created_at: r.get("created_at"),
+        started_at: r.get("started_at"),
+        finished_at: r.get("finished_at"),
+        result: r.get("result"),
+    }
+}
+
+fn row_to_event(r: &PgRow) -> RunEvent {
+    RunEvent {
+        run_id: r.get("run_id"),
+        seq: r.get("seq"),
+        kind: r.get("kind"),
+        payload: r.get("payload"),
+        at: r.get("at"),
+    }
+}
+
+fn row_to_worker(r: &PgRow) -> Worker {
+    let caps: Value = r.get("capabilities");
+    Worker {
+        id: r.get("id"),
+        display_name: r.get("display_name"),
+        capabilities: serde_json::from_value(caps).unwrap_or_default(),
+        last_heartbeat_at: r.get("last_heartbeat_at"),
+    }
+}
+
+const RUN_COLS: &str =
+    "id, task, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result";
+
+/// Append an event inside `tx`. The caller must already hold the run row lock
+/// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
+async fn append_event_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    kind: &str,
+    payload: &Value,
+) -> sqlx::Result<RunEvent> {
+    let row = sqlx::query(
+        "INSERT INTO run_events (run_id, seq, kind, payload)
+         VALUES ($1, (SELECT COALESCE(MAX(seq) + 1, 0) FROM run_events WHERE run_id = $1), $2, $3)
+         RETURNING run_id, seq, kind, payload, at",
+    )
+    .bind(run_id)
+    .bind(kind)
+    .bind(payload)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row_to_event(&row))
+}
+
+async fn lock_run(tx: &mut Transaction<'_, Postgres>, run_id: Uuid) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1 FOR UPDATE"))
+        .bind(run_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(row.as_ref().map(row_to_run))
+}
+
+fn status_payload(status: RunStatus) -> Value {
+    json!({ "status": status.as_str() })
+}
+
+pub async fn create_run(
+    pool: &PgPool,
+    task: &str,
+    model: &str,
+    repo: &str,
+) -> sqlx::Result<(Run, RunEvent)> {
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "INSERT INTO runs (id, task, model, repo, status) VALUES ($1, $2, $3, $4, 'queued')
+         RETURNING {RUN_COLS}"
+    ))
+    .bind(id)
+    .bind(task)
+    .bind(model)
+    .bind(repo)
+    .fetch_one(&mut *tx)
+    .await?;
+    let run = row_to_run(&row);
+    let ev = append_event_locked(&mut tx, id, "status", &status_payload(RunStatus::Queued)).await?;
+    tx.commit().await?;
+    Ok((run, ev))
+}
+
+pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.as_ref().map(row_to_run))
+}
+
+pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Run>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {RUN_COLS} FROM runs ORDER BY created_at DESC LIMIT $1"
+    ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_run).collect())
+}
+
+pub async fn events_since(pool: &PgPool, run_id: Uuid, from_seq: i64) -> sqlx::Result<Vec<RunEvent>> {
+    let rows = sqlx::query(
+        "SELECT run_id, seq, kind, payload, at FROM run_events
+         WHERE run_id = $1 AND seq >= $2 ORDER BY seq",
+    )
+    .bind(run_id)
+    .bind(from_seq)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_event).collect())
+}
+
+/// Append worker-reported events. Returns the stored events and the current
+/// control state. Events are only accepted while the run is `running` and
+/// owned by `worker_id`.
+pub enum AppendOutcome {
+    Appended(Vec<RunEvent>, Run),
+    NotFound,
+    NotOwner,
+    NotRunning(Run),
+}
+
+pub async fn append_events(
+    pool: &PgPool,
+    run_id: Uuid,
+    worker_id: &str,
+    events: &[ac_core::NewEvent],
+) -> sqlx::Result<AppendOutcome> {
+    let mut tx = pool.begin().await?;
+    let Some(run) = lock_run(&mut tx, run_id).await? else {
+        return Ok(AppendOutcome::NotFound);
+    };
+    if run.worker_id.as_deref() != Some(worker_id) {
+        return Ok(AppendOutcome::NotOwner);
+    }
+    if run.status != RunStatus::Running {
+        return Ok(AppendOutcome::NotRunning(run));
+    }
+    let mut stored = Vec::with_capacity(events.len());
+    for e in events {
+        let payload = ac_core::redact::redact_json(&e.payload);
+        stored.push(append_event_locked(&mut tx, run_id, &e.kind, &payload).await?);
+    }
+    tx.commit().await?;
+    Ok(AppendOutcome::Appended(stored, run))
+}
+
+/// Request a stop. A queued run becomes `stopped` immediately; a running run
+/// gets `stop_requested` set for the worker to act on. Returns the run and any
+/// status event to broadcast.
+pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(Run, Option<RunEvent>)>> {
+    let mut tx = pool.begin().await?;
+    let Some(run) = lock_run(&mut tx, run_id).await? else {
+        return Ok(None);
+    };
+    let out = match run.status {
+        RunStatus::Queued => {
+            let row = sqlx::query(&format!(
+                "UPDATE runs SET status = 'stopped', stop_requested = true, finished_at = now(),
+                 result = $2 WHERE id = $1 RETURNING {RUN_COLS}"
+            ))
+            .bind(run_id)
+            .bind(json!({"reason": "stopped before a worker claimed it"}))
+            .fetch_one(&mut *tx)
+            .await?;
+            let ev =
+                append_event_locked(&mut tx, run_id, "status", &status_payload(RunStatus::Stopped))
+                    .await?;
+            (row_to_run(&row), Some(ev))
+        }
+        RunStatus::Running => {
+            let row = sqlx::query(&format!(
+                "UPDATE runs SET stop_requested = true WHERE id = $1 RETURNING {RUN_COLS}"
+            ))
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let ev = if !run.stop_requested {
+                Some(append_event_locked(&mut tx, run_id, "stop_requested", &json!({})).await?)
+            } else {
+                None
+            };
+            (row_to_run(&row), ev)
+        }
+        _ => (run, None),
+    };
+    tx.commit().await?;
+    Ok(Some(out))
+}
+
+/// Atomically claim the oldest queued run for one of `repos`.
+pub async fn claim_run(
+    pool: &PgPool,
+    worker_id: &str,
+    repos: &[String],
+) -> sqlx::Result<Option<(Run, RunEvent)>> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
+         WHERE id = (
+            SELECT id FROM runs WHERE status = 'queued' AND repo = ANY($2)
+            ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+         )
+         RETURNING {RUN_COLS}"
+    ))
+    .bind(worker_id)
+    .bind(repos)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let run = row_to_run(&row);
+    let ev = append_event_locked(
+        &mut tx,
+        run.id,
+        "status",
+        &json!({"status": "running", "worker_id": worker_id}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some((run, ev)))
+}
+
+pub enum FinishOutcome {
+    Finished(Run, RunEvent),
+    NotFound,
+    NotOwner,
+    AlreadyFinished(Run),
+}
+
+pub async fn finish_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    worker_id: &str,
+    status: RunStatus,
+    result: Option<Value>,
+) -> sqlx::Result<FinishOutcome> {
+    debug_assert!(status.is_terminal());
+    let mut tx = pool.begin().await?;
+    let Some(run) = lock_run(&mut tx, run_id).await? else {
+        return Ok(FinishOutcome::NotFound);
+    };
+    if run.worker_id.as_deref() != Some(worker_id) {
+        return Ok(FinishOutcome::NotOwner);
+    }
+    if run.status != RunStatus::Running {
+        return Ok(FinishOutcome::AlreadyFinished(run));
+    }
+    let result = result.map(|r| ac_core::redact::redact_json(&r));
+    let row = sqlx::query(&format!(
+        "UPDATE runs SET status = $2, finished_at = now(), result = $3 WHERE id = $1 RETURNING {RUN_COLS}"
+    ))
+    .bind(run_id)
+    .bind(status.as_str())
+    .bind(result)
+    .fetch_one(&mut *tx)
+    .await?;
+    let ev = append_event_locked(&mut tx, run_id, "status", &status_payload(status)).await?;
+    tx.commit().await?;
+    Ok(FinishOutcome::Finished(row_to_run(&row), ev))
+}
+
+/// Fail running runs whose worker has not heart-beaten for `stale_secs`.
+pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<Vec<RunEvent>> {
+    let rows = sqlx::query(
+        "SELECT r.id FROM runs r JOIN workers w ON w.id = r.worker_id
+         WHERE r.status = 'running' AND w.last_heartbeat_at < now() - make_interval(secs => $1)",
+    )
+    .bind(stale_secs as f64)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let id: Uuid = row.get("id");
+        let mut tx = pool.begin().await?;
+        let Some(run) = lock_run(&mut tx, id).await? else { continue };
+        if run.status != RunStatus::Running {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE runs SET status = 'failed', finished_at = now(), result = $2 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(json!({"error": "worker stopped heart-beating while the run was in progress"}))
+        .execute(&mut *tx)
+        .await?;
+        let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "failed", "reason": "worker lost"})).await?;
+        tx.commit().await?;
+        out.push(ev);
+    }
+    Ok(out)
+}
+
+// ---- workers ----
+
+pub async fn upsert_worker(
+    pool: &PgPool,
+    id: &str,
+    display_name: &str,
+    token_hash: &str,
+    caps: &Capabilities,
+) -> sqlx::Result<Worker> {
+    let row = sqlx::query(
+        "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name,
+            token_hash = EXCLUDED.token_hash, capabilities = EXCLUDED.capabilities,
+            last_heartbeat_at = now()
+         RETURNING id, display_name, capabilities, last_heartbeat_at",
+    )
+    .bind(id)
+    .bind(display_name)
+    .bind(token_hash)
+    .bind(serde_json::to_value(caps).unwrap_or(Value::Null))
+    .fetch_one(pool)
+    .await?;
+    Ok(row_to_worker(&row))
+}
+
+/// Returns false when the worker is unknown or registered with a different token.
+pub async fn heartbeat(
+    pool: &PgPool,
+    id: &str,
+    token_hash: &str,
+    caps: &Capabilities,
+) -> sqlx::Result<bool> {
+    let res = sqlx::query(
+        "UPDATE workers SET capabilities = $3, last_heartbeat_at = now()
+         WHERE id = $1 AND token_hash = $2",
+    )
+    .bind(id)
+    .bind(token_hash)
+    .bind(serde_json::to_value(caps).unwrap_or(Value::Null))
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+pub async fn worker_owns_token(pool: &PgPool, id: &str, token_hash: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1 AND token_hash = $2")
+        .bind(id)
+        .bind(token_hash)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+pub async fn list_workers(pool: &PgPool) -> sqlx::Result<Vec<Worker>> {
+    let rows = sqlx::query(
+        "SELECT id, display_name, capabilities, last_heartbeat_at FROM workers ORDER BY display_name",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_worker).collect())
+}
+
+pub fn is_online(last_heartbeat_at: DateTime<Utc>) -> bool {
+    Utc::now().signed_duration_since(last_heartbeat_at).num_seconds() < 45
+}

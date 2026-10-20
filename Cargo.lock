@@ -21,6 +21,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "bytes",
  "chrono",
  "dotenvy",
  "futures",

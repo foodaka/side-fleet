@@ -35,3 +35,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+bytes.workspace = true

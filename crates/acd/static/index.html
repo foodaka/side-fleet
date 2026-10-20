@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentCloud</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #272b36; --fg: #e6e8ee; --muted: #8b93a7;
+    --accent: #7aa2f7; --ok: #9ece6a; --warn: #e0af68; --err: #f7768e; --tool: #bb9af7;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  header .spacer { flex: 1; }
+  header button { font-size: 12px; }
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 0; min-height: calc(100vh - 49px); }
+  aside { border-right: 1px solid var(--line); padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }
+  section.view { padding: 16px 20px; display: flex; flex-direction: column; min-width: 0; }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  textarea, select, input { width: 100%; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; }
+  textarea { min-height: 120px; resize: vertical; }
+  button { background: var(--accent); color: #0b0d12; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+  button.danger { background: var(--err); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .workers { display: flex; flex-direction: column; gap: 8px; }
+  .worker { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+  .worker .name { font-weight: 600; font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.on { background: var(--ok); }
+  .muted { color: var(--muted); }
+  .runs { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow: auto; }
+  .run { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .run:hover { background: var(--panel); }
+  .run .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .chip.queued { color: var(--warn); border-color: var(--warn); }
+  .chip.running { color: var(--accent); border-color: var(--accent); }
+  .chip.succeeded { color: var(--ok); border-color: var(--ok); }
+  .chip.failed, .chip.stopped { color: var(--err); border-color: var(--err); }
+  .viewhead { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+  .viewhead .task { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  #narration { flex: 1; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .ev { animation: fade .2s ease-in; }
+  @keyframes fade { from { opacity: 0; transform: translateY(2px);} to { opacity: 1; transform: none; } }
+  .ev.text { white-space: pre-wrap; word-break: break-word; }
+  .ev.tool { font-family: var(--mono); font-size: 12.5px; color: var(--tool); }
+  .ev.tool .name { font-weight: 700; }
+  .ev.tool .sum { color: var(--fg); opacity: .85; }
+  .ev.toolres details { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .ev.toolres summary { cursor: pointer; user-select: none; }
+  .ev.toolres pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; background: var(--bg); padding: 8px; border-radius: 6px; color: var(--fg); }
+  .ev.toolres.error summary { color: var(--err); }
+  .ev.status { font-size: 12px; color: var(--muted); }
+  .ev.result { border-top: 1px solid var(--line); padding-top: 10px; white-space: pre-wrap; word-break: break-word; }
+  .ev.result.error { color: var(--err); }
+  .ev.result .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .ev.stderr { font-family: var(--mono); font-size: 12px; color: var(--warn); white-space: pre-wrap; }
+  .thinking { color: var(--muted); font-style: italic; font-size: 12px; }
+  .empty { color: var(--muted); margin: auto; text-align: center; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgentCloud</h1>
+  <span class="muted" id="conn">not connected</span>
+  <span class="spacer"></span>
+  <button class="secondary" id="keybtn">Set developer key</button>
+</header>
+<main>
+  <aside>
+    <form id="form">
+      <label for="task">Task</label>
+      <textarea id="task" placeholder="e.g. Summarise what this repository does in three sentences."></textarea>
+      <div class="row" style="margin-top:10px">
+        <div style="flex:1">
+          <label for="model">Model</label>
+          <select id="model">
+            <option value="claude-sonnet-5-5" selected>claude-sonnet-5-5</option>
+            <option value="claude-opus-5-5">claude-opus-5-5</option>
+            <option value="claude-haiku-5-5">claude-haiku-5-5</option>
+          </select>
+        </div>
+        <div style="flex:1">
+          <label for="repo">Repo</label>
+          <select id="repo"><option value="">(no workers yet)</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button type="submit" id="runbtn">Run</button>
+        <span class="muted" id="formmsg"></span>
+      </div>
+    </form>
+    <div>
+      <label>Workers</label>
+      <div class="workers" id="workers"><span class="muted">none registered</span></div>
+    </div>
+    <div>
+      <label>Recent runs</label>
+      <div class="runs" id="runs"></div>
+    </div>
+  </aside>
+  <section class="view">
+    <div class="viewhead">
+      <span class="chip" id="status">idle</span>
+      <div class="task" id="viewtask">Pick a repo, type a task, press Run.</div>
+      <span class="muted" id="viewmeta"></span>
+      <button class="danger" id="stopbtn" disabled>Stop</button>
+    </div>
+    <div id="narration"><div class="empty">The agent's narration will appear here, live.</div></div>
+  </section>
+</main>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  let key = '';
+  try { key = localStorage.getItem('acd_dev_key') || ''; } catch (_) {}
+  let currentRun = null;
+  let abort = null;
+
+  function askKey(force) {
+    if (key && !force) return key;
+    const k = window.prompt('Developer key (ACD_DEV_KEY on the control plane):', '');
+    if (k) { key = k.trim(); try { localStorage.setItem('acd_dev_key', key); } catch (_) {} }
+    return key;
+  }
+  $('keybtn').onclick = () => { askKey(true); refresh(); };
+
+  async function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ 'Authorization': 'Bearer ' + askKey(false) }, opts.headers || {});
+    const r = await fetch(path, opts);
+    if (r.status === 401) { $('conn').textContent = 'unauthorised: set the developer key'; throw new Error('unauthorised'); }
+    if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
+    return r.status === 204 ? null : r.json();
+  }
+
+  // ---- workers & repo dropdown ----
+  function renderWorkers(ws) {
+    const box = $('workers');
+    box.innerHTML = '';
+    if (!ws.length) { box.innerHTML = '<span class="muted">none registered</span>'; }
+    const repoSel = $('repo');
+    const prev = repoSel.value;
+    repoSel.innerHTML = '';
+    const seen = new Set();
+    ws.forEach(w => {
+      const c = w.capabilities || {};
+      const a = c.agents || {};
+      const d = document.createElement('div');
+      d.className = 'worker';
+      const claude = a.claude ? ('Claude Code ' + a.claude.version + (a.claude.signed_in ? ' · signed in' : ' · NOT signed in')) : 'no Claude Code';
+      const extras = [a.codex ? 'Codex ' + a.codex.version : null, a.ollama ? 'Ollama (' + (a.ollama.models || []).length + ' models)' : null].filter(Boolean).join(' · ');
+      d.innerHTML = '<div class="name"><span class="dot ' + (w.online ? 'on' : '') + '"></span>' + esc(w.display_name) + ' <span class="muted">' + esc(w.id) + '</span></div>'
+        + '<div>' + esc(claude) + (extras ? ' · ' + esc(extras) : '') + '</div>'
+        + '<div class="muted">' + (c.repos || []).length + ' repos' + (w.online ? '' : ' · offline') + '</div>';
+      box.appendChild(d);
+      if (w.online) (c.repos || []).forEach(r => {
+        if (seen.has(r.name)) return; seen.add(r.name);
+        const o = document.createElement('option'); o.value = r.name; o.textContent = r.name + '  (' + w.display_name + ')';
+        repoSel.appendChild(o);
+      });
+    });
+    if (!seen.size) { const o = document.createElement('option'); o.value = ''; o.textContent = '(no online workers)'; repoSel.appendChild(o); }
+    if (prev && seen.has(prev)) repoSel.value = prev;
+  }
+
+  function renderRuns(rs) {
+    const box = $('runs');
+    box.innerHTML = '';
+    rs.forEach(r => {
+      const d = document.createElement('div');
+      d.className = 'run';
+      d.innerHTML = '<span class="chip ' + r.status + '">' + r.status + '</span><span class="t">' + esc(r.task) + '</span><span class="muted">' + esc(r.repo) + '</span>';
+      d.onclick = () => openRun(r.id);
+      box.appendChild(d);
+    });
+  }
+
+  async function refresh() {
+    try {
+      const [ws, rs] = await Promise.all([api('/v1/workers'), api('/v1/runs?limit=30')]);
+      renderWorkers(ws); renderRuns(rs);
+      $('conn').textContent = ws.filter(w => w.online).length + ' worker(s) online';
+    } catch (e) { if (e.message !== 'unauthorised') $('conn').textContent = 'control plane unreachable: ' + e.message; }
+  }
+
+  // ---- submit ----
+  $('form').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const task = $('task').value.trim(), model = $('model').value, repo = $('repo').value;
+    if (!task || !repo) { $('formmsg').textContent = 'task and repo are required'; return; }
+    $('runbtn').disabled = true; $('formmsg').textContent = 'queueing…';
+    try {
+      const r = await api('/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task, model, repo }) });
+      $('formmsg').textContent = '';
+      openRun(r.id);
+      refresh();
+    } catch (e) { $('formmsg').textContent = e.message; }
+    $('runbtn').disabled = false;
+  };
+
+  $('stopbtn').onclick = async () => {
+    if (!currentRun) return;
+    $('stopbtn').disabled = true;
+    try { await api('/v1/runs/' + currentRun + '/stop', { method: 'POST' }); } catch (e) { addStatus('stop failed: ' + e.message); }
+  };
+
+  // ---- live view ----
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  function add(html, cls) {
+    const n = $('narration');
+    if (n.firstElementChild && n.firstElementChild.classList.contains('empty')) n.innerHTML = '';
+    const d = document.createElement('div'); d.className = 'ev ' + cls; d.innerHTML = html; n.appendChild(d);
+    n.scrollTop = n.scrollHeight;
+    return d;
+  }
+  function addStatus(t) { add(esc(t), 'status'); }
+  function setStatus(s) { const c = $('status'); c.className = 'chip ' + s; c.textContent = s; $('stopbtn').disabled = !(s === 'queued' || s === 'running'); }
+
+  const toolNames = {};
+  function render(ev) {
+    const p = ev.payload || {};
+    switch (ev.kind) {
+      case 'status':
+        setStatus(p.status);
+        addStatus('status → ' + p.status + (p.worker_id ? ' on ' + p.worker_id : '') + (p.reason ? ' (' + p.reason + ')' : ''));
+        break;
+      case 'stop_requested': addStatus('stop requested, waiting for the worker to kill the agent…'); break;
+      case 'started': addStatus('worker started ' + (p.command || 'the agent') + ' in ' + (p.cwd || '')); break;
+      case 'agent_init': addStatus('Claude Code session ' + (p.session_id || '') + ' with model ' + (p.model || '')); break;
+      case 'assistant_text': add(esc(p.text), 'text'); break;
+      case 'assistant_thinking': add('thinking…', 'thinking'); break;
+      case 'tool_use':
+        toolNames[p.id] = p.name;
+        add('<span class="name">▶ ' + esc(p.name) + '</span> <span class="sum">' + esc(p.summary) + '</span>', 'tool');
+        break;
+      case 'tool_result': {
+        const name = toolNames[p.tool_use_id] || 'tool';
+        const c = p.content || '';
+        const first = c.split('\n')[0].slice(0, 120);
+        add('<details><summary>' + (p.is_error ? '✖ ' : '✔ ') + esc(name) + ' result' + (p.truncated ? ' (truncated)' : '') + (first ? ': <span class="muted">' + esc(first) + '</span>' : '') + '</summary><pre>' + esc(c) + '</pre></details>', 'toolres' + (p.is_error ? ' error' : ''));
+        break;
+      }
+      case 'result': {
+        const meta = [];
+        if (p.duration_ms != null) meta.push((p.duration_ms / 1000).toFixed(1) + 's');
+        if (p.num_turns != null) meta.push(p.num_turns + ' turns');
+        if (p.total_cost_usd != null) meta.push('$' + Number(p.total_cost_usd).toFixed(4));
+        add(esc(p.result || (p.is_error ? 'agent reported an error (' + p.subtype + ')' : '')) + '<div class="meta">' + esc(meta.join(' · ')) + '</div>', 'result' + (p.is_error ? ' error' : ''));
+        break;
+      }
+      case 'stderr': add(esc(p.text), 'stderr'); break;
+      case 'error': add('error: ' + esc(p.message || JSON.stringify(p)), 'result error'); break;
+      case 'stopped': addStatus('agent process killed (' + (p.signal || 'signal') + ')'); break;
+      case 'agent_other': addStatus('agent event ' + (p.type || '') + ' ' + (p.subtype || '')); break;
+      default: addStatus(ev.kind + ' ' + JSON.stringify(p));
+    }
+  }
+
+  async function openRun(id) {
+    if (abort) abort.abort();
+    abort = new AbortController();
+    currentRun = id;
+    $('narration').innerHTML = '';
+    const run = await api('/v1/runs/' + id);
+    $('viewtask').textContent = run.task;
+    $('viewmeta').textContent = run.model + ' · ' + run.repo + (run.worker_id ? ' · ' + run.worker_id : '');
+    setStatus(run.status);
+    subscribe(id, 0, abort.signal);
+  }
+
+  // SSE over fetch so the Authorization header can be sent (EventSource cannot).
+  async function subscribe(id, from, signal) {
+    let lastSeq = from - 1;
+    while (!signal.aborted) {
+      try {
+        const r = await fetch('/v1/runs/' + id + '/events', { headers: { 'Authorization': 'Bearer ' + askKey(false), 'Last-Event-ID': String(lastSeq) }, signal });
+        if (!r.ok) { addStatus('stream error ' + r.status); return; }
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        let ended = false;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+            let evName = 'message', data = '', evId = null;
+            chunk.split('\n').forEach(line => {
+              if (line.startsWith('event:')) evName = line.slice(6).trim();
+              else if (line.startsWith('data:')) data += line.slice(5).trim();
+              else if (line.startsWith('id:')) evId = line.slice(3).trim();
+            });
+            if (evName === 'end') { ended = true; continue; }
+            if (!data || evName === 'error') { if (evName === 'error') addStatus(data); continue; }
+            try { const ev = JSON.parse(data); if (evId != null) lastSeq = Number(evId); render(ev); } catch (e) { console.warn('bad event', e, data); }
+          }
+        }
+        if (ended) { refresh(); return; }
+      } catch (e) {
+        if (signal.aborted) return;
+        addStatus('stream disconnected, retrying…');
+      }
+      await new Promise(res => setTimeout(res, 1500));
+    }
+  }
+
+  askKey(false);
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

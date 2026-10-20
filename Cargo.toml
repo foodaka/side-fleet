@@ -32,3 +32,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 gethostname = "1"
 tempfile = "3"
+bytes = "1"

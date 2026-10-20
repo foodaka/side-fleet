@@ -5,4 +5,5 @@
 pub mod agent;
 pub mod client;
 pub mod detect;
+pub mod updater;
 pub mod worker;

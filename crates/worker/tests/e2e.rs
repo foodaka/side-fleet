@@ -64,6 +64,8 @@ impl Harness {
             max_runs: Some(max_runs),
             parallel: 2,
             worktrees_dir: repos.path().join(".worktrees"),
+            version: "test-build".into(),
+            allow_remote_update: false,
         };
         let worker = tokio::spawn(run_worker(cfg));
         let h = Harness { env, http: Client::new(), _repos: repos, worker };

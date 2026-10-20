@@ -60,6 +60,8 @@ if [ -n "$checkout" ]; then
   cargo install --path "$checkout/crates/cli" --locked --root "$tmp/root" --quiet
   install -m 755 "$tmp/root/bin/sidefleet" "$BIN_DIR/sidefleet"
   echo "Built and installed to $BIN_DIR/sidefleet"
+  # Remember the checkout so `sidefleet update` pulls and rebuilds from it.
+  mkdir -p "$HOME/.sidefleet" && printf 'SIDEFLEET_SOURCE=%s\n' "$checkout" > "$HOME/.sidefleet/install.env"
   got=skip
 elif curl -fsSL "$url" -o "$tmp/sidefleet.tar.gz" 2>/dev/null; then
   got=1
@@ -75,6 +77,7 @@ elif [ -n "$got" ]; then
   tar -xzf "$tmp/sidefleet.tar.gz" -C "$tmp"
   install -m 755 "$tmp/sidefleet" "$BIN_DIR/sidefleet"
   echo "Installed prebuilt binary to $BIN_DIR/sidefleet"
+  rm -f "$HOME/.sidefleet/install.env"   # releases: `sidefleet update` re-downloads
 else
   echo "No prebuilt binary for $target yet; building from source (a few minutes)."
   ensure_cc; ensure_rust
@@ -108,6 +111,7 @@ case ":$PATH:" in
     ;;
 esac
 
+"$BIN_DIR/sidefleet" --version 2>/dev/null | sed 's/^/Installed: /'
 echo
 echo "Next:"
 echo "  on the machine that will host the page:   sidefleet serve"

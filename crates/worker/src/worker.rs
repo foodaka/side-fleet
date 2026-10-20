@@ -38,6 +38,10 @@ pub struct WorkerConfig {
     pub parallel: usize,
     /// Where per-task git worktrees are created (`<dir>/<repo-slug>/<root run id>`).
     pub worktrees_dir: PathBuf,
+    /// Build of this binary, reported in capabilities.
+    pub version: String,
+    /// Act on "Update" from the page: pull/reinstall and restart when idle.
+    pub allow_remote_update: bool,
 }
 
 pub async fn run(cfg: WorkerConfig) -> Result<()> {
@@ -52,6 +56,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     tracing::info!(worker = %cfg.worker_id, repos_root = %cfg.repos_root.display(), "detecting capabilities");
     let mut caps = detect::detect_all(&detect_opts).await;
     caps.slots = Some(Slots { parallel: cfg.parallel.max(1), active: 0 });
+    caps.version = cfg.version.clone();
     log_caps(&caps);
     let caps = Arc::new(Mutex::new(caps));
     let active_count = Arc::new(AtomicUsize::new(0));
@@ -84,7 +89,21 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 let snapshot = caps.lock().await.clone();
                 let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
                 match client.heartbeat(&snapshot, &ids).await {
-                    Ok(()) => {}
+                    Ok(resp) => {
+                        if resp.update_requested && cfg2.allow_remote_update {
+                            if !ids.is_empty() {
+                                tracing::info!(active = ids.len(), "update requested; waiting until this machine is idle");
+                            } else {
+                                tracing::info!("update requested from the page; updating now");
+                                let _ = client.update_ack().await;
+                                match tokio::task::spawn_blocking(|| crate::updater::update(true)).await {
+                                    Ok(Ok(r)) => tracing::info!(restarted = ?r.restarted, manual = ?r.needs_manual_restart, "update finished"),
+                                    Ok(Err(e)) => tracing::error!(error = %e, "update failed"),
+                                    Err(e) => tracing::error!(error = %e, "update task failed"),
+                                }
+                            }
+                        }
+                    }
                     Err(ClientError::NotRegistered) => {
                         tracing::warn!("control plane forgot us; re-registering");
                         register_with_backoff(&client, &cfg2, &caps, &active).await;

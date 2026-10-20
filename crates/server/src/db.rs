@@ -40,6 +40,20 @@ fn row_to_event(r: &PgRow) -> RunEvent {
     }
 }
 
+pub async fn set_update_requested(pool: &PgPool, id: &str, value: bool) -> sqlx::Result<bool> {
+    let res = sqlx::query("UPDATE workers SET update_requested = $2 WHERE id = $1")
+        .bind(id)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+pub async fn update_requested(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT update_requested FROM workers WHERE id = $1").bind(id).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get::<bool, _>("update_requested")).unwrap_or(false))
+}
+
 fn row_to_worker(r: &PgRow) -> Worker {
     let caps: Value = r.get("capabilities");
     Worker {
@@ -499,7 +513,7 @@ pub async fn upsert_worker(
          VALUES ($1, $2, $3, $4, now())
          ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name,
             token_hash = EXCLUDED.token_hash, capabilities = EXCLUDED.capabilities,
-            last_heartbeat_at = now()
+            last_heartbeat_at = now(), update_requested = false
          RETURNING id, display_name, capabilities, last_heartbeat_at",
     )
     .bind(id)
@@ -541,7 +555,7 @@ pub async fn worker_owns_token(pool: &PgPool, id: &str, token_hash: &str) -> sql
 
 pub async fn list_workers(pool: &PgPool) -> sqlx::Result<Vec<Worker>> {
     let rows = sqlx::query(
-        "SELECT id, display_name, capabilities, last_heartbeat_at FROM workers ORDER BY display_name",
+        "SELECT id, display_name, capabilities, last_heartbeat_at, update_requested FROM workers ORDER BY display_name",
     )
     .fetch_all(pool)
     .await?;

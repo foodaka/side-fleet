@@ -188,6 +188,7 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
         repos: scan_repos(&opts.repos_root, opts.scan_depth),
         hostname: gethostname::gethostname().to_string_lossy().to_string(),
         os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        version: String::new(),
         system: Some(system_stats(&opts.repos_root)),
         slots: None,
     }

@@ -20,8 +20,15 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_DB: &str = "postgres://sidefleet:sidefleet@localhost:5432/sidefleet";
 
+const BUILD: &str = env!("SIDEFLEET_BUILD");
+
+fn version_string() -> &'static str {
+    // e.g. "0.1.0 (2026-10-20 8ec33ec)"
+    Box::leak(format!("{} ({BUILD})", env!("CARGO_PKG_VERSION")).into_boxed_str())
+}
+
 #[derive(Parser)]
-#[command(name = "sidefleet", version, about = "Run coding agents on your own machines, from anywhere.")]
+#[command(name = "sidefleet", version = version_string(), about = "Run coding agents on your own machines, from anywhere.")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -55,6 +62,15 @@ enum Cmd {
         /// How many tasks the built-in worker runs at the same time.
         #[arg(long, env = "SIDEFLEET_PARALLEL", default_value_t = 3)]
         parallel: usize,
+        /// Install serve as a background service (launchd / systemd user) with these flags, start it, and exit.
+        #[arg(long)]
+        install_service: bool,
+    },
+    /// Pull the latest code (or download the latest release), reinstall the binary and restart the services on this machine.
+    Update {
+        /// Only reinstall; do not restart services.
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Make this machine a worker: check it, register once, save the settings and
     /// install a background service so it keeps running after reboots.
@@ -225,8 +241,29 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.cmd {
-        Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel } => {
+        Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel, install_service } => {
+            if install_service {
+                let mut args = vec!["serve".to_string(), "--bind".into(), bind.clone(), "--parallel".into(), parallel.to_string(), "--permission-mode".into(), permission_mode.clone()];
+                if no_worker { args.push("--no-worker".into()); }
+                args.push("--repos".into()); args.push(repos.clone());
+                let exe = std::env::current_exe()?;
+                std::fs::create_dir_all(log_dir())?;
+                println!("{}", install_named_service("serve", &exe, &args, &log_dir().join("serve.log"))?);
+                println!("Keys live in {}; `sidefleet update` restarts this service after an update.", server_env_path().display());
+                return Ok(());
+            }
             serve(ServeOpts { bind, database_url, dev_key, worker_tokens, no_worker, repos: expand_home(&repos), permission_mode, parallel }).await
+        }
+        Cmd::Update { no_restart } => {
+            println!("Updating sidefleet {}…", version_string());
+            let r = tokio::task::spawn_blocking(move || sidefleet_worker::updater::update(!no_restart)).await??;
+            println!("  Source:      {}", r.source);
+            if !r.pulled.is_empty() { println!("  git pull:    {}", r.pulled.lines().last().unwrap_or("")); }
+            println!("  Installed:   {}", r.installed_to.display());
+            for s in &r.restarted { println!("  Restarted:   {s}"); }
+            for s in &r.needs_manual_restart { println!("  Restart yourself: {s}"); }
+            if r.restarted.is_empty() && r.needs_manual_restart.is_empty() { println!("  Nothing was running as a service; start `sidefleet serve` or `sidefleet run` when ready."); }
+            Ok(())
         }
         Cmd::Connect { control, token, repos, name, permission_mode, no_service, parallel } => connect(control, token, repos, name, permission_mode, no_service, parallel).await,
         Cmd::Run { control, token, repos, id, name, claude_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth, parallel } => {
@@ -250,6 +287,8 @@ async fn main() -> Result<()> {
                 max_runs: None,
                 parallel,
                 worktrees_dir: worktrees_dir(),
+                version: version_string().to_string(),
+                allow_remote_update: true,
             };
             tokio::select! {
                 r = sidefleet_worker::worker::run(cfg) => r,
@@ -303,6 +342,7 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     };
     std::env::set_var("SIDEFLEET_DEV_KEY", &dev_key);
     std::env::set_var("SIDEFLEET_WORKER_TOKENS", &worker_tokens);
+    std::env::set_var("SIDEFLEET_BUILD", version_string());
     let config = Config::from_env()?;
     let first_token = config.worker_tokens[0].clone();
 
@@ -335,7 +375,7 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     let ip = ts.clone().unwrap_or_else(|| lan.clone());
 
     println!();
-    println!("Sidefleet control plane is running.");
+    println!("Sidefleet control plane {} is running.", version_string());
     println!();
     println!("  Open the page:        http://{ip}:{port}/   (or http://localhost:{port}/ here)");
     println!("  Developer key:        {dev_key}");
@@ -386,6 +426,8 @@ async fn serve(opts: ServeOpts) -> Result<()> {
             max_runs: None,
             parallel,
             worktrees_dir: worktrees_dir(),
+            version: version_string().to_string(),
+            allow_remote_update: true,
         };
         tokio::spawn(async move {
             if let Err(e) = sidefleet_worker::worker::run(cfg).await {
@@ -500,6 +542,64 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
 
 #[cfg(target_os = "macos")]
 const SERVICE_LABEL: &str = "io.sidefleet.worker";
+
+/// Install `<exe> <args…>` as a background service named after `kind` ("worker" or "serve").
+#[cfg(target_os = "macos")]
+fn install_named_service(kind: &str, exe: &Path, args: &[String], log: &Path) -> Result<String> {
+    let label = format!("io.sidefleet.{kind}");
+    let argv: String = std::iter::once(exe.to_string_lossy().to_string()).chain(args.iter().cloned())
+        .map(|a| format!("<string>{}</string>", a.replace('&', "&amp;").replace('<', "&lt;"))).collect();
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key><array>{argv}</array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string><key>HOME</key><string>{home}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict></plist>
+"#,
+        path = service_path(), home = home().display(), log = log.display()
+    );
+    let p = home().join("Library/LaunchAgents").join(format!("{label}.plist"));
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    std::fs::write(&p, plist)?;
+    let domain = format!("gui/{}", nix_uid());
+    let _ = std::process::Command::new("launchctl").args(["bootout", &domain, &p.to_string_lossy()]).output();
+    let out = std::process::Command::new("launchctl").args(["bootstrap", &domain, &p.to_string_lossy()]).output()?;
+    if !out.status.success() {
+        bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(format!("Installed launchd service {label} (starts at login, restarts if it stops). Log: {}", log.display()))
+}
+
+#[cfg(target_os = "linux")]
+fn install_named_service(kind: &str, exe: &Path, args: &[String], log: &Path) -> Result<String> {
+    let unit_name = format!("sidefleet-{kind}");
+    let unit = format!(
+        "[Unit]\nDescription=Sidefleet {kind}\nAfter=network-online.target\n\n[Service]\nExecStart={exe} {args}\nRestart=always\nRestartSec=3\nEnvironment=PATH={path}\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\nWantedBy=default.target\n",
+        exe = exe.display(), args = args.join(" "), path = service_path(), log = log.display()
+    );
+    let p = home().join(".config/systemd/user").join(format!("{unit_name}.service"));
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    std::fs::write(&p, unit)?;
+    let run = |a: &[&str]| std::process::Command::new("systemctl").arg("--user").args(a).output();
+    run(&["daemon-reload"])?;
+    let out = run(&["enable", "--now", &unit_name])?;
+    if !out.status.success() {
+        bail!("systemctl --user enable failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let _ = std::process::Command::new("loginctl").args(["enable-linger"]).output();
+    Ok(format!("Installed systemd user service {unit_name} (starts at boot, restarts if it stops). Log: {}", log.display()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn install_named_service(_kind: &str, _exe: &Path, _args: &[String], _log: &Path) -> Result<String> {
+    bail!("background services are only supported on macOS and Linux")
+}
 
 #[cfg(target_os = "macos")]
 fn plist_path() -> PathBuf {

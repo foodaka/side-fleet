@@ -434,6 +434,8 @@
       renderOnboarding(on);
       renderRepoSelect(); renderWillRun(); renderRecent(); renderRuns(); renderMachines();
       $('installcmd').textContent = connectCmd(true);
+      if (setup && setup.build) $('nf-sub').innerHTML = '<button class="chip" id="keybtn" style="padding:2px 8px">developer key</button> <span class="muted" style="font-size:11px" title="control plane build">' + esc(setup.build) + '</span>';
+      $('keybtn').onclick = () => showGate('');
       $('agentprompt').textContent = agentPrompt(true);
     } catch (e) { if (e.message !== 'unauthorised') setConn(false, 'control plane unreachable'); }
   }
@@ -742,12 +744,17 @@
         gauge('Disk', sys.disk_free_gb.toFixed(0) + ' GB free of ' + sys.disk_total_gb.toFixed(0), pct(sys.disk_total_gb - sys.disk_free_gb, sys.disk_total_gb)),
       ].join('') : '';
       const slotsRow = slots ? gauge('Tasks', slots.active + ' / ' + slots.parallel + ' slots', pct(slots.active, slots.parallel)) : '';
+      const ver = c.version ? '<div class="kv"><span class="muted">Build</span><span class="mono" title="' + esc(c.version) + '">' + esc(c.version) + (w.outdated ? ' <span class="pill queued" style="font-size:10px;padding:1px 6px"><span class="dot"></span>older than the page</span>' : '') + '</span></div>' : '';
+      const upd = w.online && c.version ? '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding-top:10px">' +
+          (w.update_requested ? '<span class="muted" style="font-size:12px">Update requested; it will pull, rebuild and restart when idle (a few minutes).</span>'
+            : '<span class="muted" style="font-size:12px">' + (w.outdated ? 'This machine runs an older build than the page.' : 'Up to date with the page.') + '</span>') +
+          (w.update_requested ? '' : '<button type="button" class="chip" data-update="' + esc(w.id) + '">Update' + (w.outdated ? ' now' : '') + '</button>') + '</div>' : '';
       const stale = (!sys && w.online) ? '<div class="muted" style="font-size:12px;padding:6px 0">No live stats: this machine runs an older worker. Update it with <span class="mono">git pull && sh install.sh</span>, then <span class="mono">sidefleet disconnect && sidefleet connect …</span> (or restart <span class="mono">serve</span>).</div>' : '';
       return '<article class="card machine"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px"><div><div class="nm">' + esc(w.display_name) + '</div><div class="os">' + esc(c.os || '') + (c.hostname ? ' · ' + esc(c.hostname) : '') + '</div></div>' +
         '<span class="pill ' + (w.online ? 'succeeded' : 'stopped') + '"><span class="dot"></span>' + (w.online ? 'Online' : 'Offline') + '</span></div>' +
         gauges + slotsRow + stale +
         '<div class="tags">' + tags.join('') + '</div>' +
-        '<div><div class="kv"><span class="muted">Running</span><span>' + (slots ? slots.active : running) + ' task' + ((slots ? slots.active : running) === 1 ? '' : 's') + '</span></div>' + (sys ? '<div class="kv"><span class="muted">Up</span><span class="mono">' + Math.floor(sys.uptime_secs / 86400) + 'd ' + Math.floor(sys.uptime_secs % 86400 / 3600) + 'h</span></div>' : '') + '<div class="kv"><span class="muted">Repos</span><span>' + repos.length + (added ? ' · ' + addedHere + ' chosen' : '') + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div></div></article>';
+        '<div><div class="kv"><span class="muted">Running</span><span>' + (slots ? slots.active : running) + ' task' + ((slots ? slots.active : running) === 1 ? '' : 's') + '</span></div>' + (sys ? '<div class="kv"><span class="muted">Up</span><span class="mono">' + Math.floor(sys.uptime_secs / 86400) + 'd ' + Math.floor(sys.uptime_secs % 86400 / 3600) + 'h</span></div>' : '') + '<div class="kv"><span class="muted">Repos</span><span>' + repos.length + (added ? ' · ' + addedHere + ' chosen' : '') + '</span></div><div class="kv"><span class="muted">Heartbeat</span><span class="mono">' + rel(w.last_heartbeat_at) + '</span></div><div class="kv"><span class="muted">Worker id</span><span class="mono">' + esc(w.id) + '</span></div>' + ver + '</div>' + upd + '</article>';
     }).join('');
   }
 

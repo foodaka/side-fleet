@@ -125,6 +125,9 @@ pub struct Capabilities {
     pub hostname: String,
     #[serde(default)]
     pub os: String,
+    /// Build of the worker binary, e.g. `0.1.0 (2026-10-20 8ec33ec)`.
+    #[serde(default)]
+    pub version: String,
     /// Live machine numbers, refreshed on every heartbeat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemStats>,
@@ -244,6 +247,17 @@ pub struct HeartbeatRequest {
     pub capabilities: Capabilities,
     #[serde(default)]
     pub active_runs: Vec<Uuid>,
+}
+
+/// Returned on every heartbeat.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    /// The control plane's build, for the worker to compare against its own.
+    #[serde(default)]
+    pub server_version: String,
+    /// Someone pressed Update on the Machines page: update when idle, then restart.
+    #[serde(default)]
+    pub update_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -575,7 +575,7 @@ async fn runs_lost_by_a_worker_restart_are_finished_and_stops_on_offline_workers
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(api.get_run(kept).await.status, RunStatus::Running);
     assert_eq!(api.get_run(dropped).await.status, RunStatus::Stopped);
 
@@ -587,6 +587,60 @@ async fn runs_lost_by_a_worker_restart_are_finished_and_stops_on_offline_workers
     let run = api.stop(kept).await;
     assert_eq!(run.status, RunStatus::Stopped);
     assert!(run.finished_at.is_some());
+
+    env.teardown().await;
+}
+
+
+#[tokio::test]
+async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+
+    let hb = |caps_version: &str| {
+        let api = &api;
+        let v = caps_version.to_string();
+        async move {
+            let r = api
+                .worker(reqwest::Method::POST, "/v1/worker/heartbeat")
+                .json(&json!({"id": "w", "capabilities": {"version": v}, "active_runs": []}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            r.json::<Value>().await.unwrap()
+        }
+    };
+    let h = hb("0.1.0 (old)").await;
+    assert_eq!(h["update_requested"], false);
+    assert_eq!(h["server_version"], "test");
+
+    // The page sees the build and that it differs from the control plane's.
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["capabilities"]["version"], "0.1.0 (old)");
+    assert_eq!(ws[0]["outdated"], true);
+    assert_eq!(ws[0]["update_requested"], false);
+
+    // Request an update: visible on the next heartbeat and in the workers list.
+    let r = api.dev(reqwest::Method::POST, "/v1/workers/w/update").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = api.dev(reqwest::Method::POST, "/v1/workers/ghost/update").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["update_requested"], true);
+    assert_eq!(hb("0.1.0 (old)").await["update_requested"], true);
+
+    // The worker acknowledges before updating; the flag clears. A re-register clears it too.
+    let r = api.worker(reqwest::Method::POST, "/v1/worker/update-ack").json(&json!({"id": "w"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(hb("test").await["update_requested"], false);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["outdated"], false, "same build as the control plane");
+
+    api.dev(reqwest::Method::POST, "/v1/workers/w/update").send().await.unwrap();
+    api.register("w", &["r"]).await;
+    assert_eq!(hb("test").await["update_requested"], false);
 
     env.teardown().await;
 }

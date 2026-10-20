@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use sidefleet_core::{
     ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
-    HeartbeatRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    HeartbeatRequest, HeartbeatResponse, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, PERMISSION_MODES,
 };
 use axum::{
@@ -46,6 +46,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/workers", get(list_workers))
+        .route("/v1/workers/{id}/update", post(request_update))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
@@ -53,6 +54,7 @@ pub fn router(state: AppState) -> Router {
     let worker = Router::new()
         .route("/v1/worker/register", post(register_worker))
         .route("/v1/worker/heartbeat", post(heartbeat))
+        .route("/v1/worker/update-ack", post(update_ack))
         .route("/v1/worker/claim", post(claim_run))
         .route("/v1/worker/runs/{id}/events", post(post_events))
         .route("/v1/worker/runs/{id}/control", get(run_control))
@@ -236,21 +238,50 @@ async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_
         "worker_token": state.config.worker_tokens.first().cloned().unwrap_or_default(),
         "worker_token_count": state.config.worker_tokens.len(),
         "version": env!("CARGO_PKG_VERSION"),
+        "build": state.config.build,
     }))
 }
 
 async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     let workers = db::list_workers(&state.pool).await?;
-    let out: Vec<_> = workers
-        .into_iter()
-        .map(|w| {
-            let online = db::is_online(w.last_heartbeat_at);
-            let mut v = serde_json::to_value(&w).unwrap_or(json!({}));
-            v["online"] = json!(online);
-            v
-        })
-        .collect();
+    let mut out = Vec::with_capacity(workers.len());
+    for w in workers {
+        let online = db::is_online(w.last_heartbeat_at);
+        let mut v = serde_json::to_value(&w).unwrap_or(json!({}));
+        v["online"] = json!(online);
+        v["update_requested"] = json!(db::update_requested(&state.pool, &w.id).await?);
+        v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
+        out.push(v);
+    }
     Ok(Json(json!(out)))
+}
+
+/// Ask a machine to update itself and restart when it is idle.
+async fn request_update(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    if db::set_update_requested(&state.pool, &id, true).await? {
+        tracing::info!(worker = %id, "update requested");
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()))
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateAck {
+    id: String,
+}
+
+/// The worker is about to update: clear the flag so it is not asked again.
+async fn update_ack(
+    State(state): State<AppState>,
+    Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
+    Json(req): Json<UpdateAck>,
+) -> Result<StatusCode, ApiError> {
+    if !db::worker_owns_token(&state.pool, &req.id, &hash).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    }
+    db::set_update_requested(&state.pool, &req.id, false).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -422,13 +453,16 @@ async fn heartbeat(
     State(state): State<AppState>,
     Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
     Json(req): Json<HeartbeatRequest>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<HeartbeatResponse>, ApiError> {
     if db::heartbeat(&state.pool, &req.id, &hash, &req.capabilities).await? {
         for ev in db::reconcile_worker_runs(&state.pool, &req.id, &req.active_runs).await? {
             tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run no longer executing on its worker; marked finished");
             state.events.publish(ev);
         }
-        Ok(StatusCode::NO_CONTENT)
+        Ok(Json(HeartbeatResponse {
+            server_version: state.config.build.clone(),
+            update_requested: db::update_requested(&state.pool, &req.id).await?,
+        }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
         Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()))

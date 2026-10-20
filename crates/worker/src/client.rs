@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use sidefleet_core::{
-    Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, NewEvent, PostEventsRequest,
-    RegisterWorkerRequest, Run, RunControl, RunStatus, Worker,
+    Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, NewEvent,
+    PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunStatus, Worker,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
@@ -98,7 +98,7 @@ impl ControlClient {
         Ok(r.json().await?)
     }
 
-    pub async fn heartbeat(&self, caps: &Capabilities, active_runs: &[Uuid]) -> Result<(), ClientError> {
+    pub async fn heartbeat(&self, caps: &Capabilities, active_runs: &[Uuid]) -> Result<HeartbeatResponse, ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/heartbeat"))
@@ -107,7 +107,23 @@ impl ControlClient {
             .send()
             .await
             .context("heartbeat request failed")?;
-        Self::check(r).await?;
+        let r = Self::check(r).await?;
+        if r.status() == StatusCode::NO_CONTENT {
+            return Ok(HeartbeatResponse::default());
+        }
+        Ok(r.json().await.context("heartbeat response")?)
+    }
+
+    pub async fn update_ack(&self) -> Result<()> {
+        let r = self
+            .http
+            .post(self.url("/v1/worker/update-ack"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({"id": self.worker_id}))
+            .send()
+            .await
+            .context("update-ack failed")?;
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
         Ok(())
     }
 

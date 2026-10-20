@@ -20,6 +20,8 @@ pub struct Config {
     pub dev_key: String,
     /// Accepted worker tokens (one per machine, or one shared).
     pub worker_tokens: Vec<String>,
+    /// Build of this control plane, shown on the page and sent to workers.
+    pub build: String,
 }
 
 impl Config {
@@ -36,7 +38,8 @@ impl Config {
             .collect();
         anyhow::ensure!(!worker_tokens.is_empty(), "SIDEFLEET_WORKER_TOKENS is empty");
         anyhow::ensure!(dev_key.len() >= 8, "SIDEFLEET_DEV_KEY must be at least 8 characters");
-        Ok(Self { dev_key, worker_tokens })
+        let build = std::env::var("SIDEFLEET_BUILD").unwrap_or_else(|_| "dev".into());
+        Ok(Self { dev_key, worker_tokens, build })
     }
 }
 

@@ -35,7 +35,12 @@ release download and the source clone:
 gh api repos/foodaka/side-fleet/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
 ```
 
-From a checkout, `cargo install --path crates/cli --locked` also works.
+Or clone it (over SSH with your GitHub key) and run the script from the checkout; it then builds
+from that folder and never contacts GitHub:
+
+```bash
+git clone git@github.com:foodaka/side-fleet.git && sh side-fleet/install.sh
+```
 
 ## Set up in three steps
 

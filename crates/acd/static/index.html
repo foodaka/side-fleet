@@ -225,6 +225,7 @@
   function setStatus(s) { const c = $('status'); c.className = 'chip ' + s; c.textContent = s; $('stopbtn').disabled = !(s === 'queued' || s === 'running'); }
 
   const toolNames = {};
+  let lastAssistantText = '';
   function render(ev) {
     const p = ev.payload || {};
     switch (ev.kind) {
@@ -235,7 +236,7 @@
       case 'stop_requested': addStatus('stop requested, waiting for the worker to kill the agent…'); break;
       case 'started': addStatus('worker started ' + (p.command || 'the agent') + ' in ' + (p.cwd || '')); break;
       case 'agent_init': addStatus('Claude Code session ' + (p.session_id || '') + ' with model ' + (p.model || '')); break;
-      case 'assistant_text': add(esc(p.text), 'text'); break;
+      case 'assistant_text': lastAssistantText = p.text || ''; add(esc(p.text), 'text'); break;
       case 'assistant_thinking': add('thinking…', 'thinking'); break;
       case 'tool_use':
         toolNames[p.id] = p.name;
@@ -253,7 +254,9 @@
         if (p.duration_ms != null) meta.push((p.duration_ms / 1000).toFixed(1) + 's');
         if (p.num_turns != null) meta.push(p.num_turns + ' turns');
         if (p.total_cost_usd != null) meta.push('$' + Number(p.total_cost_usd).toFixed(4));
-        add(esc(p.result || (p.is_error ? 'agent reported an error (' + p.subtype + ')' : '')) + '<div class="meta">' + esc(meta.join(' · ')) + '</div>', 'result' + (p.is_error ? ' error' : ''));
+        // The CLI's final result repeats the last assistant message; show it once.
+        const text = (p.result && p.result !== lastAssistantText) ? p.result : (p.is_error ? 'agent reported an error (' + p.subtype + ')' : '');
+        add(esc(text) + '<div class="meta">' + esc(['finished'].concat(meta).join(' · ')) + '</div>', 'result' + (p.is_error ? ' error' : ''));
         break;
       }
       case 'stderr': add(esc(p.text), 'stderr'); break;
@@ -269,6 +272,7 @@
     abort = new AbortController();
     currentRun = id;
     $('narration').innerHTML = '';
+    lastAssistantText = '';
     const run = await api('/v1/runs/' + id);
     $('viewtask').textContent = run.task;
     $('viewmeta').textContent = run.model + ' · ' + run.repo + (run.worker_id ? ' · ' + run.worker_id : '');

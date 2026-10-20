@@ -15,7 +15,7 @@ use axum::{
     middleware,
     response::{
         sse::{Event, KeepAlive, Sse},
-        Html, IntoResponse, Response,
+        IntoResponse, Response,
     },
     routing::{get, post},
     Extension, Json, Router,
@@ -31,7 +31,11 @@ use crate::auth::{self, WorkerTokenHash};
 use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome};
 use crate::AppState;
 
-const INDEX_HTML: &str = include_str!("../static/index.html");
+/// The web app, built from `web/` with `pnpm build` and committed so a source
+/// install needs only Rust. Embedded in release builds; read from disk in debug.
+#[derive(rust_embed::Embed)]
+#[folder = "web-dist/"]
+struct WebApp;
 const CONNECT_MD: &str = include_str!("../static/connect.md");
 /// Tasks and replies up to this many bytes; well under what `claude -p` accepts as an argument.
 pub const MAX_TASK_BYTES: usize = 100_000;
@@ -63,17 +67,41 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(index))
+        .route("/_app/{*path}", get(web_asset))
+        .route("/robots.txt", get(|| web_file("robots.txt")))
         .route("/healthz", get(|| async { "ok" }))
         .route("/connect.md", get(connect_md))
         .merge(dev)
         .merge(worker)
         .layer(CorsLayer::permissive())
+        // gzip/brotli for the page, assets and JSON; the default predicate skips SSE.
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index() -> Response {
+    web_file("index.html").await
+}
+
+async fn web_asset(Path(path): Path<String>) -> Response {
+    web_file(&format!("_app/{path}")).await
+}
+
+async fn web_file(path: &str) -> Response {
+    let Some(file) = WebApp::get(path) else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    // Hashed build output never changes; the page itself must always be fresh.
+    let cache = if path.starts_with("_app/immutable/") { "public, max-age=31536000, immutable" } else { "no-cache" };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, file.metadata.mimetype().to_string()),
+            (axum::http::header::CACHE_CONTROL, cache.to_string()),
+        ],
+        file.data,
+    )
+        .into_response()
 }
 
 /// Instructions an agent on another machine can read to set itself up as a

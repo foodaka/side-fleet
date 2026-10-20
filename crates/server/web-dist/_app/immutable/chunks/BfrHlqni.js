@@ -1,0 +1,1 @@
+var e={initialize(){},async render(){throw Error(`Diagrams are not rendered in Sidefleet`)}};export{e as default};

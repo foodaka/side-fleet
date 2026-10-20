@@ -183,7 +183,23 @@ async fn auth_is_required_for_both_audiences() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "dev key must not open the worker API");
     let r = c.get(format!("{}/", env.base_url)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    assert!(r.text().await.unwrap().contains("<title>Sidefleet</title>"));
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    let html = r.text().await.unwrap();
+    assert!(html.contains("<title>Sidefleet</title>"), "{html}");
+    // The embedded app's hashed assets are served with a long cache and compressed.
+    let asset = html
+        .split('"')
+        .find(|s| s.contains("_app/immutable/") && s.ends_with(".js"))
+        .expect("page references a built script")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string();
+    let r = c.get(format!("{}/{asset}", env.base_url)).header("accept-encoding", "gzip").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "{asset}");
+    assert!(r.headers()["content-type"].to_str().unwrap().contains("javascript"));
+    assert!(r.headers()["cache-control"].to_str().unwrap().contains("immutable"));
+    let r = c.get(format!("{}/_app/immutable/nope.js", env.base_url)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
     env.teardown().await;
 }
 

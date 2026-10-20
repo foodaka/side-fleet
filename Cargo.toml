@@ -28,7 +28,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres",
 subtle = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "compression-br"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }

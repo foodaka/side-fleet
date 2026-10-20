@@ -1,0 +1,13 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"strict": true,
+		"types": ["node"],
+		"paths": {
+			"#lib": ["./src/lib/index.ts"],
+			"#lib/*": ["./src/lib/*"],
+			"$app/*": ["./node_modules/@sveltejs/kit/src/runtime/app/*"]
+		}
+	},
+	"include": ["src", "vite.config.ts"]
+}

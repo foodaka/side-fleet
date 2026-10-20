@@ -147,6 +147,10 @@
   .cmd { display:flex; align-items:center; gap:10px; background:var(--fg); color:#E8E8E4; border-radius:8px; padding:9px 12px; font-family:var(--mono); font-size:12px; line-height:1.5; }
   .cmd code { flex:1; min-width:0; white-space:pre-wrap; word-break:break-all; }
   .cmd button { font-size:11px; font-weight:500; background:rgba(255,255,255,.1); color:#fff; border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:4px 10px; flex-shrink:0; }
+  button.copied { background:var(--ok) !important; border-color:var(--ok) !important; color:#fff !important; }
+  button.copyfail { background:var(--err) !important; border-color:var(--err) !important; color:#fff !important; }
+  .flash { animation:flash .9s ease-out; }
+  @keyframes flash { 0% { box-shadow:0 0 0 3px var(--ok); } 100% { box-shadow:0 0 0 3px transparent; } }
   .waiting { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
   @media (max-width:860px) { .how { grid-template-columns:1fr; } nav.side { width:100%; border-right:0; border-bottom:1px solid var(--line); } .nav { flex-direction:row; } .navfoot { display:none; } main { padding:20px 16px; } .stats { grid-template-columns:repeat(2, minmax(0,1fr)); } .trow { grid-template-columns:2fr 1fr 1fr; } .trow > :nth-child(n+4) { display:none; } #v-new { padding-top:40px; } }
 </style>
@@ -393,11 +397,31 @@
     const tok = setup && setup.worker_token ? (masked ? setup.worker_token.slice(0, 4) + '••••••••' : setup.worker_token) : '<worker token>';
     return 'Read ' + location.origin + '/connect.md and follow it to set up this machine as an Sidefleet worker. Control plane: ' + location.origin + '. Worker token: ' + tok + ' (keep it out of logs and your summary).';
   }
-  function copyText(t, btn) { try { navigator.clipboard.writeText(t); const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = o, 1500); } catch (_) {} }
+  // navigator.clipboard only exists on https/localhost; over a plain-http tailnet or LAN address fall back to execCommand.
+  function legacyCopy(t) {
+    const ta = document.createElement('textarea'); ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta); ta.select(); let ok = false; try { ok = document.execCommand('copy'); } catch (_) {} ta.remove(); return ok;
+  }
+  async function copyText(t, btn) {
+    let ok = false;
+    try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(t); ok = true; } } catch (_) {}
+    if (!ok) ok = legacyCopy(t);
+    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+    clearTimeout(btn._copyTimer); btn.classList.remove('copied', 'copyfail');
+    const box = btn.closest('.cmd, .install'), code = box && box.querySelector('code');
+    if (ok) {
+      btn.textContent = '✓ Copied'; btn.classList.add('copied');
+      if (box) { box.classList.remove('flash'); void box.offsetWidth; box.classList.add('flash'); }
+    } else {
+      btn.textContent = 'Press Ctrl+C'; btn.classList.add('copyfail');
+      if (code) { const r = document.createRange(); r.selectNodeContents(code); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+    }
+    btn._copyTimer = setTimeout(() => { btn.textContent = btn.dataset.label; btn.classList.remove('copied', 'copyfail'); }, ok ? 1800 : 4000);
+  }
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-copy]'); if (b) copyText(b.dataset.copy, b); });
-  $('ob-copy').onclick = (e) => copyText(connectCmd(false).split(' && ')[1], e.target);
-  $('ob-prompt-copy').onclick = (e) => copyText(agentPrompt(false), e.target);
-  $('copyprompt').onclick = (e) => copyText(agentPrompt(false), e.target);
+  $('ob-copy').onclick = (e) => copyText(connectCmd(false).split(' && ')[1], e.currentTarget);
+  $('ob-prompt-copy').onclick = (e) => copyText(agentPrompt(false), e.currentTarget);
+  $('copyprompt').onclick = (e) => copyText(agentPrompt(false), e.currentTarget);
   function renderOnboarding(online) {
     const first = workers.length === 0;
     const show = online === 0;
@@ -487,7 +511,7 @@
   }
 
   // ---- machines ----
-  $('copyinstall').onclick = () => { try { navigator.clipboard.writeText($('installcmd').textContent); $('copyinstall').textContent = 'Copied'; setTimeout(() => $('copyinstall').textContent = 'Copy', 1500); } catch (_) {} };
+  $('copyinstall').onclick = (e) => copyText($('installcmd').textContent, e.currentTarget);
   function renderMachines() {
     const el = $('mgrid');
     if (!workers.length) { el.innerHTML = '<div class="card empty">No machines yet. Run the install line above on one you own.</div>'; return; }

@@ -11,8 +11,10 @@
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
 	const PICK = '__pick__';
+	const ANY = '__any__';
 	let task = $state('');
-	let model = $state('claude-sonnet-5-5');
+	let model = $state(MODELS.some((m) => m.id === load('sidefleet_model')) ? load('sidefleet_model') : 'claude-sonnet-5-5');
+	let machine = $state(load('sidefleet_machine'));
 	let perm = $state('acceptEdits');
 	let iso = $state('worktree');
 	let repo = $state(load('sidefleet_repo'));
@@ -30,7 +32,11 @@
 		const first = repos.find((r) => online.has(r));
 		if (first) repo = first;
 	});
-	const target = $derived(repo ? fleet.workerFor(repo) : undefined);
+	/** Online machines that have the repo; the menu only shows when there is a choice. */
+	const machines = $derived(repo ? fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => r.name === repo)) : []);
+	// The remembered machine applies only where it has the repo; otherwise any machine.
+	const pinned = $derived(machines.find((w) => w.id === machine));
+	const target = $derived(pinned ?? (repo ? fleet.workerFor(repo) : undefined));
 	const claude = $derived(target?.capabilities.agents.claude);
 	const canRun = $derived(!!task.trim() && !!repo && online.has(repo) && !busy);
 
@@ -40,6 +46,16 @@
 		save('sidefleet_repo', v);
 	}
 
+	function pickModel(v: string) {
+		model = v;
+		save('sidefleet_model', v);
+	}
+
+	function pickMachine(v: string) {
+		machine = v === ANY ? '' : v;
+		save('sidefleet_machine', machine);
+	}
+
 	async function run(e?: Event) {
 		e?.preventDefault();
 		if (!canRun) return;
@@ -47,7 +63,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), model, repo, permission_mode: perm, isolation: iso })
+				body: JSON.stringify({ task: task.trim(), model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id })
 			});
 			task = '';
 			void fleet.refresh();
@@ -125,7 +141,7 @@
 				></textarea>
 				<div class="flex items-end gap-2 px-3 pb-3">
 					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-					<Select.Root type="single" value={model} onValueChange={(v) => (model = v)}>
+					<Select.Root type="single" value={model} onValueChange={pickModel}>
 						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Model">{modelName(model)}</Select.Trigger>
 						<Select.Content>
 							{#each MODELS as m (m.id)}<Select.Item value={m.id} label={m.name}><span class="flex flex-col"><span>{m.name}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
@@ -144,6 +160,23 @@
 							<Select.Item value={PICK} label="Choose repos">{repos.length ? 'Add or remove repos…' : `Choose from ${online.size} repos…`}</Select.Item>
 						</Select.Content>
 					</Select.Root>
+
+					{#if machines.length > 1}
+						<Select.Root type="single" value={pinned?.id ?? ANY} onValueChange={pickMachine}>
+							<Select.Trigger size="sm" class="h-8 max-w-[12rem] rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Machine">
+								<span class="truncate">{pinned?.display_name ?? 'Any machine'}</span>
+							</Select.Trigger>
+							<Select.Content>
+								<Select.Item value={ANY} label="Any machine"><span class="flex flex-col"><span>Any machine</span><span class="text-xs text-muted-foreground">The first one with a free slot</span></span></Select.Item>
+								<Select.Separator />
+								{#each machines as w (w.id)}
+									<Select.Item value={w.id} label={w.display_name}>
+										<span class="flex flex-col"><span>{w.display_name}</span>{#if w.capabilities.slots}<span class="tnum text-xs text-muted-foreground">{w.capabilities.slots.active} of {w.capabilities.slots.parallel} slots busy</span>{/if}</span>
+									</Select.Item>
+								{/each}
+							</Select.Content>
+						</Select.Root>
+					{/if}
 
 					<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
 						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === perm)?.name}</Select.Trigger>
@@ -173,7 +206,11 @@
 				{#if !repos.length}
 					Your machines have {online.size} git checkouts. <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.pickerOpen = true)}>Choose the ones you work on</button> to fill the repo menu.
 				{:else if target}
-					Runs on <span class="text-foreground">{target.display_name}</span>{#if claude && !claude.signed_in}, <span class="text-err-ink">where Claude Code is not signed in</span>{/if}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
+					{#if !pinned && machines.length > 1}
+						Runs on whichever of the {machines.length} machines with this repo is free first
+					{:else}
+						Runs on <span class="text-foreground">{target.display_name}</span>{#if claude && !claude.signed_in}, <span class="text-err-ink">where Claude Code is not signed in</span>{/if}
+					{/if}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
 				{/if}
 			</p>
 		</form>

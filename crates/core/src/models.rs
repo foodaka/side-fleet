@@ -208,6 +208,9 @@ pub struct CreateRunRequest {
     /// worktree (default) or checkout.
     #[serde(default)]
     pub isolation: Option<String>,
+    /// Run on this machine only; any machine with the repo when absent.
+    #[serde(default)]
+    pub worker_id: Option<String>,
 }
 
 /// Continue a thread: a new run that resumes the previous Claude Code session.

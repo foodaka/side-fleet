@@ -155,7 +155,7 @@ Developer (bearer `SIDEFLEET_DEV_KEY`):
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/v1/runs` `{task, model, repo, permission_mode?, isolation?}` | `202 {id, status}`; model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout` |
+| `POST` | `/v1/runs` `{task, model, repo, permission_mode?, isolation?, worker_id?}` | `202 {id, status}`; model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted) |
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |

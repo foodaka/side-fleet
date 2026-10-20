@@ -165,7 +165,12 @@ async fn create_run(
         Some(i) if ISOLATION_MODES.contains(&i) => i,
         Some(_) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("isolation must be one of {}", ISOLATION_MODES.join(", ")))),
     };
-    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo, mode, isolation).await?;
+    let worker = match req.worker_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
+        Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
+    };
+    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo, mode, isolation, worker).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))

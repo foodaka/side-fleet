@@ -660,3 +660,32 @@ async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn a_run_can_be_pinned_to_a_machine() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    api.register("w2", &["r"]).await;
+
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r", "worker_id": "nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "unknown machine rejected");
+
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "on w2", "model": "claude-haiku-5-5", "repo": "r", "worker_id": "w2"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let id: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.get_run(id).await.pinned_worker_id.as_deref(), Some("w2"));
+
+    assert!(api.claim("w1", &["r"]).await.is_none(), "pinned run leaked to another machine");
+    assert_eq!(api.claim("w2", &["r"]).await.expect("chosen machine claims it").id, id);
+}

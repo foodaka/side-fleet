@@ -107,12 +107,13 @@ pub async fn create_run(
     repo: &str,
     permission_mode: Option<&str>,
     isolation: &str,
+    pinned_worker_id: Option<&str>,
 ) -> sqlx::Result<(Run, RunEvent)> {
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation) VALUES ($1, $2, $3, $4, 'queued', $5, $6)
-         RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -120,6 +121,7 @@ pub async fn create_run(
     .bind(repo)
     .bind(permission_mode)
     .bind(isolation)
+    .bind(pinned_worker_id)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -550,6 +552,11 @@ pub async fn worker_owns_token(pool: &PgPool, id: &str, token_hash: &str) -> sql
         .bind(token_hash)
         .fetch_optional(pool)
         .await?;
+    Ok(row.is_some())
+}
+
+pub async fn worker_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1").bind(id).fetch_optional(pool).await?;
     Ok(row.is_some())
 }
 

@@ -48,7 +48,8 @@
   .compose { width:100%; max-width:680px; display:flex; flex-direction:column; gap:18px; }
   .compose h1 { font-size:30px; font-weight:500; letter-spacing:-.02em; text-align:center; }
   .box { background:#fff; border:1px solid #E0E0DB; border-radius:18px; padding:18px 18px 12px; display:flex; flex-direction:column; gap:10px; box-shadow:0 1px 2px rgba(25,25,25,.04); }
-  .box textarea { width:100%; border:0; outline:0; resize:none; font-family:inherit; font-size:16px; line-height:1.55; color:var(--fg); background:transparent; padding:0; min-height:76px; }
+  .box textarea { width:100%; border:0; outline:0; resize:none; font-family:inherit; font-size:16px; line-height:1.55; color:var(--fg); background:transparent; padding:0; min-height:76px; max-height:60vh; overflow-y:auto; }
+  .count { font-size:11px; color:var(--faint); }
   .box .row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
   .go { width:36px; height:36px; border-radius:50%; background:var(--fg); border:0; display:inline-flex; align-items:center; justify-content:center; }
   .go:disabled { opacity:.35; cursor:default; }
@@ -268,6 +269,7 @@
                 <option value="checkout">In place</option>
               </select>
             </div>
+            <span class="count" id="taskcount"></span>
             <button class="go" type="submit" id="runbtn" aria-label="Run"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button>
           </div>
         </form>
@@ -666,6 +668,8 @@
       '<a class="rrow" href="#/runs/' + r.id + '"><span class="dot ' + r.thread_status + '"></span><span class="t">' + esc(r.task) + (r.follow_ups ? ' <span class="muted">· ' + (r.follow_ups + 1) + ' messages</span>' : '') + '</span><span class="m">' + esc(modelName(r.model)) + ' · ' + esc(r.worker_id || r.repo) + '</span><span class="w mono">' + (r.thread_status === 'running' ? dur(r) : rel(r.last_activity_at)) + '</span></a>'
     ).join('');
   }
+  function autosizeTask(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(window.innerHeight * 0.6, Math.max(76, ta.scrollHeight)) + 'px'; }
+  $('task').addEventListener('input', (e) => { autosizeTask(e.target); const n = e.target.value.length; $('taskcount').textContent = n > 2000 ? n.toLocaleString() + ' characters' : ''; });
   $('form').onsubmit = async (ev) => {
     ev.preventDefault();
     const task = $('task').value.trim(), model = $('model').value, repo = $('repo').value;
@@ -673,7 +677,7 @@
     $('runbtn').disabled = true;
     try {
       const r = await api('/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task, model, repo, permission_mode: $('perm').value, isolation: $('iso').value }) });
-      $('task').value = '';
+      $('task').value = ''; autosizeTask($('task')); $('taskcount').textContent = '';
       location.hash = '#/runs/' + r.id;
       refresh();
     } catch (e) { $('willrun').innerHTML = '<span class="dot failed"></span><span>' + esc(e.message) + '</span>'; }

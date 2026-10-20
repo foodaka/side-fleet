@@ -33,6 +33,8 @@ use crate::AppState;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const CONNECT_MD: &str = include_str!("../static/connect.md");
+/// Tasks and replies up to this many bytes; well under what `claude -p` accepts as an argument.
+pub const MAX_TASK_BYTES: usize = 100_000;
 pub const ALLOWED_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 pub fn router(state: AppState) -> Router {
@@ -114,8 +116,8 @@ async fn create_run(
     if task.is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "task must not be empty".into()));
     }
-    if task.len() > 20_000 {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "task is too long".into()));
+    if task.len() > MAX_TASK_BYTES {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("task is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
     }
     if !ALLOWED_MODELS.contains(&req.model.as_str()) {
         return Err(ApiError(
@@ -184,6 +186,9 @@ async fn follow_up(
     let task = req.task.trim();
     if task.is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "message must not be empty".into()));
+    }
+    if task.len() > MAX_TASK_BYTES {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("message is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
     }
     if let Some(m) = &req.model {
         if !ALLOWED_MODELS.contains(&m.as_str()) {

@@ -411,6 +411,10 @@ async fn register_worker(
     }
     let w = db::upsert_worker(&state.pool, &req.id, &req.display_name, &hash, &req.capabilities).await?;
     tracing::info!(worker = %w.id, repos = w.capabilities.repos.len(), "worker registered");
+    for ev in db::reconcile_worker_runs(&state.pool, &req.id, &req.active_runs).await? {
+        tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run lost by worker restart; marked finished");
+        state.events.publish(ev);
+    }
     Ok(Json(w))
 }
 
@@ -420,6 +424,10 @@ async fn heartbeat(
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<StatusCode, ApiError> {
     if db::heartbeat(&state.pool, &req.id, &hash, &req.capabilities).await? {
+        for ev in db::reconcile_worker_runs(&state.pool, &req.id, &req.active_runs).await? {
+            tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run no longer executing on its worker; marked finished");
+            state.events.publish(ev);
+        }
         Ok(StatusCode::NO_CONTENT)
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.

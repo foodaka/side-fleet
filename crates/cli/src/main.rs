@@ -251,7 +251,14 @@ async fn main() -> Result<()> {
                 parallel,
                 worktrees_dir: worktrees_dir(),
             };
-            sidefleet_worker::worker::run(cfg).await
+            tokio::select! {
+                r = sidefleet_worker::worker::run(cfg) => r,
+                _ = shutdown_signal() => {
+                    let n = sidefleet_worker::agent::kill_all_agents();
+                    if n > 0 { eprintln!("stopped {n} running agent(s)"); }
+                    Ok(())
+                }
+            }
         }
         Cmd::Status => status(),
         Cmd::Disconnect => disconnect(),
@@ -390,10 +397,30 @@ async fn serve(opts: ServeOpts) -> Result<()> {
 
     axum::serve(listener, sidefleet_server::router(state))
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown_signal().await;
+            let n = sidefleet_worker::agent::kill_all_agents();
+            if n > 0 {
+                eprintln!("stopped {n} running agent(s)");
+            }
         })
         .await?;
     Ok(())
+}
+
+/// Ctrl-C or SIGTERM (what launchd/systemd send on stop).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 // ---- connect / service ----
@@ -433,7 +460,7 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
 
     println!("Registering with {control}…");
     let client = sidefleet_worker::client::ControlClient::new(&control, &token, &id)?;
-    match client.register(&display, &caps).await {
+    match client.register(&display, &caps, &[]).await {
         Ok(_) => println!("  Registered as \"{display}\" ({id})"),
         Err(e) => {
             let msg = format!("{e:#}");

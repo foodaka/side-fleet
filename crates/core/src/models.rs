@@ -232,12 +232,18 @@ pub struct RegisterWorkerRequest {
     pub id: String,
     pub display_name: String,
     pub capabilities: Capabilities,
+    /// Runs this worker is executing right now. Any run assigned to it that is
+    /// not listed here was lost (worker restart, crash) and gets failed.
+    #[serde(default)]
+    pub active_runs: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
     pub id: String,
     pub capabilities: Capabilities,
+    #[serde(default)]
+    pub active_runs: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

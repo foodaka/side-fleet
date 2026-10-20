@@ -48,7 +48,7 @@ impl Api {
         };
         let r = self
             .worker(reqwest::Method::POST, "/v1/worker/register")
-            .json(&json!({"id": id, "display_name": id, "capabilities": caps}))
+            .json(&json!({"id": id, "display_name": id, "capabilities": caps, "active_runs": []}))
             .send()
             .await
             .unwrap();
@@ -536,5 +536,57 @@ async fn added_repos_round_trip() {
 
     let r = Client::new().get(format!("{}/v1/repos", env.base_url)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    env.teardown().await;
+}
+
+
+#[tokio::test]
+async fn runs_lost_by_a_worker_restart_are_finished_and_stops_on_offline_workers_apply_at_once() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+
+    // Worker claims a run, then "restarts": it registers again with no active runs.
+    let (_, body) = api.create_run("lost", "r").await;
+    let lost: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    let mut sse = Sse::open(&api, lost, None).await;
+    sse.next_event(Duration::from_secs(1)).await.unwrap(); // queued
+    sse.next_event(Duration::from_secs(1)).await.unwrap(); // running
+    api.register("w", &["r"]).await;
+    let run = api.get_run(lost).await;
+    assert_eq!(run.status, RunStatus::Failed);
+    assert!(run.result.unwrap()["error"].as_str().unwrap().contains("restarted"));
+    let ev = sse.next_event(Duration::from_secs(1)).await.unwrap();
+    assert_eq!((ev.kind.as_str(), ev.payload["status"].as_str()), ("status", Some("failed")));
+
+    // A heartbeat that omits a run the worker owns has the same effect; a listed run is untouched.
+    let (_, body) = api.create_run("kept", "r").await;
+    let kept: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let (_, body) = api.create_run("dropped", "r").await;
+    let dropped: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    // Ask for a stop on the one about to be dropped: it must end as stopped, not failed.
+    api.stop(dropped).await;
+    let r = api
+        .worker(reqwest::Method::POST, "/v1/worker/heartbeat")
+        .json(&json!({"id": "w", "capabilities": {}, "active_runs": [kept]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(api.get_run(kept).await.status, RunStatus::Running);
+    assert_eq!(api.get_run(dropped).await.status, RunStatus::Stopped);
+
+    // Worker goes offline: a stop finishes the run immediately instead of waiting.
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '2 minutes' WHERE id = 'w'")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let run = api.stop(kept).await;
+    assert_eq!(run.status, RunStatus::Stopped);
+    assert!(run.finished_at.is_some());
+
     env.teardown().await;
 }

@@ -80,7 +80,7 @@ impl ControlClient {
         Ok(r)
     }
 
-    pub async fn register(&self, display_name: &str, caps: &Capabilities) -> Result<Worker> {
+    pub async fn register(&self, display_name: &str, caps: &Capabilities, active_runs: &[Uuid]) -> Result<Worker> {
         let r = self
             .http
             .post(self.url("/v1/worker/register"))
@@ -89,6 +89,7 @@ impl ControlClient {
                 id: self.worker_id.clone(),
                 display_name: display_name.to_string(),
                 capabilities: caps.clone(),
+                active_runs: active_runs.to_vec(),
             })
             .send()
             .await
@@ -97,12 +98,12 @@ impl ControlClient {
         Ok(r.json().await?)
     }
 
-    pub async fn heartbeat(&self, caps: &Capabilities) -> Result<(), ClientError> {
+    pub async fn heartbeat(&self, caps: &Capabilities, active_runs: &[Uuid]) -> Result<(), ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/heartbeat"))
             .bearer_auth(&self.token)
-            .json(&HeartbeatRequest { id: self.worker_id.clone(), capabilities: caps.clone() })
+            .json(&HeartbeatRequest { id: self.worker_id.clone(), capabilities: caps.clone(), active_runs: active_runs.to_vec() })
             .send()
             .await
             .context("heartbeat request failed")?;

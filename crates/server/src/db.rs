@@ -302,6 +302,29 @@ pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(R
             (row_to_run(&row), Some(ev))
         }
         RunStatus::Running => {
+            // If nobody can act on the stop (worker offline or gone), finish it here.
+            let worker_online: bool = match &run.worker_id {
+                Some(w) => sqlx::query("SELECT (last_heartbeat_at > now() - interval '45 seconds') AS online FROM workers WHERE id = $1")
+                    .bind(w)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|r| r.get::<bool, _>("online"))
+                    .unwrap_or(false),
+                None => false,
+            };
+            if !worker_online {
+                let row = sqlx::query(&format!(
+                    "UPDATE runs SET status = 'stopped', stop_requested = true, finished_at = now(), result = $2
+                     WHERE id = $1 RETURNING {RUN_COLS}"
+                ))
+                .bind(run_id)
+                .bind(json!({"reason": "stopped; the worker was offline"}))
+                .fetch_one(&mut *tx)
+                .await?;
+                let ev = append_event_locked(&mut tx, run_id, "status", &json!({"status": "stopped", "reason": "worker offline"})).await?;
+                tx.commit().await?;
+                return Ok(Some((row_to_run(&row), Some(ev))));
+            }
             let row = sqlx::query(&format!(
                 "UPDATE runs SET stop_requested = true WHERE id = $1 RETURNING {RUN_COLS}"
             ))
@@ -396,6 +419,39 @@ pub async fn finish_run(
     let ev = append_event_locked(&mut tx, run_id, "status", &status_payload(status)).await?;
     tx.commit().await?;
     Ok(FinishOutcome::Finished(row_to_run(&row), ev))
+}
+
+/// Runs assigned to `worker_id` that are `running` but not in `active`: the
+/// worker lost them (restart, crash). Mark them finished so stops and replies
+/// are not left waiting forever. A run that had a stop pending becomes
+/// `stopped`, otherwise `failed`.
+pub async fn reconcile_worker_runs(pool: &PgPool, worker_id: &str, active: &[Uuid]) -> sqlx::Result<Vec<RunEvent>> {
+    let rows = sqlx::query("SELECT id FROM runs WHERE status = 'running' AND worker_id = $1 AND NOT (id = ANY($2))")
+        .bind(worker_id)
+        .bind(active)
+        .fetch_all(pool)
+        .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let id: Uuid = row.get("id");
+        let mut tx = pool.begin().await?;
+        let Some(run) = lock_run(&mut tx, id).await? else { continue };
+        if run.status != RunStatus::Running || active.contains(&id) {
+            continue;
+        }
+        let status = if run.stop_requested { RunStatus::Stopped } else { RunStatus::Failed };
+        let reason = format!("the worker {worker_id} restarted while this run was in progress");
+        sqlx::query("UPDATE runs SET status = $2, finished_at = now(), result = $3 WHERE id = $1")
+            .bind(id)
+            .bind(status.as_str())
+            .bind(json!({"error": reason}))
+            .execute(&mut *tx)
+            .await?;
+        let ev = append_event_locked(&mut tx, id, "status", &json!({"status": status.as_str(), "reason": "worker restarted"})).await?;
+        tx.commit().await?;
+        out.push(ev);
+    }
+    Ok(out)
 }
 
 /// Fail running runs whose worker has not heart-beaten for `stale_secs`.

@@ -14,6 +14,32 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
+/// Process groups of agents currently running, so a shutting-down worker can
+/// kill them instead of leaving orphans that keep consuming the user's plan.
+static LIVE_GROUPS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+fn track(pid: i32) {
+    LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+}
+fn untrack(pid: i32) {
+    LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid);
+}
+
+/// Kill every agent this process started. Called on Ctrl-C / SIGTERM.
+pub fn kill_all_agents() -> usize {
+    let pids: Vec<i32> = LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for pid in &pids {
+        let _ = killpg(Pid::from_raw(*pid), Signal::SIGTERM);
+    }
+    if !pids.is_empty() {
+        std::thread::sleep(Duration::from_millis(800));
+        for pid in &pids {
+            let _ = killpg(Pid::from_raw(*pid), Signal::SIGKILL);
+        }
+    }
+    pids.len()
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentSpec {
     /// Executable, e.g. `claude` or an absolute path.
@@ -105,6 +131,7 @@ pub async fn execute(
         }
     };
     let pid = child.id().unwrap_or(0) as i32;
+    track(pid);
     send(NewEvent {
         kind: "started".into(),
         payload: json!({"command": spec.display_command(), "cwd": spec.cwd.to_string_lossy(), "pid": pid}),
@@ -167,6 +194,7 @@ pub async fn execute(
         }
     };
 
+    untrack(pid);
     if stopped {
         return Outcome {
             status: RunStatus::Stopped,

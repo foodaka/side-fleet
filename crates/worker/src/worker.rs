@@ -55,8 +55,11 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     log_caps(&caps);
     let caps = Arc::new(Mutex::new(caps));
     let active_count = Arc::new(AtomicUsize::new(0));
+    // Active runs: run id -> (repo, isolation). Reported on every heartbeat so the
+    // control plane can fail runs we no longer execute; also keeps in-place runs one per repo.
+    let active: Arc<Mutex<HashMap<Uuid, (String, String)>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    register_with_backoff(&client, &cfg, &caps).await;
+    register_with_backoff(&client, &cfg, &caps, &active).await;
 
     // Heartbeat task: re-scans repos each time so new checkouts show up.
     {
@@ -68,6 +71,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let cfg2 = cfg.clone();
         let parallel = cfg.parallel.max(1);
         let active_count = active_count.clone();
+        let active = active.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
@@ -78,11 +82,12 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                     c.slots = Some(Slots { parallel, active: active_count.load(Ordering::Relaxed) });
                 }
                 let snapshot = caps.lock().await.clone();
-                match client.heartbeat(&snapshot).await {
+                let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
+                match client.heartbeat(&snapshot, &ids).await {
                     Ok(()) => {}
                     Err(ClientError::NotRegistered) => {
                         tracing::warn!("control plane forgot us; re-registering");
-                        register_with_backoff(&client, &cfg2, &caps).await;
+                        register_with_backoff(&client, &cfg2, &caps, &active).await;
                     }
                     Err(e) => tracing::warn!(error = %e, "heartbeat failed"),
                 }
@@ -92,8 +97,6 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
 
     let mut backoff = Backoff::new(Duration::from_secs(30));
     let slots = Arc::new(Semaphore::new(cfg.parallel.max(1)));
-    // Active runs: run id -> (repo, isolation). Used to keep in-place runs one per repo.
-    let active: Arc<Mutex<HashMap<Uuid, (String, String)>>> = Arc::new(Mutex::new(HashMap::new()));
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Uuid>();
     let mut completed = 0usize;
     let cfg = Arc::new(cfg);
@@ -155,7 +158,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             }
             Err(ClientError::NotRegistered) => {
                 drop(permit);
-                register_with_backoff(&client, &cfg, &caps).await;
+                register_with_backoff(&client, &cfg, &caps, &active).await;
             }
             Err(e) => {
                 drop(permit);
@@ -167,11 +170,17 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     }
 }
 
-async fn register_with_backoff(client: &ControlClient, cfg: &WorkerConfig, caps: &Arc<Mutex<Capabilities>>) {
+async fn register_with_backoff(
+    client: &ControlClient,
+    cfg: &WorkerConfig,
+    caps: &Arc<Mutex<Capabilities>>,
+    active: &Arc<Mutex<HashMap<Uuid, (String, String)>>>,
+) {
     let mut backoff = Backoff::new(Duration::from_secs(30));
     loop {
         let snapshot = caps.lock().await.clone();
-        match client.register(&cfg.display_name, &snapshot).await {
+        let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
+        match client.register(&cfg.display_name, &snapshot, &ids).await {
             Ok(w) => {
                 tracing::info!(worker = %w.id, control = %cfg.control_url, "registered with control plane");
                 return;

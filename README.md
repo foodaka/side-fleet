@@ -27,6 +27,16 @@ curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh 
 It downloads a prebuilt `sidefleet` into `~/.local/bin` when a release exists for your platform,
 otherwise it builds from source (installing Rust if needed, a few minutes).
 
+While the repository is private, GitHub returns 404 for that raw URL. Either make the repo public,
+or install with the GitHub CLI signed in (`gh auth login`), which the script then uses for the
+release download and the source clone:
+
+```bash
+gh api repos/foodaka/side-fleet/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
+```
+
+From a checkout, `cargo install --path crates/cli --locked` also works.
+
 ## Set up in three steps
 
 **1. Start the control plane** on the machine that will host the page (your desk Mac, a Mac mini,

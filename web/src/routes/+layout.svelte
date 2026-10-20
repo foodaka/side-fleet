@@ -84,7 +84,7 @@
 						<DropdownMenu.Item onclick={() => fleet.signOut()}>Change developer key…</DropdownMenu.Item>
 						{#if build.sha}
 							<DropdownMenu.Separator />
-							<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Control plane {build.version} · {build.sha} · {build.date}</DropdownMenu.Label>
+							<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Control plane {build.version}, build <span class="font-mono">{build.sha}</span> from {build.date}</DropdownMenu.Label>
 						{/if}
 					</DropdownMenu.Content>
 				</DropdownMenu.Root>

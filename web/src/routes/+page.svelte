@@ -173,8 +173,7 @@
 				{#if !repos.length}
 					Your machines have {online.size} git checkouts. <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.pickerOpen = true)}>Choose the ones you work on</button> to fill the repo menu.
 				{:else if target}
-					Runs on <span class="text-foreground">{target.display_name}</span>{#if claude && !claude.signed_in}, <span class="text-err-ink">where Claude Code is not signed in</span>{/if}
-					{#if iso === 'worktree'}, on a new branch so your checkout stays untouched{:else}, directly in the checkout{/if}.
+					Runs on <span class="text-foreground">{target.display_name}</span>{#if claude && !claude.signed_in}, <span class="text-err-ink">where Claude Code is not signed in</span>{/if}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
 				{/if}
 			</p>
 		</form>

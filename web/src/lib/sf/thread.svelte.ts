@@ -1,5 +1,6 @@
 import { api } from './api';
 import { followRun } from './sse';
+import { fleet } from './state.svelte';
 import type { Run, RunEvent } from './types';
 
 export type Item =
@@ -109,6 +110,7 @@ export class Thread {
 
 	#follow(i: number) {
 		const turn = this.turns[i];
+		const live = this.runs[i].status === 'queued' || this.runs[i].status === 'running';
 		return followRun(
 			this.runs[i].id,
 			(ev) => {
@@ -117,7 +119,10 @@ export class Thread {
 			},
 			this.#abort.signal,
 			() => (turn.reconnecting = true)
-		);
+		).then(() => {
+			// A run that just finished changes the lists and machine slots: refresh now.
+			if (live && !this.#abort.signal.aborted) void fleet.refresh();
+		});
 	}
 }
 

@@ -51,7 +51,7 @@
 		<div class="grid grid-cols-2 gap-x-5 gap-y-3.5">
 			<Gauge label="CPU" value="{Math.round(sys.cpu_percent)}% of {sys.cpu_cores}" percent={Math.round(sys.cpu_percent)} />
 			<Gauge label="Memory" value="{(sys.mem_used_mb / 1024).toFixed(1)} / {Math.round(sys.mem_total_mb / 1024)} GB" percent={pct(sys.mem_used_mb, sys.mem_total_mb)} />
-			<Gauge label="Disk free" value="{Math.round(sys.disk_free_gb)} of {Math.round(sys.disk_total_gb)} GB" percent={pct(sys.disk_total_gb - sys.disk_free_gb, sys.disk_total_gb)} />
+			<Gauge label="Disk" value="{Math.round(sys.disk_free_gb)} GB free" percent={pct(sys.disk_total_gb - sys.disk_free_gb, sys.disk_total_gb)} />
 			{#if slots}<Gauge label="Tasks" value="{slots.active} of {slots.parallel} running" percent={pct(slots.active, slots.parallel)} />{/if}
 		</div>
 	{:else if w.online}

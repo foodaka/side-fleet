@@ -171,3 +171,10 @@
 @keyframes shimmer { from { background-position: 100% center; } to { background-position: 0% center; } }
 @utility animate-shimmer { animation: shimmer var(--shimmer-duration, 2s) linear infinite; }
 @media (prefers-reduced-motion: reduce) { .animate-shimmer { animation: none; } }
+
+/* Agent answers: Streamdown leaves vertical rhythm to its container. */
+.sf-md .whitespace-normal > * + * { margin-top: 0.85em; }
+.sf-md .whitespace-normal > :is(h1, h2, h3, h4) { margin-top: 1.4em; font-weight: 600; letter-spacing: -0.01em; }
+.sf-md .whitespace-normal > :is(h1, h2, h3, h4):first-child { margin-top: 0; }
+.sf-md li + li { margin-top: 0.15em; }
+.sf-md :not(pre) > code { font-size: 0.86em; padding: 0.1em 0.35em; border-radius: 0.3em; background: var(--code-bg); }

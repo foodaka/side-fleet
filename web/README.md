@@ -1,54 +1,21 @@
-# sv
+# Sidefleet web UI
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SvelteKit (static, hash routing) + Tailwind 4 + shadcn-svelte, with chat components
+from [Svelte AI Elements](https://svelte-ai-elements.vercel.app). The compiled app is
+written to `crates/server/web-dist/` and embedded in the `sidefleet` binary, so
+installing Sidefleet from source needs only Rust. Node is needed only to change the UI.
 
-## Creating a project
-
-If you're seeing this, you've probably already done this step. Congrats!
-
-```sh
-# create a new project
-npx sv create my-app
+```bash
+pnpm install
+pnpm dev        # http://localhost:5173, proxies /v1 to `sidefleet serve` on 127.0.0.1:7373
+pnpm check      # type-check
+pnpm build      # writes ../crates/server/web-dist (commit it)
 ```
 
-To recreate this project with the same configuration:
+Point the dev server at another control plane with `SIDEFLEET_DEV_API=http://host:port pnpm dev`.
 
-```sh
-# recreate this project
-pnpm dlx sv@1.1.1 create --template minimal --types ts --install pnpm web
-```
-
-## Adding features
-
-Add features to your project with `sv add`:
-
-```sh
-npx sv add
-```
-
-For example, to add Tailwind CSS:
-
-```sh
-npx sv add tailwindcss
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-## Building
-
-To create a production version of your app:
-
-```sh
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
+- `src/lib/sf/` is Sidefleet's own code: API client, live state, event stream, thread model, components.
+- `src/lib/components/ui/` and `src/lib/components/ai-elements/` were copied in by the shadcn-svelte CLI;
+  edit them freely.
+- `vite.config.ts` stubs syntax-highlighting grammars we don't need, plus Mermaid and KaTeX, to keep the
+  embedded app small. Add a language to `LANGS` there if agents print it often.

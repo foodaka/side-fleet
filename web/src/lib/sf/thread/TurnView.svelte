@@ -58,7 +58,7 @@
 		<div class="flex flex-col gap-1">
 			{#each groups as it (it.key)}
 				{#if it.kind === 'text'}
-					<div class="py-1.5 text-[14.5px] leading-[1.7]"><Response content={it.text} /></div>
+					<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={it.text} /></div>
 				{:else if it.kind === 'tool'}
 					<ToolRow item={it} {live} />
 				{:else if it.kind === 'note'}
@@ -82,7 +82,7 @@
 
 		{#if turn.result}
 			{#if turn.result.text}
-				<div class="py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.result.text} /></div>
+				<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.result.text} /></div>
 			{/if}
 			<p class="tnum flex flex-wrap gap-x-3 pt-1 text-xs text-muted-foreground">
 				{#if !turn.result.ok}<span class="text-err-ink">Claude Code reported an error{turn.result.subtype ? ` (${turn.result.subtype})` : ''}</span>{/if}

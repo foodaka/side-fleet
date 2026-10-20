@@ -8,7 +8,7 @@
 	const local = /\/\/(localhost|127\.0\.0\.1|\[::1\])/.test(origin);
 </script>
 
-<div class="flex flex-col gap-4">
+<div class="flex min-w-0 flex-col gap-4">
 	<div class="inline-flex w-fit rounded-full bg-muted p-0.5 text-[13px]" role="tablist" aria-label="How to set it up">
 		<button role="tab" aria-selected={mode === 'terminal'} class="rounded-full px-3 py-1 {mode === 'terminal' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}" onclick={() => (mode = 'terminal')}>In a terminal</button>
 		<button role="tab" aria-selected={mode === 'agent'} class="rounded-full px-3 py-1 {mode === 'agent' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}" onclick={() => (mode = 'agent')}>Ask Claude Code</button>

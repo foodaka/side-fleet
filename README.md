@@ -175,7 +175,8 @@ Worker (bearer one of `SIDEFLEET_WORKER_TOKENS`): `POST /v1/worker/register`,
 
 ```
 crates/core     shared models, stream-json → event mapping, redaction   (sidefleet-core)
-crates/server   Axum control plane, Postgres via sqlx migrations, static page (sidefleet-server)
+crates/server   Axum control plane, Postgres via sqlx migrations; embeds the web app (sidefleet-server)
+web/            the web UI: SvelteKit + shadcn-svelte; `pnpm build` writes crates/server/web-dist
 crates/worker   detection, control-plane client, process-group executor, loop (sidefleet-worker)
 crates/cli      the `sidefleet` binary: serve / connect / run / status / disconnect / detect
 ```
@@ -186,6 +187,10 @@ cargo build --workspace
 cargo test --workspace           # integration tests create and drop sidefleet_test_* databases
 cargo run -p sidefleet -- serve
 ```
+
+The web UI lives in `web/` (see [web/README.md](web/README.md)). Its build output in
+`crates/server/web-dist/` is committed, so Rust-only installs keep working; run `pnpm build`
+in `web/` after changing it. CI fails if the committed build is out of date.
 
 Tests cover redaction, stream mapping and truncation (core); auth, lifecycle transitions, event
 ordering with SSE replay and resume, stop signalling and control-plane redaction (server); the

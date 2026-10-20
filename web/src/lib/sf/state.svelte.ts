@@ -28,6 +28,13 @@ class Fleet {
 		else void this.refresh();
 		this.#timer = setInterval(() => void this.refresh(), 5000);
 		setInterval(() => (this.now = Date.now()), 1000);
+		// Background tabs throttle timers; catch up the moment the tab is visible again.
+		document.addEventListener('visibilitychange', () => {
+			if (document.visibilityState === 'visible') {
+				this.now = Date.now();
+				void this.refresh();
+			}
+		});
 	}
 
 	async refresh() {

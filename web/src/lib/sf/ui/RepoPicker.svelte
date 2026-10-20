@@ -5,6 +5,7 @@
 	import Search from '@lucide/svelte/icons/search';
 	import { fleet } from '../state.svelte';
 	import { toast } from 'svelte-sonner';
+	import { untrack } from 'svelte';
 
 	let { onsaved }: { onsaved?: (fresh: string[]) => void } = $props();
 
@@ -14,16 +15,20 @@
 	let act = $state(0);
 	let saving = $state(false);
 	let list: HTMLDivElement | undefined = $state();
+	let search: HTMLInputElement | undefined = $state();
 
-	// Freeze the order when the dialog opens (chosen first) so rows don't jump while ticking.
+	// Set up once per opening: freeze the order (chosen first) so rows don't jump while
+	// ticking, and don't let the 5-second background refresh reset what you've typed or ticked.
 	$effect(() => {
 		if (!fleet.pickerOpen) return;
-		const repos = fleet.allRepos;
-		const added = fleet.added ?? new Set();
-		sel = new Set([...added].filter((n) => repos.has(n)));
-		order = [...repos.keys()].sort((a, b) => Number(sel.has(b)) - Number(sel.has(a)) || a.localeCompare(b));
-		q = '';
-		act = 0;
+		untrack(() => {
+			const repos = fleet.allRepos;
+			const added = fleet.added ?? new Set();
+			sel = new Set([...added].filter((n) => repos.has(n)));
+			order = [...repos.keys()].sort((a, b) => Number(sel.has(b)) - Number(sel.has(a)) || a.localeCompare(b));
+			q = '';
+			act = 0;
+		});
 	});
 
 	const terms = $derived(q.trim().toLowerCase().split(/\s+/).filter(Boolean));
@@ -77,7 +82,10 @@
 </script>
 
 <Dialog.Root bind:open={fleet.pickerOpen}>
-	<Dialog.Content class="flex max-h-[80vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[34rem]">
+	<Dialog.Content
+		class="flex max-h-[80vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[34rem]"
+		onOpenAutoFocus={(e) => { e.preventDefault(); search?.focus(); }}
+	>
 		<div class="flex flex-col gap-3 px-5 pt-5 pb-3">
 			<Dialog.Header class="gap-1">
 				<Dialog.Title>Choose your repos</Dialog.Title>
@@ -86,6 +94,7 @@
 			<div class="relative">
 				<Search class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
 				<input
+					bind:this={search}
 					class="h-10 w-full rounded-lg border border-input bg-background pr-3 pl-9 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
 					placeholder="Search {fleet.allRepos.size} repos"
 					bind:value={q}

@@ -116,7 +116,8 @@ async fn agent_error_result_is_failed() {
     let (outcome, events) = tokio::join!(execute(spec("error-result"), tx, stop_rx), drain(rx));
     assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.result["result"]["subtype"], "error_max_turns");
-    assert_eq!(events.last().unwrap().kind, "result");
+    let last_stdout = events.iter().rev().find(|e| e.kind != "stderr").unwrap();
+    assert_eq!(last_stdout.kind, "result");
 }
 
 #[tokio::test]

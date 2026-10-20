@@ -495,3 +495,19 @@ pub async fn list_workers(pool: &PgPool) -> sqlx::Result<Vec<Worker>> {
 pub fn is_online(last_heartbeat_at: DateTime<Utc>) -> bool {
     Utc::now().signed_duration_since(last_heartbeat_at).num_seconds() < 45
 }
+
+pub async fn list_added_repos(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    let rows = sqlx::query("SELECT name FROM added_repos ORDER BY name").fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| r.get("name")).collect())
+}
+
+/// Replace the whole added set in one transaction.
+pub async fn set_added_repos(pool: &PgPool, names: &[String]) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM added_repos WHERE NOT (name = ANY($1))").bind(names).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO added_repos (name) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING")
+        .bind(names)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}

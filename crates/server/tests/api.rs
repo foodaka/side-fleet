@@ -518,3 +518,23 @@ async fn follow_ups_resume_the_session_on_the_same_worker() {
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn added_repos_round_trip() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let get = || async { api.dev(reqwest::Method::GET, "/v1/repos").send().await.unwrap().json::<Value>().await.unwrap() };
+    assert_eq!(get().await, json!({"added": []}));
+
+    let r = api.dev(reqwest::Method::PUT, "/v1/repos").json(&json!({"added": ["b", " a ", "b", ""]})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(get().await, json!({"added": ["a", "b"]}));
+
+    // Replacing drops what is no longer listed.
+    api.dev(reqwest::Method::PUT, "/v1/repos").json(&json!({"added": ["c", "a"]})).send().await.unwrap();
+    assert_eq!(get().await, json!({"added": ["a", "c"]}));
+
+    let r = Client::new().get(format!("{}/v1/repos", env.base_url)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    env.teardown().await;
+}

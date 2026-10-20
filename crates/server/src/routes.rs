@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/workers", get(list_workers))
+        .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
@@ -245,6 +246,30 @@ async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::
         })
         .collect();
     Ok(Json(json!(out)))
+}
+
+#[derive(Deserialize)]
+struct AddedRepos {
+    added: Vec<String>,
+}
+
+/// The repos the developer chose to show in the composer (out of everything the machines report).
+async fn get_added_repos(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(json!({ "added": db::list_added_repos(&state.pool).await? })))
+}
+
+async fn put_added_repos(
+    State(state): State<AppState>,
+    Json(req): Json<AddedRepos>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut names: Vec<String> = req.added.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
+    names.sort();
+    names.dedup();
+    if names.len() > 1000 || names.iter().any(|n| n.len() > 512) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "too many or too long repo names".into()));
+    }
+    db::set_added_repos(&state.pool, &names).await?;
+    Ok(Json(json!({ "added": names })))
 }
 
 #[derive(Deserialize)]

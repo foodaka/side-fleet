@@ -86,12 +86,25 @@ else
   echo "Built and installed to $BIN_DIR/sidefleet"
 fi
 
+# Put BIN_DIR on PATH so plain `sidefleet` works in new terminals.
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
+    case "$(basename "${SHELL:-sh}")" in
+      zsh)  rc="$HOME/.zshrc" ;;
+      bash) if [ "$os" = "darwin" ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+      fish) rc="" ;;
+      *)    rc="$HOME/.profile" ;;
+    esac
     echo
-    echo "Add $BIN_DIR to your PATH, e.g. for zsh:"
-    echo "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc && export PATH=\"$BIN_DIR:\$PATH\""
+    if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
+      fish -c "fish_add_path -U '$BIN_DIR'" 2>/dev/null || true
+      echo "Added $BIN_DIR to your fish PATH."
+    elif ! grep -qs "$BIN_DIR" "$rc"; then
+      printf '\n# Added by the Sidefleet installer\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$rc"
+      echo "Added $BIN_DIR to your PATH in $rc."
+    fi
+    echo "Open a new terminal (or run: export PATH=\"$BIN_DIR:\$PATH\") and then plain \`sidefleet\` works."
     ;;
 esac
 

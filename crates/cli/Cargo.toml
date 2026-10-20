@@ -1,0 +1,24 @@
+[package]
+name = "sidefleet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sidefleet: run coding agents on your own machines, from anywhere"
+
+[[bin]]
+name = "sidefleet"
+path = "src/main.rs"
+
+[dependencies]
+sidefleet-core.workspace = true
+sidefleet-server.workspace = true
+sidefleet-worker.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+rand.workspace = true

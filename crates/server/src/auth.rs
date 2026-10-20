@@ -42,7 +42,7 @@ fn unauthorized(audience: &str) -> Response {
         .into_response()
 }
 
-/// Developer API: `Authorization: Bearer <ACD_DEV_KEY>`.
+/// Developer API: `Authorization: Bearer <SIDEFLEET_DEV_KEY>`.
 pub async fn require_dev(State(state): State<AppState>, req: Request, next: Next) -> Response {
     match bearer(&req) {
         Some(t) if matches(t, &state.config.dev_key) => next.run(req).await,
@@ -50,7 +50,7 @@ pub async fn require_dev(State(state): State<AppState>, req: Request, next: Next
     }
 }
 
-/// Worker API: `Authorization: Bearer <one of ACD_WORKER_TOKENS>`.
+/// Worker API: `Authorization: Bearer <one of SIDEFLEET_WORKER_TOKENS>`.
 /// Stores the token hash in request extensions so `register` can persist it.
 pub async fn require_worker(
     State(state): State<AppState>,

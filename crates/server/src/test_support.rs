@@ -1,4 +1,4 @@
-//! Helpers for integration tests (used by `acd` and `acw` tests): a fresh
+//! Helpers for integration tests (used by the server and worker tests): a fresh
 //! Postgres database per test and an in-process server on a random port.
 //! Requires Postgres; see README ("docker compose up -d").
 
@@ -11,7 +11,7 @@ pub const WORKER_TOKEN: &str = "test-worker-token-0000";
 pub fn base_database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://acd:acd@localhost:5432/acd".into())
+        .unwrap_or_else(|_| "postgres://sidefleet:sidefleet@localhost:5432/sidefleet".into())
 }
 
 pub struct TestEnv {
@@ -23,11 +23,11 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    /// Create a database named `acd_test_<random>`, migrate it, and serve the
+    /// Create a database named `sidefleet_test_<random>`, migrate it, and serve the
     /// router on 127.0.0.1:0.
     pub async fn start() -> TestEnv {
         let base = base_database_url();
-        let db_name = format!("acd_test_{}", uuid::Uuid::new_v4().simple());
+        let db_name = format!("sidefleet_test_{}", uuid::Uuid::new_v4().simple());
         let mut conn = PgConnection::connect(&base).await.unwrap_or_else(|e| {
             panic!("cannot connect to Postgres at {base}: {e}. Start it with `docker compose up -d`.")
         });

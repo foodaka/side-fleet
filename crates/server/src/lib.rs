@@ -1,4 +1,4 @@
-//! AgentCloud control plane: Axum + Postgres. Exposed as a library so tests
+//! Sidefleet control plane: Axum + Postgres. Exposed as a library so tests
 //! (and the worker's end-to-end tests) can spin up the exact router in-process.
 
 pub mod auth;
@@ -24,18 +24,18 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let dev_key = std::env::var("ACD_DEV_KEY")
-            .map_err(|_| anyhow::anyhow!("ACD_DEV_KEY is not set"))?;
-        let tokens = std::env::var("ACD_WORKER_TOKENS")
-            .or_else(|_| std::env::var("ACD_WORKER_TOKEN"))
-            .map_err(|_| anyhow::anyhow!("ACD_WORKER_TOKENS is not set"))?;
+        let dev_key = std::env::var("SIDEFLEET_DEV_KEY")
+            .map_err(|_| anyhow::anyhow!("SIDEFLEET_DEV_KEY is not set"))?;
+        let tokens = std::env::var("SIDEFLEET_WORKER_TOKENS")
+            .or_else(|_| std::env::var("SIDEFLEET_WORKER_TOKEN"))
+            .map_err(|_| anyhow::anyhow!("SIDEFLEET_WORKER_TOKENS is not set"))?;
         let worker_tokens: Vec<String> = tokens
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        anyhow::ensure!(!worker_tokens.is_empty(), "ACD_WORKER_TOKENS is empty");
-        anyhow::ensure!(dev_key.len() >= 8, "ACD_DEV_KEY must be at least 8 characters");
+        anyhow::ensure!(!worker_tokens.is_empty(), "SIDEFLEET_WORKER_TOKENS is empty");
+        anyhow::ensure!(dev_key.len() >= 8, "SIDEFLEET_DEV_KEY must be at least 8 characters");
         Ok(Self { dev_key, worker_tokens })
     }
 }

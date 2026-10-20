@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ac_core::{Capabilities, NewEvent, Run, RunStatus};
+use sidefleet_core::{Capabilities, NewEvent, Run, RunStatus};
 use anyhow::Result;
 use tokio::sync::{mpsc, watch, Mutex};
 use uuid::Uuid;

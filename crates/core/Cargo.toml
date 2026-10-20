@@ -1,12 +1,12 @@
 [package]
-name = "ac-core"
+name = "sidefleet-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared models, stream-json mapping and redaction for AgentCloud"
+description = "Shared models, stream-json mapping and redaction for Sidefleet"
 
 [lib]
-name = "ac_core"
+name = "sidefleet_core"
 path = "src/lib.rs"
 
 [dependencies]

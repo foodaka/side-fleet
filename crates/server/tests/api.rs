@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use acd::test_support::{TestEnv, DEV_KEY, WORKER_TOKEN};
-use ac_core::{Capabilities, RepoInfo, Run, RunControl, RunEvent, RunStatus};
+use sidefleet_server::test_support::{TestEnv, DEV_KEY, WORKER_TOKEN};
+use sidefleet_core::{Capabilities, RepoInfo, Run, RunControl, RunEvent, RunStatus};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
@@ -183,7 +183,7 @@ async fn auth_is_required_for_both_audiences() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "dev key must not open the worker API");
     let r = c.get(format!("{}/", env.base_url)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    assert!(r.text().await.unwrap().contains("<title>AgentCloud</title>"));
+    assert!(r.text().await.unwrap().contains("<title>Sidefleet</title>"));
     env.teardown().await;
 }
 
@@ -280,7 +280,7 @@ async fn run_lifecycle_transitions() {
     assert_eq!(run.result.unwrap()["error"], "boom");
 
     // The events table recorded every transition in order.
-    let evs: Vec<RunEvent> = acd::db::events_since(&env.pool, id, 0).await.unwrap();
+    let evs: Vec<RunEvent> = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
     let kinds: Vec<(i64, String)> = evs.iter().map(|e| (e.seq, format!("{}:{}", e.kind, e.payload["status"].as_str().unwrap_or("-")))).collect();
     assert_eq!(
         kinds,
@@ -406,7 +406,7 @@ async fn stop_while_running_is_signalled_to_the_worker() {
     let (_, _) = api.finish("w", id, "stopped", json!({"reason": "killed"})).await;
     let run = api.get_run(id).await;
     assert_eq!(run.status, RunStatus::Stopped);
-    let kinds: Vec<String> = acd::db::events_since(&env.pool, id, 0).await.unwrap().into_iter().map(|e| e.kind).collect();
+    let kinds: Vec<String> = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap().into_iter().map(|e| e.kind).collect();
     assert_eq!(kinds, vec!["status", "status", "stop_requested", "stderr", "status"]);
 
     env.teardown().await;
@@ -425,7 +425,7 @@ async fn control_plane_redacts_secrets_in_stored_payloads() {
         {"kind": "tool_result", "payload": {"content": "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234", "api_key": "whatever"}},
     ])).await;
     api.finish("w", id, "succeeded", json!({"result": "token=abcdefghijkl done"})).await;
-    let evs = acd::db::events_since(&env.pool, id, 0).await.unwrap();
+    let evs = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
     let all = serde_json::to_string(&evs).unwrap();
     assert!(!all.contains("sk-ant-abc"), "{all}");
     assert!(!all.contains("ghp_abc"), "{all}");

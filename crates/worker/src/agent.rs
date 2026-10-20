@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use ac_core::{map_stream_line, redact, MappedLine, NewEvent, RunStatus};
+use sidefleet_core::{map_stream_line, redact, MappedLine, NewEvent, RunStatus};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use serde_json::{json, Value};
@@ -146,7 +146,7 @@ pub async fn execute(
             line = err_lines.next_line(), if !stderr_done => {
                 match line {
                     Ok(Some(line)) => {
-                        let text = ac_core::stream::truncate_bytes(&redact(&line), 2048);
+                        let text = sidefleet_core::stream::truncate_bytes(&redact(&line), 2048);
                         if stderr_tail.len() < 50 {
                             stderr_tail.push(text.clone());
                         }

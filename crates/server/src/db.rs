@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use ac_core::{Capabilities, Run, RunEvent, RunStatus, Worker};
+use sidefleet_core::{Capabilities, Run, RunEvent, RunStatus, Worker};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -148,7 +148,7 @@ pub async fn append_events(
     pool: &PgPool,
     run_id: Uuid,
     worker_id: &str,
-    events: &[ac_core::NewEvent],
+    events: &[sidefleet_core::NewEvent],
 ) -> sqlx::Result<AppendOutcome> {
     let mut tx = pool.begin().await?;
     let Some(run) = lock_run(&mut tx, run_id).await? else {
@@ -162,7 +162,7 @@ pub async fn append_events(
     }
     let mut stored = Vec::with_capacity(events.len());
     for e in events {
-        let payload = ac_core::redact::redact_json(&e.payload);
+        let payload = sidefleet_core::redact::redact_json(&e.payload);
         stored.push(append_event_locked(&mut tx, run_id, &e.kind, &payload).await?);
     }
     tx.commit().await?;
@@ -271,7 +271,7 @@ pub async fn finish_run(
     if run.status != RunStatus::Running {
         return Ok(FinishOutcome::AlreadyFinished(run));
     }
-    let result = result.map(|r| ac_core::redact::redact_json(&r));
+    let result = result.map(|r| sidefleet_core::redact::redact_json(&r));
     let row = sqlx::query(&format!(
         "UPDATE runs SET status = $2, finished_at = now(), result = $3 WHERE id = $1 RETURNING {RUN_COLS}"
     ))

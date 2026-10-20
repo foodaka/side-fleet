@@ -154,7 +154,7 @@ mod tests {
         assert!(r.contains("API_KEY="), "{r}");
         let r = redact("password: hunter2hunter2");
         assert!(!r.contains("hunter2"), "{r}");
-        let r = redact("acw run --token tok_abcdef123456 --control http://x");
+        let r = redact("sidefleet run --token tok_abcdef123456 --control http://x");
         assert!(!r.contains("tok_abcdef"), "{r}");
         assert!(r.contains("--control http://x"), "{r}");
     }

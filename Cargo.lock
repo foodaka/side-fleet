@@ -3,66 +3,6 @@
 version = 4
 
 [[package]]
-name = "ac-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "regex",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "acd"
-version = "0.1.0"
-dependencies = [
- "ac-core",
- "anyhow",
- "async-stream",
- "axum",
- "bytes",
- "chrono",
- "dotenvy",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "subtle",
- "tokio",
- "tokio-stream",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "acw"
-version = "0.1.0"
-dependencies = [
- "ac-core",
- "acd",
- "anyhow",
- "chrono",
- "clap",
- "futures",
- "gethostname",
- "nix",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1808,6 +1748,82 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "sidefleet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dotenvy",
+ "rand 0.8.8",
+ "serde_json",
+ "sidefleet-core",
+ "sidefleet-server",
+ "sidefleet-worker",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "sidefleet-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "sidefleet-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "bytes",
+ "chrono",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sidefleet-core",
+ "sqlx",
+ "subtle",
+ "tokio",
+ "tokio-stream",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "sidefleet-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "gethostname",
+ "nix",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sidefleet-core",
+ "sidefleet-server",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "signal-hook-registry"

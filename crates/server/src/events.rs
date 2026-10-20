@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use ac_core::RunEvent;
+use sidefleet_core::RunEvent;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -27,7 +27,7 @@ impl EventBus {
                 .payload
                 .get("status")
                 .and_then(|s| s.as_str())
-                .and_then(ac_core::RunStatus::parse)
+                .and_then(sidefleet_core::RunStatus::parse)
                 .map(|s| s.is_terminal())
                 .unwrap_or(false);
         let mut map = self.inner.lock().unwrap();

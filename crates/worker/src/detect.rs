@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ac_core::{Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo};
+use sidefleet_core::{Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo};
 use tokio::process::Command;
 
 /// Environment variables stripped from every child process so a nested
@@ -55,11 +55,11 @@ pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent
                 .ok()
                 .and_then(|v| v.get("is_error").and_then(|b| b.as_bool()))
                 .unwrap_or(false);
-            Some(ClaudeAgent { version, signed_in: !is_error, sign_in_error: is_error.then(|| ac_core::redact(&out)) })
+            Some(ClaudeAgent { version, signed_in: !is_error, sign_in_error: is_error.then(|| sidefleet_core::redact(&out)) })
         }
         Some((false, out, err)) => {
             let msg = if err.is_empty() { out } else { err };
-            Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some(ac_core::stream::truncate_bytes(&ac_core::redact(&msg), 400)) })
+            Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some(sidefleet_core::stream::truncate_bytes(&sidefleet_core::redact(&msg), 400)) })
         }
         None => Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some("sign-in check timed out".into()) }),
     }

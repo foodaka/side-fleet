@@ -1,10 +1,10 @@
-//! HTTP surface. Developer routes are protected by `ACD_DEV_KEY`, worker
-//! routes by `ACD_WORKER_TOKENS`. `/` serves the single-page UI.
+//! HTTP surface. Developer routes are protected by `SIDEFLEET_DEV_KEY`, worker
+//! routes by `SIDEFLEET_WORKER_TOKENS`. `/` serves the single-page UI.
 
 use std::convert::Infallible;
 use std::time::Duration;
 
-use ac_core::{
+use sidefleet_core::{
     ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, HeartbeatRequest,
     PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent, RunStatus,
 };
@@ -318,7 +318,7 @@ async fn register_worker(
     State(state): State<AppState>,
     Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
     Json(req): Json<RegisterWorkerRequest>,
-) -> Result<Json<ac_core::Worker>, ApiError> {
+) -> Result<Json<sidefleet_core::Worker>, ApiError> {
     if req.id.trim().is_empty() || req.id.len() > 128 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "worker id must be 1-128 chars".into()));
     }

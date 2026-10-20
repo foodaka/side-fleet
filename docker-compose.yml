@@ -2,18 +2,18 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: acd
-      POSTGRES_PASSWORD: acd
-      POSTGRES_DB: acd
+      POSTGRES_USER: sidefleet
+      POSTGRES_PASSWORD: sidefleet
+      POSTGRES_DB: sidefleet
     ports:
       - "5432:5432"
     volumes:
-      - acd-pgdata:/var/lib/postgresql/data
+      - sidefleet-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U acd"]
+      test: ["CMD-SHELL", "pg_isready -U sidefleet"]
       interval: 2s
       timeout: 2s
       retries: 20
 
 volumes:
-  acd-pgdata:
+  sidefleet-pgdata:

@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use ac_core::{Run, RunEvent, RunStatus};
-use acd::test_support::{TestEnv, DEV_KEY, WORKER_TOKEN};
-use acw::worker::{run as run_worker, WorkerConfig};
+use sidefleet_core::{Run, RunEvent, RunStatus};
+use sidefleet_server::test_support::{TestEnv, DEV_KEY, WORKER_TOKEN};
+use sidefleet_worker::worker::{run as run_worker, WorkerConfig};
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
@@ -239,14 +239,14 @@ async fn stop_while_running_kills_the_agent_and_marks_stopped() {
     // Let it get past its tool call, then stop it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let pid = loop {
-        let evs = acd::db::events_since(&h.env.pool, id, 0).await.unwrap();
+        let evs = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
         if evs.iter().any(|e| e.kind == "tool_result") {
             break evs.iter().find(|e| e.kind == "started").unwrap().payload["pid"].as_i64().unwrap() as i32;
         }
         assert!(tokio::time::Instant::now() < deadline, "agent never produced a tool result");
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    assert!(acw::agent::process_group_alive(pid));
+    assert!(sidefleet_worker::agent::process_group_alive(pid));
 
     let t0 = std::time::Instant::now();
     let r = h.http.post(format!("{}/v1/runs/{id}/stop", h.env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap();
@@ -255,9 +255,9 @@ async fn stop_while_running_kills_the_agent_and_marks_stopped() {
     assert!(t0.elapsed() < Duration::from_secs(6), "stop took {:?}", t0.elapsed());
     assert_eq!(run.result.unwrap()["reason"], "stopped by request");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!acw::agent::process_group_alive(pid), "agent process group survived the stop");
+    assert!(!sidefleet_worker::agent::process_group_alive(pid), "agent process group survived the stop");
 
-    let kinds: Vec<String> = acd::db::events_since(&h.env.pool, id, 0).await.unwrap().into_iter().map(|e| e.kind).collect();
+    let kinds: Vec<String> = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap().into_iter().map(|e| e.kind).collect();
     assert!(kinds.contains(&"stop_requested".to_string()), "{kinds:?}");
     assert!(kinds.contains(&"stopped".to_string()), "{kinds:?}");
     assert_eq!(kinds.last().unwrap(), "status");

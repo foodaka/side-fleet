@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentCloud</title>
+<title>Sidefleet</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -141,16 +141,16 @@
 <div class="gate" id="gate">
   <form class="box" id="gateform">
     <h1>Connect to your control plane</h1>
-    <p>This page is served by <span class="mono">acd</span>, the AgentCloud control plane, and it needs the developer key to talk to its API. The key is <span class="mono">ACD_DEV_KEY</span> in the <span class="mono">.env</span> file next to where you started <span class="mono">acd</span>. It never leaves this browser except as a header to this same origin.</p>
+    <p>This page is served by <span class="mono">sidefleet serve</span>, and it needs the developer key to talk to its API. The key was printed when you started <span class="mono">sidefleet serve</span> (it is also saved in <span class="mono">~/.sidefleet/server.env</span> on that machine). It never leaves this browser except as a header to this same origin.</p>
     <label for="gatekey" style="font-size:12px;font-weight:500">Developer key</label>
-    <input id="gatekey" type="password" autocomplete="off" placeholder="paste ACD_DEV_KEY">
+    <input id="gatekey" type="password" autocomplete="off" placeholder="paste SIDEFLEET_DEV_KEY">
     <div class="err" id="gateerr"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" type="submit">Connect</button></div>
   </form>
 </div>
 <div class="app">
   <nav class="side">
-    <div class="logo"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="5" cy="10" r="3.2" fill="#191919"/><circle cx="14" cy="5.5" r="3.2" fill="#191919"/><circle cx="14" cy="14.5" r="3.2" fill="#191919"/></svg>AgentCloud</div>
+    <div class="logo"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="5" cy="10" r="3.2" fill="#191919"/><circle cx="14" cy="5.5" r="3.2" fill="#191919"/><circle cx="14" cy="14.5" r="3.2" fill="#191919"/></svg>Sidefleet</div>
     <div class="nav">
       <a href="#/" data-nav="new"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 2v12M2 8h12"/></svg>New</a>
       <a href="#/runs" data-nav="runs"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7h6M5 10h4"/></svg>Runs</a>
@@ -171,9 +171,9 @@
         <section class="card" style="padding:18px 22px 10px">
           <div class="steps">
             <div class="step"><span class="num">1</span><div class="body"><p>Pick a machine that already has <b>Claude Code installed and signed in</b> and your repos checked out. Your laptop is fine. It needs no open ports, only a way to reach this page's address.</p><div class="muted">Check with <span class="mono">claude --version</span> on that machine.</div></div></div>
-            <div class="step"><span class="num">2</span><div class="body"><p>Build the worker there (Rust 1.80+), from this repository:</p><div class="cmd"><code>cargo build --release -p acw</code><button type="button" data-copy="cargo build --release -p acw">Copy</button></div></div></div>
-            <div class="step"><span class="num">3</span><div class="body"><p>Start it, pointed at this control plane. The token is the one this control plane was started with; the command below has it filled in.</p><div class="cmd"><code id="ob-cmd">acw run --control … --token … --repos ~/Code</code><button type="button" id="ob-copy">Copy</button></div><div class="muted" style="margin-top:8px">If this page's address is only reachable from this machine, use the control plane's Tailscale or LAN address instead of <span class="mono" id="ob-origin"></span>.</div>
-            <p style="margin-top:12px"><b>Or let an agent do steps 2 to 4.</b> Paste this into Claude Code on that machine; it reads the instructions at <a href="/connect.md" target="_blank" class="mono">/connect.md</a>, builds the worker, starts it and makes it survive reboots.</p><div class="cmd"><code id="ob-prompt"></code><button type="button" id="ob-prompt-copy">Copy prompt</button></div></div></div>
+            <div class="step"><span class="num">2</span><div class="body"><p>Install Sidefleet there (one line, no sudo):</p><div class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh</code><button type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh">Copy</button></div></div></div>
+            <div class="step"><span class="num">3</span><div class="body"><p>Connect it to this control plane. The token is filled in below. This checks Claude Code, registers the machine and installs a background service so it stays connected after a reboot.</p><div class="cmd"><code id="ob-cmd">sidefleet connect --control … --token …</code><button type="button" id="ob-copy">Copy</button></div><div class="muted" style="margin-top:8px">If this page's address is only reachable from this machine, use the control plane's Tailscale or LAN address instead of <span class="mono" id="ob-origin"></span>. Add <span class="mono">--repos ~/Projects</span> if your repos are not under <span class="mono">~/Code</span>.</div>
+            <p style="margin-top:12px"><b>Or let an agent do steps 2 and 3.</b> Paste this into Claude Code on that machine; it reads <a href="/connect.md" target="_blank" class="mono">/connect.md</a> and does the install and connect for you.</p><div class="cmd"><code id="ob-prompt"></code><button type="button" id="ob-prompt-copy">Copy prompt</button></div></div></div>
             <div class="step"><span class="num" id="ob-num4">4</span><div class="body"><p>Watch it appear. The worker checks Claude Code, Codex and Ollama, scans your repos, and registers within a few seconds.</p><div class="waiting" id="ob-wait"><span class="dot off"></span><span>Waiting for the first heartbeat…</span></div></div></div>
           </div>
         </section>
@@ -223,7 +223,7 @@
         <div><h1>Machines</h1><div class="sub">Each worker reports what it is on every heartbeat</div></div>
       </header>
       <section class="install">
-        <div><div class="l">Install a worker on any machine you own</div><code class="mono" id="installcmd">acw run --control … --token … --repos ~/Code</code></div>
+        <div style="min-width:0"><div class="l">Add a machine: install, then connect it to this control plane</div><code class="mono" id="installcmd" style="white-space:pre-wrap;word-break:break-all">sidefleet connect --control … --token …</code></div>
         <button id="copyinstall">Copy</button>
       </section>
       <section class="install" style="background:#fff;color:var(--fg);border:1px solid var(--line2)">
@@ -262,7 +262,7 @@
 
   // ---- auth ----
   let key = '';
-  try { key = localStorage.getItem('acd_dev_key') || ''; } catch (_) {}
+  try { key = localStorage.getItem('sidefleet_dev_key') || ''; } catch (_) {}
   function askKey() { return key; }
   function showGate(msg) { $('gate').classList.add('on'); $('gateerr').textContent = msg || ''; $('gatekey').focus(); }
   $('keybtn').onclick = () => showGate('');
@@ -271,8 +271,8 @@
     const k = $('gatekey').value.trim();
     if (!k) return;
     const r = await fetch('/v1/workers', { headers: { 'Authorization': 'Bearer ' + k } });
-    if (r.status === 401) { $('gateerr').textContent = 'That key was not accepted. Check ACD_DEV_KEY in .env on the control plane.'; return; }
-    key = k; try { localStorage.setItem('acd_dev_key', key); } catch (_) {}
+    if (r.status === 401) { $('gateerr').textContent = 'That key was not accepted. Check SIDEFLEET_DEV_KEY in .env on the control plane.'; return; }
+    key = k; try { localStorage.setItem('sidefleet_dev_key', key); } catch (_) {}
     $('gate').classList.remove('on'); $('gatekey').value = '';
     refresh();
   };
@@ -281,7 +281,7 @@
     opts = opts || {};
     opts.headers = Object.assign({ 'Authorization': 'Bearer ' + askKey(false) }, opts.headers || {});
     const r = await fetch(path, opts);
-    if (r.status === 401) { setConn(false, 'not connected'); showGate(key ? 'The saved key was rejected. Paste the current ACD_DEV_KEY.' : ''); throw new Error('unauthorised'); }
+    if (r.status === 401) { setConn(false, 'not connected'); showGate(key ? 'The saved key was rejected. Paste the current SIDEFLEET_DEV_KEY.' : ''); throw new Error('unauthorised'); }
     if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
     return r.status === 204 ? null : r.json();
   }
@@ -341,15 +341,15 @@
   // ---- onboarding ----
   function connectCmd(masked) {
     const tok = setup && setup.worker_token ? (masked ? setup.worker_token.slice(0, 4) + '••••••••' : setup.worker_token) : '<worker token>';
-    return 'acw run --control ' + location.origin + ' --token ' + tok + ' --repos ~/Code';
+    return 'curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh && sidefleet connect --control ' + location.origin + ' --token ' + tok;
   }
   function agentPrompt(masked) {
     const tok = setup && setup.worker_token ? (masked ? setup.worker_token.slice(0, 4) + '••••••••' : setup.worker_token) : '<worker token>';
-    return 'Read ' + location.origin + '/connect.md and follow it to set up this machine as an AgentCloud worker. Control plane: ' + location.origin + '. Worker token: ' + tok + ' (keep it out of logs and your summary). Scan ~/Code for repos.';
+    return 'Read ' + location.origin + '/connect.md and follow it to set up this machine as an Sidefleet worker. Control plane: ' + location.origin + '. Worker token: ' + tok + ' (keep it out of logs and your summary). Scan ~/Code for repos.';
   }
   function copyText(t, btn) { try { navigator.clipboard.writeText(t); const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = o, 1500); } catch (_) {} }
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-copy]'); if (b) copyText(b.dataset.copy, b); });
-  $('ob-copy').onclick = (e) => copyText(connectCmd(false), e.target);
+  $('ob-copy').onclick = (e) => copyText(connectCmd(false).split(' && ')[1], e.target);
   $('ob-prompt-copy').onclick = (e) => copyText(agentPrompt(false), e.target);
   $('copyprompt').onclick = (e) => copyText(agentPrompt(false), e.target);
   function renderOnboarding(online) {
@@ -359,12 +359,12 @@
     $('composebox').style.display = show ? 'none' : '';
     $('how').style.display = (show || runs.length === 0) ? '' : 'none';
     if (!show) return;
-    $('ob-cmd').textContent = connectCmd(true);
+    $('ob-cmd').textContent = connectCmd(true).split(' && ')[1];
     $('ob-prompt').textContent = agentPrompt(true);
     $('ob-origin').textContent = location.origin;
     $('onboard').querySelector('h1').textContent = first ? 'Connect your first machine' : 'No machine is online';
     $('ob-wait').innerHTML = first ? '<span class="dot off"></span><span>Waiting for the first heartbeat…</span>'
-      : '<span class="dot off"></span><span>' + workers.length + ' machine' + (workers.length === 1 ? ' is' : 's are') + ' registered but silent. Start <span class="mono">acw run</span> again on ' + esc(workers.map(w => w.display_name).join(', ')) + '.</span>';
+      : '<span class="dot off"></span><span>' + workers.length + ' machine' + (workers.length === 1 ? ' is' : 's are') + ' registered but silent. Run <span class="mono">sidefleet status</span> on ' + esc(workers.map(w => w.display_name).join(', ')) + '.</span>';
   }
 
   // ---- compose ----
@@ -381,7 +381,7 @@
   }
   function renderWillRun() {
     const repo = $('repo').value; const w = repo && workerFor(repo); const el = $('willrun');
-    if (!w) { el.innerHTML = onlineWorkers().length ? '' : '<span class="dot off"></span><span>No machine online yet. Start <span class="mono">acw run</span> on one and it will appear here.</span>'; return; }
+    if (!w) { el.innerHTML = onlineWorkers().length ? '' : '<span class="dot off"></span><span>No machine online yet. Run <span class="mono">sidefleet connect</span> on one and it will appear here.</span>'; return; }
     const c = (w.capabilities.agents || {}).claude;
     const signed = c && c.signed_in;
     el.innerHTML = '<span class="dot ' + (signed ? 'on' : 'off') + '"></span><span>Will run on <b style="color:#191919;font-weight:500">' + esc(w.display_name) + '</b> · ' + (signed ? 'Claude Code is signed in' : 'Claude Code is <b style="color:#A32323">not signed in</b>') + ' and ' + esc(repo) + ' is checked out there</span>';

@@ -1,4 +1,4 @@
-//! AgentCloud worker: detects the coding agents installed on this machine,
+//! Sidefleet worker: detects the coding agents installed on this machine,
 //! registers with the control plane, claims runs for repos it has checked out,
 //! and executes them with the local Claude Code CLI, streaming narration back.
 

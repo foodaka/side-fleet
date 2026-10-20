@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ac_core::{NewEvent, RunStatus};
-use acw::agent::{execute, process_group_alive, AgentSpec};
+use sidefleet_core::{NewEvent, RunStatus};
+use sidefleet_worker::agent::{execute, process_group_alive, AgentSpec};
 use tokio::sync::{mpsc, watch};
 
 fn fake_bin() -> String {

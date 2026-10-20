@@ -1,5 +1,5 @@
-//! Shared types for the AgentCloud spike: run/worker models, the wire types
-//! exchanged between the control plane (`acd`) and the worker (`acw`), the
+//! Shared types for the Sidefleet spike: run/worker models, the wire types
+//! exchanged between the control plane (`sidefleet serve`) and the worker (`sidefleet run`), the
 //! mapping from Claude Code `stream-json` lines to run events, and redaction
 //! of anything that looks like a secret.
 

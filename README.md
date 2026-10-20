@@ -90,7 +90,12 @@ machine and it does steps 2 and 3 for you by reading `http://<control plane>/con
 
 Then type a task, pick a model, a repo and what the agent may do (read and edit files by default,
 full access when it should run commands, read only for questions), press the arrow, and watch it
-run. When it finishes, reply in the box at the bottom: the reply continues the same Claude Code
+run. Each task gets its **own git worktree and branch** (`sidefleet/<id>`) under
+`~/.sidefleet/worktrees` on that machine, so several tasks on the same repo run side by side
+without touching each other or your checkout; when a task finishes, merge or push its branch.
+Pick "In place" instead for work that needs the real checkout (installed dependencies, local
+config); in-place tasks run one at a time per repo. A machine runs up to three tasks at once
+(`--parallel`). When it finishes, reply in the box at the bottom: the reply continues the same Claude Code
 session on the same machine, and the page shows the whole thread like a chat.
 
 Hosting the control plane on a VPS or a spare machine, including a prompt you can hand to Claude
@@ -106,7 +111,7 @@ port forwarding, no public exposure. If you do expose it publicly, put TLS in fr
 
 | Command | What it does |
 |---|---|
-| `sidefleet connect --control <url> --token <t> [--repos <folder>] [--name "Mac mini"] [--permission-mode …] [--no-service]` | validate, register, save settings, install the service |
+| `sidefleet connect --control <url> --token <t> [--repos <folder>] [--name "Mac mini"] [--permission-mode …] [--parallel 3] [--no-service]` | validate, register, save settings, install the service |
 | `sidefleet status` | saved settings (token masked), service installed, process running, log path |
 | `sidefleet disconnect` | remove the service (settings kept) |
 | `sidefleet run` | run the worker in the foreground using the saved settings |
@@ -128,7 +133,8 @@ also read from the environment (`SIDEFLEET_BIND`, `DATABASE_URL`, `SIDEFLEET_DEV
 ## How a run works
 
 1. `POST /v1/runs` stores the run as `queued` and the page opens its live view.
-2. A worker that has that repo claims it (`running`), spawns
+2. A worker that has that repo claims it (`running`), prepares a git worktree on a new branch
+   (or uses the checkout for in-place tasks, one per repo at a time), spawns
    `claude -p <task> --output-format stream-json --verbose --model <m> --permission-mode <mode>`
    with `cwd` set to the repo, and forwards every stream-json line as an event: `agent_init`,
    `assistant_text`, `tool_use` (name plus a redacted one-line summary of the input),
@@ -149,7 +155,7 @@ Developer (bearer `SIDEFLEET_DEV_KEY`):
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/v1/runs` `{task, model, repo, permission_mode?}` | `202 {id, status}`; model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk` |
+| `POST` | `/v1/runs` `{task, model, repo, permission_mode?, isolation?}` | `202 {id, status}`; model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout` |
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
@@ -195,7 +201,11 @@ push; tagging `vX.Y.Z` builds release binaries for macOS (arm64, x86_64) and Lin
   automated or unattended use before relying on this, and never share or resell access to the
   account through it. Anthropic's own Remote Control and cloud sessions cover a similar moment
   natively; Sidefleet exists for the vendor-neutral, your-own-machines version.
-- One run at a time per machine; no scheduling, priorities or placement beyond "has the repo".
+- Up to `--parallel` runs per machine (default 3); no priorities or placement beyond "has the repo".
+- Worktrees start from the repo's current `HEAD` and do not include untracked or ignored files
+  (`node_modules`, `.env`); a task that needs those must install them or run in place.
+- Worktrees and their branches are kept until you delete them (`git worktree remove`, or remove
+  the folder under `~/.sidefleet/worktrees` and run `git worktree prune`).
 - Codex and Ollama are detected and shown but not executed yet.
 - A single shared developer key, no users or roles, no TLS. Keep the control plane on a private
   network (LAN or Tailscale).

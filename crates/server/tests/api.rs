@@ -57,7 +57,7 @@ impl Api {
     async fn claim(&self, worker: &str, repos: &[&str]) -> Option<Run> {
         let r = self
             .worker(reqwest::Method::POST, "/v1/worker/claim")
-            .json(&json!({"worker_id": worker, "repos": repos}))
+            .json(&json!({"worker_id": worker, "repos": repos, "busy_repos": []}))
             .send()
             .await
             .unwrap();

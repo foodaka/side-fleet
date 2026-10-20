@@ -52,6 +52,9 @@ enum Cmd {
         /// Permission mode for the built-in worker's Claude Code runs.
         #[arg(long, env = "SIDEFLEET_PERMISSION_MODE", default_value = "acceptEdits")]
         permission_mode: String,
+        /// How many tasks the built-in worker runs at the same time.
+        #[arg(long, env = "SIDEFLEET_PARALLEL", default_value_t = 3)]
+        parallel: usize,
     },
     /// Make this machine a worker: check it, register once, save the settings and
     /// install a background service so it keeps running after reboots.
@@ -74,6 +77,9 @@ enum Cmd {
         /// Save settings but do not install or start the background service.
         #[arg(long)]
         no_service: bool,
+        /// How many tasks may run at the same time on this machine.
+        #[arg(long, env = "SIDEFLEET_PARALLEL", default_value_t = 3)]
+        parallel: usize,
     },
     /// Run the worker in the foreground. Uses the settings saved by `connect` when flags are omitted.
     Run {
@@ -107,6 +113,9 @@ enum Cmd {
         /// How many directory levels below --repos to scan for checkouts.
         #[arg(long, default_value_t = 3)]
         scan_depth: usize,
+        /// How many tasks may run at the same time on this machine.
+        #[arg(long, env = "SIDEFLEET_PARALLEL", default_value_t = 3)]
+        parallel: usize,
     },
     /// Show the saved worker settings and whether the background service is running.
     Status,
@@ -141,6 +150,9 @@ fn server_env_path() -> PathBuf {
 }
 fn log_dir() -> PathBuf {
     config_dir().join("logs")
+}
+fn worktrees_dir() -> PathBuf {
+    config_dir().join("worktrees")
 }
 fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
@@ -213,11 +225,11 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.cmd {
-        Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode } => {
-            serve(bind, database_url, dev_key, worker_tokens, no_worker, expand_home(&repos), permission_mode).await
+        Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel } => {
+            serve(ServeOpts { bind, database_url, dev_key, worker_tokens, no_worker, repos: expand_home(&repos), permission_mode, parallel }).await
         }
-        Cmd::Connect { control, token, repos, name, permission_mode, no_service } => connect(control, token, repos, name, permission_mode, no_service).await,
-        Cmd::Run { control, token, repos, id, name, claude_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth } => {
+        Cmd::Connect { control, token, repos, name, permission_mode, no_service, parallel } => connect(control, token, repos, name, permission_mode, no_service, parallel).await,
+        Cmd::Run { control, token, repos, id, name, claude_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth, parallel } => {
             let control = control.context("no control plane address: run `sidefleet connect --control <url> --token <token>` first, or pass --control")?;
             let token = token.context("no worker token: run `sidefleet connect` first, or pass --token / SIDEFLEET_TOKEN")?;
             let id = id.unwrap_or_else(default_worker_id);
@@ -236,6 +248,8 @@ async fn main() -> Result<()> {
                 check_sign_in: !skip_sign_in_check,
                 scan_depth,
                 max_runs: None,
+                parallel,
+                worktrees_dir: worktrees_dir(),
             };
             sidefleet_worker::worker::run(cfg).await
         }
@@ -257,7 +271,7 @@ async fn main() -> Result<()> {
 
 // ---- serve ----
 
-async fn serve(
+struct ServeOpts {
     bind: String,
     database_url: String,
     dev_key: Option<String>,
@@ -265,7 +279,11 @@ async fn serve(
     no_worker: bool,
     repos: PathBuf,
     permission_mode: String,
-) -> Result<()> {
+    parallel: usize,
+}
+
+async fn serve(opts: ServeOpts) -> Result<()> {
+    let ServeOpts { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel } = opts;
     // First run: generate keys and keep them so the next start reuses them.
     let (dev_key, worker_tokens, generated) = match (dev_key, worker_tokens) {
         (Some(d), Some(w)) => (d, w, false),
@@ -339,7 +357,7 @@ async fn serve(
     } else if !repos.is_dir() {
         println!("  Built-in worker: off, {} does not exist. Pass --repos <folder with your git checkouts>.", repos.display());
     } else {
-        println!("  Built-in worker: on ({} found). This machine will run tasks for the checkouts under {}.", agents.join(", "), repos.display());
+        println!("  Built-in worker: on ({} found). Up to {parallel} tasks at a time, each in its own git worktree under {}.", agents.join(", "), worktrees_dir().display());
         if !which("claude") {
             println!("  Note: only Claude Code can execute tasks in this version; Codex and Ollama are listed as capabilities for now.");
         }
@@ -359,6 +377,8 @@ async fn serve(
             check_sign_in: true,
             scan_depth: 3,
             max_runs: None,
+            parallel,
+            worktrees_dir: worktrees_dir(),
         };
         tokio::spawn(async move {
             if let Err(e) = sidefleet_worker::worker::run(cfg).await {
@@ -378,7 +398,7 @@ async fn serve(
 
 // ---- connect / service ----
 
-async fn connect(control: String, token: String, repos: String, name: Option<String>, permission_mode: String, no_service: bool) -> Result<()> {
+async fn connect(control: String, token: String, repos: String, name: Option<String>, permission_mode: String, no_service: bool, parallel: usize) -> Result<()> {
     let control = control.trim_end_matches('/').to_string();
     let repos_root = expand_home(&repos);
     if !repos_root.is_dir() {
@@ -425,7 +445,7 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
     }
 
     let env = format!(
-        "SIDEFLEET_CONTROL={control}\nSIDEFLEET_TOKEN={token}\nSIDEFLEET_REPOS={}\nSIDEFLEET_NAME={display}\nSIDEFLEET_PERMISSION_MODE={permission_mode}\n",
+        "SIDEFLEET_CONTROL={control}\nSIDEFLEET_TOKEN={token}\nSIDEFLEET_REPOS={}\nSIDEFLEET_NAME={display}\nSIDEFLEET_PERMISSION_MODE={permission_mode}\nSIDEFLEET_PARALLEL={parallel}\n",
         repos_root.display()
     );
     write_private(&worker_env_path(), &env)?;

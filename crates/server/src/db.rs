@@ -26,6 +26,7 @@ fn row_to_run(r: &PgRow) -> Run {
         resume_session_id: r.get("resume_session_id"),
         pinned_worker_id: r.get("pinned_worker_id"),
         permission_mode: r.get("permission_mode"),
+        isolation: r.get("isolation"),
     }
 }
 
@@ -50,7 +51,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode";
+    "id, task, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -91,11 +92,12 @@ pub async fn create_run(
     model: &str,
     repo: &str,
     permission_mode: Option<&str>,
+    isolation: &str,
 ) -> sqlx::Result<(Run, RunEvent)> {
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode) VALUES ($1, $2, $3, $4, 'queued', $5)
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation) VALUES ($1, $2, $3, $4, 'queued', $5, $6)
          RETURNING {RUN_COLS}"
     ))
     .bind(id)
@@ -103,6 +105,7 @@ pub async fn create_run(
     .bind(model)
     .bind(repo)
     .bind(permission_mode)
+    .bind(isolation)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -149,8 +152,8 @@ pub async fn create_follow_up(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -160,6 +163,7 @@ pub async fn create_follow_up(
     .bind(&session)
     .bind(&worker)
     .bind(permission_mode.or(latest.permission_mode.as_deref()))
+    .bind(&latest.isolation)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -322,12 +326,14 @@ pub async fn claim_run(
     pool: &PgPool,
     worker_id: &str,
     repos: &[String],
+    busy_repos: &[String],
 ) -> sqlx::Result<Option<(Run, RunEvent)>> {
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
         "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
          WHERE id = (
             SELECT id FROM runs WHERE status = 'queued' AND repo = ANY($2)
+              AND NOT (repo = ANY($3))
               AND (pinned_worker_id IS NULL OR pinned_worker_id = $1)
             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
          )
@@ -335,6 +341,7 @@ pub async fn claim_run(
     ))
     .bind(worker_id)
     .bind(repos)
+    .bind(busy_repos)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {

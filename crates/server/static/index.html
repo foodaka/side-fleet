@@ -215,6 +215,10 @@
                 <option value="bypassPermissions">Full access (run commands)</option>
                 <option value="plan">Read only</option>
               </select>
+              <select class="chip" id="iso" aria-label="Workspace" title="Own branch: a separate git worktree per task, so tasks run side by side. In place: the checkout itself, one task per repo at a time.">
+                <option value="worktree" selected>Own branch</option>
+                <option value="checkout">In place</option>
+              </select>
             </div>
             <button class="go" type="submit" id="runbtn" aria-label="Run"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button>
           </div>
@@ -442,7 +446,7 @@
     if (!task || !repo) return;
     $('runbtn').disabled = true;
     try {
-      const r = await api('/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task, model, repo, permission_mode: $('perm').value }) });
+      const r = await api('/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task, model, repo, permission_mode: $('perm').value, isolation: $('iso').value }) });
       $('task').value = '';
       location.hash = '#/runs/' + r.id;
       refresh();
@@ -540,7 +544,7 @@
   function turnFor(run) {
     if (turns[run.id]) return turns[run.id];
     const el = document.createElement('div'); el.className = 'turn';
-    el.innerHTML = '<div class="you"><div><div class="bubble">' + esc(run.task) + '</div><div class="meta">' + hhmmss(run.created_at) + (run.permission_mode ? ' · ' + esc(PERM_LABEL[run.permission_mode] || run.permission_mode) : '') + '</div></div></div>' +
+    el.innerHTML = '<div class="you"><div><div class="bubble">' + esc(run.task) + '</div><div class="meta">' + hhmmss(run.created_at) + (run.permission_mode ? ' · ' + esc(PERM_LABEL[run.permission_mode] || run.permission_mode) : '') + (!run.parent_id && run.isolation === 'checkout' ? ' · in place' : '') + '</div></div></div>' +
       '<section class="card timeline" style="margin-top:10px"></section><section class="card result" style="display:none;margin-top:10px"></section>';
     $('thread').appendChild(el);
     const t = { run, el, timeline: el.querySelector('.timeline'), result: el.querySelector('.result'), tools: {}, lastText: '', cursorRow: null };
@@ -575,11 +579,12 @@
       '<span>Claude ' + esc(modelName(latest.model)) + '</span><span>·</span>' +
       ((latest.worker_id || root.worker_id) ? '<span style="display:inline-flex;align-items:center;gap:6px"><span class="dot ' + (w && w.online ? 'on' : 'off') + '"></span><b>' + esc(latest.worker_id || root.worker_id) + '</b></span><span>·</span><span>' + esc(root.repo) + '</span>'
         : '<span>waiting for a machine that has ' + esc(root.repo) + '</span>') +
+      (root.branch ? '<span>·</span><span class="code">' + esc(root.branch) + '</span>' : (root.isolation === 'checkout' ? '<span>·</span><span>in place</span>' : '')) +
       (thread.length > 1 ? '<span>·</span><span>' + thread.length + ' messages</span>' : '');
     const session = [...thread].reverse().find(r => r.session_id);
     $('replybtn').disabled = live;
     $('replyhint').textContent = live ? 'Wait for this message to finish, or stop it.' : (session ? 'Continues the same Claude Code session on ' + (latest.worker_id || root.worker_id || 'that machine') + '.' : 'No session to continue; start a new task instead.');
-    $('d-foot').textContent = live ? 'The narration updates live; you can close this page and come back.' : 'Finished ' + rel(latest.finished_at) + '. The full narration is kept.';
+    $('d-foot').textContent = live ? 'The narration updates live; you can close this page and come back.' : 'Finished ' + rel(latest.finished_at) + '.' + (root.branch ? ' Changes are on branch ' + root.branch + ' in that repo on ' + (root.worker_id || 'the machine') + '; merge or push it when you are happy.' : ' The full narration is kept.');
   }
 
   function render(run, ev) {
@@ -595,6 +600,12 @@
         break;
       case 'stop_requested': row(t, at, ICONS.err, 'Stop requested. Waiting for the machine to end the agent.', 'quiet', 'err'); showCursor(t, 'Stopping'); break;
       case 'stopped': row(t, at, ICONS.err, 'Agent process ended with ' + esc(p.signal || 'a signal'), 'quiet', 'err'); break;
+      case 'workspace':
+        run.branch = p.branch || run.branch;
+        if (p.mode === 'worktree') row(t, at, ICONS.edit, 'Working on branch <span class="code">' + esc(p.branch) + '</span> in its own worktree <span class="code">' + esc(p.path) + '</span>', 'quiet');
+        else row(t, at, ICONS.edit, 'Working in the checkout <span class="code">' + esc(p.path) + '</span>' + (p.note ? ' <span class="muted">(' + esc(p.note) + ')</span>' : ''), 'quiet');
+        renderMeta();
+        break;
       case 'started': row(t, at, ICONS.start, 'Launched <span class="code">' + esc(p.command) + '</span>', 'quiet'); showCursor(t, 'Waiting for the first message'); break;
       case 'agent_init': run.session_id = p.session_id || run.session_id; row(t, at, ICONS.start, 'Claude Code session started with ' + esc(p.model || run.model), 'quiet'); showCursor(t, 'Thinking'); break;
       case 'assistant_thinking': showCursor(t, 'Thinking'); break;

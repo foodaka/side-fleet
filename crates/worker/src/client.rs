@@ -110,12 +110,12 @@ impl ControlClient {
         Ok(())
     }
 
-    pub async fn claim(&self, repos: &[String]) -> Result<Option<Run>, ClientError> {
+    pub async fn claim(&self, repos: &[String], busy_repos: &[String]) -> Result<Option<Run>, ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/claim"))
             .bearer_auth(&self.token)
-            .json(&ClaimRequest { worker_id: self.worker_id.clone(), repos: repos.to_vec() })
+            .json(&ClaimRequest { worker_id: self.worker_id.clone(), repos: repos.to_vec(), busy_repos: busy_repos.to_vec() })
             .send()
             .await
             .context("claim request failed")?;

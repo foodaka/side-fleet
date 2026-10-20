@@ -73,7 +73,16 @@ pub struct Run {
     /// Permission mode for Claude Code; None means the worker's default.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// `worktree` (own checkout and branch, default) or `checkout` (in place, one at a time per repo).
+    #[serde(default = "default_isolation")]
+    pub isolation: String,
 }
+
+pub fn default_isolation() -> String {
+    "worktree".into()
+}
+
+pub const ISOLATION_MODES: &[&str] = &["worktree", "checkout"];
 
 /// A root run plus what the page needs to list a thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +176,9 @@ pub struct CreateRunRequest {
     /// acceptEdits (default), bypassPermissions, plan, default, dontAsk.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// worktree (default) or checkout.
+    #[serde(default)]
+    pub isolation: Option<String>,
 }
 
 /// Continue a thread: a new run that resumes the previous Claude Code session.
@@ -207,6 +219,9 @@ pub struct ClaimRequest {
     pub worker_id: String,
     /// Repo names (relative paths) this worker has checked out.
     pub repos: Vec<String>,
+    /// Repos where an in-place (`checkout`) run is active; runs for these are skipped.
+    #[serde(default)]
+    pub busy_repos: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

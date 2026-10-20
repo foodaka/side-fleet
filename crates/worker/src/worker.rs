@@ -1,13 +1,15 @@
 //! The worker loop: register, heartbeat every 15s, poll for a claimable run,
 //! execute it, and report back. Backs off on control plane errors.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use sidefleet_core::{Capabilities, NewEvent, Run, RunStatus};
-use anyhow::Result;
-use tokio::sync::{mpsc, watch, Mutex};
+use anyhow::{Context, Result};
+use serde_json::json;
+use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 use uuid::Uuid;
 
 use crate::agent::{self, AgentSpec};
@@ -31,6 +33,10 @@ pub struct WorkerConfig {
     pub scan_depth: usize,
     /// Only used by tests: exit after this many runs.
     pub max_runs: Option<usize>,
+    /// How many runs may execute at the same time on this machine.
+    pub parallel: usize,
+    /// Where per-task git worktrees are created (`<dir>/<repo-slug>/<root run id>`).
+    pub worktrees_dir: PathBuf,
 }
 
 pub async fn run(cfg: WorkerConfig) -> Result<()> {
@@ -78,15 +84,40 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     }
 
     let mut backoff = Backoff::new(Duration::from_secs(30));
+    let slots = Arc::new(Semaphore::new(cfg.parallel.max(1)));
+    // Active runs: run id -> (repo, isolation). Used to keep in-place runs one per repo.
+    let active: Arc<Mutex<HashMap<Uuid, (String, String)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Uuid>();
     let mut completed = 0usize;
+    let cfg = Arc::new(cfg);
     loop {
+        // Reap finished runs (non-blocking) so `completed` and `active` stay current.
+        while let Ok(id) = done_rx.try_recv() {
+            active.lock().await.remove(&id);
+            completed += 1;
+        }
         if let Some(max) = cfg.max_runs {
             if completed >= max {
                 return Ok(());
             }
         }
+        // Wait for a free slot before asking for work, so we never claim more than we can run.
+        let permit = match slots.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
         let repos: Vec<String> = caps.lock().await.repos.iter().map(|r| r.name.clone()).collect();
-        match client.claim(&repos).await {
+        let busy: Vec<String> = active
+            .lock()
+            .await
+            .values()
+            .filter(|(_, iso)| iso == "checkout")
+            .map(|(repo, _)| repo.clone())
+            .collect();
+        match client.claim(&repos, &busy).await {
             Ok(Some(run)) => {
                 backoff.reset();
                 let repo_path = caps
@@ -96,17 +127,28 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                     .iter()
                     .find(|r| r.name == run.repo)
                     .map(|r| PathBuf::from(&r.path));
-                execute_run(&client, &cfg, run, repo_path).await;
-                completed += 1;
+                active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone()));
+                let client = client.clone();
+                let cfg = cfg.clone();
+                let done_tx = done_tx.clone();
+                tokio::spawn(async move {
+                    let id = run.id;
+                    execute_run(&client, &cfg, run, repo_path).await;
+                    drop(permit);
+                    let _ = done_tx.send(id);
+                });
             }
             Ok(None) => {
+                drop(permit);
                 backoff.reset();
                 tokio::time::sleep(cfg.poll_interval).await;
             }
             Err(ClientError::NotRegistered) => {
+                drop(permit);
                 register_with_backoff(&client, &cfg, &caps).await;
             }
             Err(e) => {
+                drop(permit);
                 let wait = backoff.next_delay();
                 tracing::warn!(error = %e, retry_in = ?wait, "claim failed");
                 tokio::time::sleep(wait).await;
@@ -147,17 +189,87 @@ fn log_caps(caps: &Capabilities) {
     tracing::info!(count = caps.repos.len(), repos = ?caps.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), "git checkouts");
 }
 
+/// A per-task git worktree: `<worktrees_dir>/<repo-slug>/<root run id>` on branch
+/// `sidefleet/<first 8 of root id>`. Follow-ups reuse the root's worktree so the
+/// Claude Code session (keyed by cwd) resumes in the same place.
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: String,
+}
+
+pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path) -> Result<Worktree> {
+    let slug: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    let path = worktrees_dir.join(slug).join(root_id.to_string());
+    let branch = format!("sidefleet/{}", &root_id.simple().to_string()[..8]);
+    if path.join(".git").exists() {
+        return Ok(Worktree { path, branch });
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).context("creating worktrees dir")?;
+    // Create the branch at HEAD, or reuse it when it already exists (worker restarted).
+    let branch_exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
+    let p = path.to_string_lossy().to_string();
+    if branch_exists {
+        git(repo, &["worktree", "add", &p, &branch]).await?;
+    } else {
+        git(repo, &["worktree", "add", "-b", &branch, &p, "HEAD"]).await?;
+    }
+    Ok(Worktree { path, branch })
+}
+
+async fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .context("running git")?;
+    if !out.status.success() {
+        anyhow::bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Execute one claimed run: forward events as they arrive, poll for stop, report the outcome.
 async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_path: Option<PathBuf>) {
     let run_id = run.id;
-    tracing::info!(run_id = %run_id, repo = %run.repo, model = %run.model, "executing run");
+    tracing::info!(run_id = %run_id, repo = %run.repo, model = %run.model, isolation = %run.isolation, "executing run");
 
-    let Some(cwd) = repo_path else {
+    let Some(repo_dir) = repo_path else {
         let msg = format!("repo {} is no longer present under {}", run.repo, cfg.repos_root.display());
-        let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: serde_json::json!({"message": msg}) }]).await;
-        let _ = client.finish(run_id, RunStatus::Failed, Some(serde_json::json!({"error": msg}))).await;
+        let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+        let _ = client.finish(run_id, RunStatus::Failed, Some(json!({"error": msg}))).await;
         return;
     };
+
+    // Where the agent works: its own worktree and branch, or the checkout itself.
+    let mut pre_events: Vec<NewEvent> = Vec::new();
+    let cwd = if run.isolation == "worktree" {
+        let root_id = run.parent_id.unwrap_or(run.id);
+        match prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir).await {
+            Ok(wt) => {
+                pre_events.push(NewEvent {
+                    kind: "workspace".into(),
+                    payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy()}),
+                });
+                wt.path
+            }
+            Err(e) => {
+                pre_events.push(NewEvent {
+                    kind: "workspace".into(),
+                    payload: json!({"mode": "checkout", "path": repo_dir.to_string_lossy(), "note": format!("could not create a worktree ({e:#}); running in the checkout instead")}),
+                });
+                repo_dir.clone()
+            }
+        }
+    } else {
+        pre_events.push(NewEvent { kind: "workspace".into(), payload: json!({"mode": "checkout", "path": repo_dir.to_string_lossy()}) });
+        repo_dir.clone()
+    };
+    if let Err(e) = client.post_events(run_id, pre_events).await {
+        tracing::warn!(error = %e, "posting workspace event failed");
+    }
 
     let spec = AgentSpec {
         bin: cfg.claude_bin.clone(),

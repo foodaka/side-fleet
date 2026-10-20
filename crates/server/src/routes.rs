@@ -7,7 +7,7 @@ use std::time::Duration;
 use sidefleet_core::{
     ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
     HeartbeatRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, PERMISSION_MODES,
+    RunStatus, RunSummary, ISOLATION_MODES, PERMISSION_MODES,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -127,7 +127,12 @@ async fn create_run(
         return Err(ApiError(StatusCode::BAD_REQUEST, "repo must be a relative repo name".into()));
     }
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo, mode).await?;
+    let isolation = match req.isolation.as_deref() {
+        None | Some("") => "worktree",
+        Some(i) if ISOLATION_MODES.contains(&i) => i,
+        Some(_) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("isolation must be one of {}", ISOLATION_MODES.join(", ")))),
+    };
+    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo, mode, isolation).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -403,7 +408,7 @@ async fn claim_run(
     if req.repos.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    match db::claim_run(&state.pool, &req.worker_id, &req.repos).await? {
+    match db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos).await? {
         Some((run, ev)) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, worker = %req.worker_id, "run claimed");

@@ -58,8 +58,8 @@ On first run it generates a developer key and a worker token, saves them to
 `~/.sidefleet/server.env`, and prints:
 
 If that machine has a coding agent installed (Claude Code, Codex or Ollama), `serve` also runs
-a worker on it, so a single box is one command (`--no-worker` turns that off, `--repos` says
-where its checkouts are). Only Claude Code executes tasks in this version; the others are
+a worker on it, so a single box is one command (`--no-worker` turns that off; checkouts are
+found under the home folder, `--repos` overrides). Only Claude Code executes tasks in this version; the others are
 reported as capabilities.
 
 ```
@@ -76,10 +76,11 @@ Sidefleet control plane is running.
 itself is fine), run the install line, then the connect line the page shows you:
 
 ```bash
-sidefleet connect --control http://192.168.1.20:7373 --token 7b2e… --repos ~/Code
+sidefleet connect --control http://192.168.1.20:7373 --token 7b2e…
 ```
 
-`connect` checks Claude Code and its sign-in, finds your git checkouts under `--repos`, registers
+`connect` checks Claude Code and its sign-in, finds your git checkouts (home folder, three levels
+deep, skipping hidden and build folders; `--repos <folder>` overrides), registers
 once, saves the settings to `~/.sidefleet/worker.env`, and installs a background service
 (launchd on macOS, a systemd user unit on Linux) so the worker keeps running and comes back after
 reboots. The page flips from onboarding to the compose box the moment the first heartbeat lands.
@@ -99,7 +100,7 @@ port forwarding, no public exposure. If you do expose it publicly, put TLS in fr
 
 | Command | What it does |
 |---|---|
-| `sidefleet connect --control <url> --token <t> [--repos ~/Code] [--name "Mac mini"] [--permission-mode …] [--no-service]` | validate, register, save settings, install the service |
+| `sidefleet connect --control <url> --token <t> [--repos <folder>] [--name "Mac mini"] [--permission-mode …] [--no-service]` | validate, register, save settings, install the service |
 | `sidefleet status` | saved settings (token masked), service installed, process running, log path |
 | `sidefleet disconnect` | remove the service (settings kept) |
 | `sidefleet run` | run the worker in the foreground using the saved settings |

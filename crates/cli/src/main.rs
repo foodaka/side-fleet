@@ -46,8 +46,8 @@ enum Cmd {
         /// Do not run a worker on this machine as well (by default it does when a coding agent is installed).
         #[arg(long)]
         no_worker: bool,
-        /// Folder with this machine's git checkouts, for the built-in worker.
-        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~/Code")]
+        /// Folder with this machine's git checkouts, for the built-in worker (default: your home folder, scanned 3 levels deep).
+        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~")]
         repos: String,
         /// Permission mode for the built-in worker's Claude Code runs.
         #[arg(long, env = "SIDEFLEET_PERMISSION_MODE", default_value = "acceptEdits")]
@@ -62,8 +62,8 @@ enum Cmd {
         /// Worker token (shown by `sidefleet serve` and on the Machines page).
         #[arg(long, env = "SIDEFLEET_TOKEN", hide_env_values = true)]
         token: String,
-        /// Folder scanned (two levels deep) for git checkouts.
-        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~/Code")]
+        /// Folder with your git checkouts (default: your home folder, scanned 3 levels deep; hidden and build folders skipped).
+        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~")]
         repos: String,
         /// Name shown on the Machines page (defaults to this machine's hostname).
         #[arg(long, env = "SIDEFLEET_NAME")]
@@ -105,7 +105,7 @@ enum Cmd {
         #[arg(long)]
         skip_sign_in_check: bool,
         /// How many directory levels below --repos to scan for checkouts.
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 3)]
         scan_depth: usize,
     },
     /// Show the saved worker settings and whether the background service is running.
@@ -114,13 +114,13 @@ enum Cmd {
     Disconnect,
     /// Print what this machine can run (agents, sign-in state, repos) as JSON.
     Detect {
-        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~/Code")]
+        #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~")]
         repos: String,
         #[arg(long, env = "SIDEFLEET_CLAUDE_BIN", default_value = "claude")]
         claude_bin: String,
         #[arg(long)]
         skip_sign_in_check: bool,
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 3)]
         scan_depth: usize,
     },
 }
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
                 token,
                 display_name: name.unwrap_or_else(|| id.clone()),
                 worker_id: id,
-                repos_root: expand_home(&repos.unwrap_or_else(|| "~/Code".into())),
+                repos_root: expand_home(&repos.unwrap_or_else(|| "~".into())),
                 claude_bin,
                 permission_mode: permission_mode.unwrap_or_else(|| "acceptEdits".into()),
                 max_turns,
@@ -357,7 +357,7 @@ async fn serve(
             poll_interval: Duration::from_secs(2),
             heartbeat_interval: Duration::from_secs(15),
             check_sign_in: true,
-            scan_depth: 2,
+            scan_depth: 3,
             max_runs: None,
         };
         tokio::spawn(async move {
@@ -392,7 +392,7 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
         claude_bin: "claude".into(),
         repos_root: repos_root.clone(),
         check_sign_in: true,
-        scan_depth: 2,
+        scan_depth: 3,
     })
     .await;
     match &caps.agents.claude {
@@ -407,6 +407,9 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
         println!("  Ollama {} ({} models)", o.version, o.models.len());
     }
     println!("  {} git checkouts under {}", caps.repos.len(), repos_root.display());
+    if caps.repos.is_empty() {
+        println!("  (none found; if your projects live somewhere unusual, pass --repos <folder>)");
+    }
 
     println!("Registering with {control}…");
     let client = sidefleet_worker::client::ControlClient::new(&control, &token, &id)?;

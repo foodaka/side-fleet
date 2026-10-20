@@ -93,8 +93,19 @@ pub async fn detect_ollama() -> Option<OllamaAgent> {
     Some(OllamaAgent { version, models })
 }
 
+/// Folders never worth descending into when looking for git checkouts.
+const SKIP_DIRS: &[&str] = &[
+    "Library", "Applications", "Music", "Movies", "Pictures", "Public", "Desktop.localized",
+    "node_modules", "target", "vendor", "dist", "build", "venv", "env", "__pycache__",
+    "go", "snap", "Trash",
+];
+
+/// Default scan depth when the root is the home folder.
+pub const HOME_SCAN_DEPTH: usize = 3;
+
 /// Git checkouts under `root`, up to `max_depth` levels deep (the root itself
-/// counts when it is a repo). Names are paths relative to `root`.
+/// counts when it is a repo). Names are paths relative to `root`. Hidden
+/// folders and well-known noise (see `SKIP_DIRS`) are not entered.
 pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
     let mut out = Vec::new();
     fn walk(root: &Path, dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<RepoInfo>) {
@@ -114,7 +125,10 @@ pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
         let mut children: Vec<PathBuf> = rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.is_dir() && !p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true))
+            .filter(|p| {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                p.is_dir() && !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) && !p.is_symlink()
+            })
             .collect();
         children.sort();
         for c in children {
@@ -167,7 +181,11 @@ mod tests {
         std::fs::create_dir_all(root.join("group/deep/c/.git")).unwrap();
         std::fs::create_dir_all(root.join(".hidden/d/.git")).unwrap();
         std::fs::create_dir_all(root.join("a/nested/.git")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/pkg/.git")).unwrap();
+        std::fs::create_dir_all(root.join("Library/x/.git")).unwrap();
         let names: Vec<String> = scan_repos(root, 2).into_iter().map(|r| r.name).collect();
         assert_eq!(names, vec!["a", "group/b"]);
+        let names: Vec<String> = scan_repos(root, 3).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["a", "group/b", "group/deep/c"]);
     }
 }

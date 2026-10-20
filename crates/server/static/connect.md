@@ -27,10 +27,11 @@ PATH for the current shell: `export PATH="$HOME/.local/bin:$PATH"`.
 ## 3. Connect
 
 ```
-sidefleet connect --control {{ORIGIN}} --token <the token the user gave you> --repos <folder with the user's git checkouts, default ~/Code>
+sidefleet connect --control {{ORIGIN}} --token <the token the user gave you>
 ```
 
-This checks the machine, registers it once, saves the settings to `~/.sidefleet/worker.env`
+It finds git checkouts under the home folder by itself (three levels deep; pass `--repos <folder>`
+only if the user's projects live somewhere unusual). This checks the machine, registers it once, saves the settings to `~/.sidefleet/worker.env`
 (mode 600) and installs a background service (launchd on macOS, a systemd user unit on Linux)
 that keeps the worker running and restarts it after reboots. If it says the control plane is
 unreachable, the address is probably only valid on the control plane's own machine: ask the user

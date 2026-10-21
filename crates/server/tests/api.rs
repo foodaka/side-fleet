@@ -748,3 +748,148 @@ async fn runs_carry_an_agent_and_only_machines_with_it_claim_them() {
     assert_eq!(run.resume_session_id.as_deref(), Some("ses_1"));
     env.teardown().await;
 }
+
+/// Claim with what a current worker sends: its agents and its task slots.
+async fn claim_with(api: &Api, worker: &str, agents: &[&str], parallel: usize, active: usize) -> Option<Run> {
+    let r = api
+        .worker(reqwest::Method::POST, "/v1/worker/claim")
+        .json(&json!({"worker_id": worker, "repos": ["r"], "busy_repos": [], "agents": agents,
+                      "slots": {"parallel": parallel, "active": active}}))
+        .send()
+        .await
+        .unwrap();
+    match r.status() {
+        StatusCode::NO_CONTENT => None,
+        StatusCode::OK => Some(r.json().await.unwrap()),
+        s => panic!("unexpected claim status {s}: {}", r.text().await.unwrap()),
+    }
+}
+
+async fn create_id(api: &Api, body: Value) -> Uuid {
+    let r = api.dev(reqwest::Method::POST, "/v1/runs").json(&body).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn unpinned_runs_go_to_the_least_busy_machine_first() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("busy", &["r"]).await;
+    api.register("idle", &["r"]).await;
+    let task = json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r"});
+
+    // `idle` reports 4 free slots (nothing queued yet); `busy` has 1 of 2 free.
+    assert!(claim_with(&api, "idle", &["claude"], 4, 0).await.is_none());
+    let id = create_id(&api, task.clone()).await;
+    assert!(claim_with(&api, "busy", &["claude"], 2, 1).await.is_none(), "left for the machine with more free slots");
+    assert_eq!(claim_with(&api, "idle", &["claude"], 4, 0).await.expect("least busy claims").id, id);
+
+    // The claim counted: `idle` now has 3 free, still more than `busy`.
+    let id = create_id(&api, task.clone()).await;
+    assert!(claim_with(&api, "busy", &["claude"], 2, 1).await.is_none());
+    // A tie goes to whoever asks first.
+    assert_eq!(claim_with(&api, "busy", &["claude"], 4, 1).await.expect("equal free slots").id, id);
+
+    // The better machine does not stall a run: after the grace period anyone may take it.
+    let id = create_id(&api, task.clone()).await;
+    assert!(claim_with(&api, "busy", &["claude"], 2, 1).await.is_none());
+    sqlx::query("UPDATE runs SET created_at = now() - interval '11 seconds' WHERE id = $1").bind(id).execute(&env.pool).await.unwrap();
+    assert_eq!(claim_with(&api, "busy", &["claude"], 2, 1).await.expect("after the grace period").id, id);
+
+    // Pinned runs and workers that report no slots are not balanced.
+    let id = create_id(&api, json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r", "worker_id": "busy"})).await;
+    assert_eq!(claim_with(&api, "busy", &["claude"], 2, 1).await.expect("pinned here").id, id);
+    let id = create_id(&api, task.clone()).await;
+    assert_eq!(api.claim("busy", &["r"]).await.expect("an older worker claims as before").id, id);
+
+    // Only machines that could take the run count: online, with the repo and the agent.
+    let id = create_id(&api, json!({"task": "x", "agent": "codex", "repo": "r"})).await;
+    assert_eq!(claim_with(&api, "busy", &["claude", "codex"], 2, 1).await.expect("idle has no codex").id, id);
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '1 minute' WHERE id = 'idle'").execute(&env.pool).await.unwrap();
+    let id = create_id(&api, task.clone()).await;
+    assert_eq!(claim_with(&api, "busy", &["claude"], 2, 1).await.expect("idle is offline").id, id);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn a_usage_limit_moves_the_run_to_another_machine_once() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    api.register("w2", &["r"]).await;
+    let task = json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r"});
+    let limits = || async {
+        let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+        ws.into_iter().map(|w| (w["id"].as_str().unwrap().to_string(), w["limited_until"].clone())).collect::<std::collections::HashMap<_, _>>()
+    };
+    let finish = |worker: &'static str, id: Uuid, result: Value, limit: Value| {
+        api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/finish?worker_id={worker}"))
+            .json(&json!({"status": "failed", "result": result, "usage_limit": limit}))
+            .send()
+    };
+
+    // w1 runs the task and Claude Code reports the account's usage limit (captured output).
+    let id = create_id(&api, task.clone()).await;
+    assert_eq!(claim_with(&api, "w1", &["claude"], 2, 0).await.unwrap().id, id);
+    let mut stream = sidefleet_core::AgentStream::new(sidefleet_core::Agent::Claude, "claude-haiku-5-5", "/tmp/r");
+    let mut events = Vec::new();
+    for line in include_str!("../../core/tests/fixtures/claude_usage_limit.jsonl").lines() {
+        if let sidefleet_core::MappedLine::Events(evs) = stream.map_line(line) {
+            events.extend(evs);
+        }
+    }
+    let result = events.iter().rev().find(|e| e.kind == "result").unwrap().payload.clone();
+    let limit = sidefleet_core::result_usage_limit(&result).expect("fixture is a usage limit");
+    api.post_events("w1", id, serde_json::to_value(&events).unwrap()).await;
+    let r = finish("w1", id, json!({"error": "agent reported an error", "result": result}), json!(limit)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let run: Run = r.json().await.unwrap();
+    assert_eq!(run.status, RunStatus::Queued, "re-queued for another machine");
+    assert_eq!(run.worker_id, None);
+    assert_eq!(run.session_id, None, "w1's session does not follow the run");
+
+    // w1 is left alone for Claude Code until the limit resets (the fixture's reset has passed: an hour).
+    let until: chrono::DateTime<chrono::Utc> = serde_json::from_value(limits().await["w1"]["claude"].clone()).expect("w1 limited");
+    let left = until - chrono::Utc::now();
+    assert!(left > chrono::Duration::minutes(55) && left <= chrono::Duration::minutes(60), "{left}");
+    assert_eq!(limits().await["w2"], json!({}));
+    assert!(claim_with(&api, "w1", &["claude"], 2, 0).await.is_none(), "limited machine skipped");
+    let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM run_events WHERE run_id = $1 ORDER BY seq").bind(id).fetch_all(&env.pool).await.unwrap();
+    assert!(kinds.contains(&"usage_limit".to_string()), "{kinds:?}");
+    assert_eq!(kinds.last().unwrap(), "status");
+
+    // w2 takes it. If w2 is limited too the run fails: it is re-queued only once.
+    assert_eq!(claim_with(&api, "w2", &["claude"], 2, 0).await.expect("other machine claims").id, id);
+    let resets = chrono::Utc::now() + chrono::Duration::hours(3);
+    let r = finish("w2", id, json!({"error": "limit"}), json!({"resets_at": resets})).await.unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().status, RunStatus::Failed);
+    let until: chrono::DateTime<chrono::Utc> = serde_json::from_value(limits().await["w2"]["claude"].clone()).unwrap();
+    assert!((until - resets).num_seconds().abs() <= 1, "the reported reset time is used");
+
+    // Limits are per agent: w1 still takes Codex tasks.
+    let claude = create_id(&api, task.clone()).await;
+    let codex = create_id(&api, json!({"task": "x", "agent": "codex", "repo": "r"})).await;
+    assert_eq!(claim_with(&api, "w1", &["claude", "codex"], 2, 0).await.unwrap().id, codex);
+    assert!(claim_with(&api, "w2", &["claude"], 2, 0).await.is_none());
+
+    // Once the limit resets the machine takes Claude Code tasks again.
+    sqlx::query("UPDATE worker_limits SET until = now() - interval '1 second'").execute(&env.pool).await.unwrap();
+    assert_eq!(limits().await["w1"], json!({}));
+    assert_eq!(claim_with(&api, "w2", &["claude"], 2, 0).await.unwrap().id, claude);
+
+    // A pinned run is never moved; nor is a run no other machine can take.
+    let pinned = create_id(&api, json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r", "worker_id": "w1"})).await;
+    assert_eq!(claim_with(&api, "w1", &["claude"], 2, 0).await.unwrap().id, pinned);
+    let r = finish("w1", pinned, json!({}), json!({})).await.unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().status, RunStatus::Failed);
+    let lone = create_id(&api, task.clone()).await;
+    sqlx::query("UPDATE worker_limits SET until = now() - interval '1 second'").execute(&env.pool).await.unwrap();
+    assert_eq!(claim_with(&api, "w1", &["claude"], 2, 0).await.unwrap().id, lone);
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '1 minute' WHERE id = 'w2'").execute(&env.pool).await.unwrap();
+    let r = finish("w1", lone, json!({}), json!({})).await.unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().status, RunStatus::Failed, "w2 is offline");
+
+    env.teardown().await;
+}

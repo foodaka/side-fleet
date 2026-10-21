@@ -76,6 +76,8 @@ export interface Worker {
 	online: boolean;
 	update_requested: boolean;
 	outdated: boolean;
+	/** Agents whose usage limit this machine's account hit, with when it resets; it takes none of their tasks until then. */
+	limited_until?: Partial<Record<'claude' | 'codex' | 'opencode', string>>;
 }
 
 export interface Setup {

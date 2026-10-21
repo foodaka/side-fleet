@@ -397,6 +397,10 @@ pub struct ClaimRequest {
     /// older workers, which only run Claude Code.
     #[serde(default)]
     pub agents: Vec<String>,
+    /// This machine's task slots right now, so the control plane can hand a task
+    /// to the least busy machine. None from older workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<Slots>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -423,4 +427,15 @@ pub struct FinishRunRequest {
     pub status: RunStatus,
     #[serde(default)]
     pub result: Option<Value>,
+    /// The agent stopped because this machine's account hit its usage limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_limit: Option<UsageLimit>,
+}
+
+/// An agent run ended on the account's usage or rate limit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// When the limit resets, if the agent said; the control plane assumes an hour otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<DateTime<Utc>>,
 }

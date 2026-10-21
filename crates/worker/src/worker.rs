@@ -119,7 +119,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     }
 
     let mut backoff = Backoff::new(Duration::from_secs(30));
-    let slots = Arc::new(Semaphore::new(cfg.parallel.max(1)));
+    let permits = Arc::new(Semaphore::new(cfg.parallel.max(1)));
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Uuid>();
     let mut completed = 0usize;
     let cfg = Arc::new(cfg);
@@ -135,7 +135,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             }
         }
         // Wait for a free slot before asking for work, so we never claim more than we can run.
-        let permit = match slots.clone().try_acquire_owned() {
+        let permit = match permits.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -165,7 +165,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             .filter(|(_, iso)| iso == "checkout")
             .map(|(repo, _)| repo.clone())
             .collect();
-        match client.claim(&repos, &busy, &agents).await {
+        // Our load, so the control plane can prefer a machine with more free slots.
+        let slots = Slots { parallel: cfg.parallel.max(1), active: active_count.load(Ordering::Relaxed) };
+        match client.claim(&repos, &busy, &agents, &slots).await {
             Ok(Some(run)) => {
                 backoff.reset();
                 let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
@@ -313,7 +315,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let Some(repo_dir) = repo_path else {
         let msg = format!("repo {} is no longer present under {}", run.repo, cfg.repos_root.display());
         let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
-        let _ = client.finish(run_id, RunStatus::Failed, Some(json!({"error": msg}))).await;
+        let _ = client.finish(run_id, RunStatus::Failed, Some(json!({"error": msg})), None).await;
         return;
     };
 
@@ -419,17 +421,14 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
 
     let outcome = match exec.await {
         Ok(o) => o,
-        Err(e) => agent::Outcome {
-            status: RunStatus::Failed,
-            result: serde_json::json!({"error": format!("executor task panicked: {e}")}),
-        },
+        Err(e) => agent::Outcome::new(RunStatus::Failed, json!({"error": format!("executor task panicked: {e}")})),
     };
     // Executor dropped its sender; forwarder drains the channel and exits.
     let _ = forwarder.await;
 
     let mut backoff = Backoff::new(Duration::from_secs(30));
     for attempt in 1..=10 {
-        match client.finish(run_id, outcome.status, Some(outcome.result.clone())).await {
+        match client.finish(run_id, outcome.status, Some(outcome.result.clone()), outcome.usage_limit.clone()).await {
             Ok(r) => {
                 tracing::info!(run_id = %run_id, status = r.status.as_str(), "run finished");
                 return;

@@ -20,6 +20,25 @@
 4. Stop sends `SIGTERM` to the agent's process group, then `SIGKILL` after 1.5 s, and marks the
    run `stopped`. A worker that stops heart-beating for 90 s has its running run marked `failed`.
 
+## Which machine runs a task
+
+Workers pull work, so a run goes to a machine that asks for it, has the repo and the run's agent,
+and has a free slot (`--parallel`). On top of that:
+
+- **Least busy first.** Workers send their task slots (`{parallel, active}`) on every heartbeat
+  and claim. For 10 s after a run is created, a machine is not given an unpinned run while another
+  online machine that could run it has more free slots; after that any machine that can run it may
+  take it, so a slow or busy "better" machine never stalls a task. Pinned runs and follow-ups
+  (which run where their session lives) are not balanced.
+- **Usage limits.** When an agent ends a run on the account's usage or rate limit (Claude Code's
+  `You've hit your limit · resets 3pm` with its `rate_limit_event`, Codex's `usage limit`, a
+  provider's `Rate limit exceeded` in opencode), the worker reports `usage_limit` with the finish.
+  The control plane leaves that machine alone for that agent until the reset time the agent
+  reported, or for an hour when it gave none, and the Machines page shows "usage limit until
+  HH:MM". An unpinned run is put back in the queue once (`queued`, with a `usage_limit` event and
+  `requeued_from`) when another online machine can take it; otherwise it is `failed`. Its other
+  agents keep working on that machine. A pinned run on a limited machine waits for the reset.
+
 Anything that looks like a credential (known key prefixes, bearer headers, `key=value`, JWTs, PEM
 blocks, secret-looking JSON keys) is redacted on the worker before it leaves the machine, and
 again on the control plane before it is stored.
@@ -37,7 +56,7 @@ Bearer `SIDEFLEET_DEV_KEY`:
 | `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine; `409` while the previous message runs |
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind; replays then live; ends with `end` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
-| `GET` | `/v1/workers` | machines with capabilities and `online` (heartbeat < 45 s) |
+| `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `GET` | `/v1/setup` | control URL and the first worker token, for the page's connect command |
 
 Public: `GET /` (the page), `GET /connect.md` (instructions for an agent), `GET /healthz`.
@@ -47,6 +66,8 @@ Public: `GET /` (the page), `GET /connect.md` (instructions for an agent), `GET 
 Bearer one of `SIDEFLEET_WORKER_TOKENS` (comma-separated, one per machine if you want to revoke
 individually; compared as SHA-256 digests in constant time and never logged):
 `POST /v1/worker/register`, `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (sends the
-agents installed on the machine; workers that send none only get `claude` runs),
+agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
+only get `claude` runs, and workers that send no slots are not load balanced),
 `POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`,
-`POST /v1/worker/runs/:id/finish`.
+`POST /v1/worker/runs/:id/finish` (`{status, result, usage_limit?: {resets_at?}}`; answers with
+the run, which is `queued` again when a usage limit moved it to another machine).

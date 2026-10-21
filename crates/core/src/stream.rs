@@ -10,7 +10,8 @@
 //! Anything else is forwarded as `agent_other` with only its `type`/`subtype`.
 
 use crate::redact::{redact, redact_json, summarize_tool_input};
-use crate::NewEvent;
+use crate::{NewEvent, UsageLimit};
+use chrono::DateTime;
 use serde_json::{json, Value};
 
 /// Tool results are truncated to this many bytes before being forwarded.
@@ -141,6 +142,37 @@ pub fn map_stream_line(line: &str) -> MappedLine {
     MappedLine::Events(out)
 }
 
+/// Whether an agent's error text says the account hit its usage or rate limit:
+/// Claude Code's `You've hit your limit · resets 3pm`, `5-hour limit reached`
+/// and the older `Claude AI usage limit reached|<unix reset time>`, Codex's
+/// `You've hit your usage limit`, a provider's `Rate limit exceeded` (opencode).
+/// Only meaningful for a failed result: a successful answer may talk about limits.
+pub fn usage_limit_in(text: &str) -> Option<UsageLimit> {
+    const SIGNS: &[&str] = &[
+        "usage limit",
+        "hit your limit",
+        "hour limit reached",
+        "weekly limit reached",
+        "opus limit reached",
+        "session limit reached",
+        "rate limit exceeded",
+        "rate limit reached",
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "insufficient_quota",
+        "quota exceeded",
+    ];
+    let lower = text.to_lowercase();
+    if !SIGNS.iter().any(|s| lower.contains(s)) {
+        return None;
+    }
+    let resets_at = text
+        .split_once('|')
+        .and_then(|(_, t)| t.trim().split(|c: char| !c.is_ascii_digit()).next()?.parse::<i64>().ok())
+        .and_then(|t| DateTime::from_timestamp(t, 0));
+    Some(UsageLimit { resets_at })
+}
+
 fn content_blocks(v: &Value) -> Vec<Value> {
     match v.pointer("/message/content") {
         Some(Value::Array(a)) => a.clone(),
@@ -254,6 +286,19 @@ mod tests {
         assert!(events(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#).is_empty());
         let e = events(r#"{"type":"something_new","subtype":"x"}"#);
         assert_eq!(e[0].kind, "agent_other");
+    }
+
+    #[test]
+    fn recognises_usage_limit_text() {
+        assert!(usage_limit_in("You've hit your limit · resets 3pm (Europe/Berlin)").is_some());
+        assert!(usage_limit_in("5-hour limit reached ∙ resets 1am").is_some());
+        assert!(usage_limit_in("You've hit your usage limit. Upgrade to Pro or try again in 2 hours.").is_some());
+        assert!(usage_limit_in("Rate limit exceeded").is_some());
+        let l = usage_limit_in("Claude AI usage limit reached|1792591200").unwrap();
+        assert_eq!(l.resets_at.unwrap().to_rfc3339(), "2026-10-21T14:00:00+00:00");
+        assert_eq!(usage_limit_in("You've hit your limit").unwrap().resets_at, None);
+        assert!(usage_limit_in("Reached max turns (3)").is_none());
+        assert!(usage_limit_in("Prompt is too long").is_none());
     }
 
     #[test]

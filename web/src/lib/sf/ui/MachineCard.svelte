@@ -24,6 +24,20 @@
 	const repos = $derived(keys.size);
 	const chosen = $derived(fleet.added ? [...keys].filter((k) => fleet.added!.has(k)).length : 0);
 	let requesting = $state(false);
+	const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'opencode' } as const;
+	// Agents this machine takes no tasks for until their usage limit resets.
+	const limits = $derived(
+		Object.entries(w.limited_until ?? {})
+			.filter(([, until]) => until && Date.parse(until) > fleet.now)
+			.map(([agent, until]) => ({ name: AGENT_NAMES[agent as keyof typeof AGENT_NAMES] ?? agent, until: clock(until!) }))
+	);
+	// Name the agent unless it is the only one here.
+	const several = $derived([c.agents.claude, c.agents.codex, c.agents.opencode].filter(Boolean).length > 1);
+	function clock(iso: string) {
+		const d = new Date(iso);
+		const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+		return d.toDateString() === new Date(fleet.now).toDateString() ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+	}
 	const tasks = $derived(fleet.runs.filter((r) => r.thread_status === 'running' && r.worker_id === w.id));
 	const history = $derived(telemetry.cpu[w.id] ?? []);
 	// Sparkline over the readings collected while the page is open (one per heartbeat).
@@ -140,6 +154,14 @@
 		{/if}
 		{#if c.agents.ollama}<span class="inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs">Ollama <span class="tnum text-muted-foreground">{c.agents.ollama.models.length} models</span></span>{/if}
 		{#if !c.agents.claude && !c.agents.codex && !c.agents.opencode}<span class="inline-flex h-6 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">No coding agent found</span>{/if}
+		{#each limits as l (l.name)}
+			<Tooltip.Root>
+				<Tooltip.Trigger class="inline-flex h-6 items-center gap-1.5 rounded-md border border-queue/50 px-2 text-xs text-queue-ink">
+					<TriangleAlert class="size-3.5" />{several ? `${l.name}: ` : ''}usage limit until <span class="tnum">{l.until}</span>
+				</Tooltip.Trigger>
+				<Tooltip.Content>This machine's {l.name} account hit its usage limit. Its {l.name} tasks go to other machines until then.</Tooltip.Content>
+			</Tooltip.Root>
+		{/each}
 		<button type="button" onclick={() => (fleet.pickerOpen = true)} class="inline-flex h-6 items-center rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
 			<span class="tnum">{repos} repos{fleet.added?.size ? `, ${chosen} chosen` : ''}</span>
 		</button>

@@ -10,7 +10,7 @@ pub mod stream;
 pub mod stream_codex;
 pub mod stream_opencode;
 
-pub use agent::{Agent, AgentStream, AGENTS, CLAUDE_MODELS};
+pub use agent::{result_usage_limit, Agent, AgentStream, AGENTS, CLAUDE_MODELS};
 pub use models::*;
 pub use redact::{redact, summarize_tool_input};
-pub use stream::{map_stream_line, MappedLine, TOOL_RESULT_MAX_BYTES};
+pub use stream::{map_stream_line, usage_limit_in, MappedLine, TOOL_RESULT_MAX_BYTES};

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use sidefleet_core::{
     Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, NewEvent,
-    PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunStatus, Worker,
+    PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
@@ -127,7 +127,7 @@ impl ControlClient {
         Ok(())
     }
 
-    pub async fn claim(&self, repos: &[String], busy_repos: &[String], agents: &[String]) -> Result<Option<Run>, ClientError> {
+    pub async fn claim(&self, repos: &[String], busy_repos: &[String], agents: &[String], slots: &Slots) -> Result<Option<Run>, ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/claim"))
@@ -137,6 +137,7 @@ impl ControlClient {
                 repos: repos.to_vec(),
                 busy_repos: busy_repos.to_vec(),
                 agents: agents.to_vec(),
+                slots: Some(slots.clone()),
             })
             .send()
             .await
@@ -173,12 +174,12 @@ impl ControlClient {
         Ok(r.json().await?)
     }
 
-    pub async fn finish(&self, run_id: Uuid, status: RunStatus, result: Option<Value>) -> Result<Run> {
+    pub async fn finish(&self, run_id: Uuid, status: RunStatus, result: Option<Value>, usage_limit: Option<UsageLimit>) -> Result<Run> {
         let r = self
             .http
             .post(self.url(&format!("/v1/worker/runs/{run_id}/finish?worker_id={}", self.worker_id)))
             .bearer_auth(&self.token)
-            .json(&FinishRunRequest { status, result })
+            .json(&FinishRunRequest { status, result, usage_limit })
             .send()
             .await
             .context("finish request failed")?;

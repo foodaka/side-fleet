@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, Run, RunEvent, RunStatus, RunSummary, Worker};
+use sidefleet_core::{Agent, Capabilities, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -367,23 +367,59 @@ pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(R
     Ok(Some(out))
 }
 
+/// SQL condition: worker `w` could run queued run `r` now. It is online, has
+/// the repo (by identity or path name) and the agent, and has not hit that
+/// agent's usage limit. Workers from before multi-agent support report no
+/// agents and run Claude Code.
+const CAN_RUN: &str = "w.last_heartbeat_at > now() - interval '45 seconds'
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(w.capabilities->'repos', '[]'::jsonb)) AS info(repo)
+                  WHERE info.repo->>'name' = r.repo OR info.repo->>'id' = r.repo)
+      AND (w.capabilities->'agents' ? r.agent
+           OR (r.agent = 'claude' AND COALESCE(w.capabilities->'agents', '{}'::jsonb) - 'ollama' = '{}'::jsonb))
+      AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = w.id AND l.agent = r.agent AND l.until > now())";
+
+/// How long a new run waits for the least busy machine before any machine that
+/// can run it may take it (that machine may have the repo busy, or be slow to poll).
+const LEAST_BUSY_GRACE_SECS: i64 = 10;
+
 /// Atomically claim the oldest queued run for one of `repos`.
+///
+/// Least busy first: claims are pulled, so the first machine to ask would win.
+/// When `slots` says how loaded the asking machine is, an unpinned run younger
+/// than [`LEAST_BUSY_GRACE_SECS`] is skipped while another machine that can run
+/// it has more free slots. Runs of an agent whose usage limit this machine hit
+/// are skipped until the limit resets.
 pub async fn claim_run(
     pool: &PgPool,
     worker_id: &str,
     repos: &[String],
     busy_repos: &[String],
     agents: &[String],
+    slots: Option<&Slots>,
 ) -> sqlx::Result<Option<(Run, RunEvent)>> {
     let mut tx = pool.begin().await?;
+    let free = slots.map(|s| s.parallel.saturating_sub(s.active) as i32);
+    if let Some(s) = slots {
+        sqlx::query("UPDATE workers SET slots_parallel = $2, slots_active = $3 WHERE id = $1")
+            .bind(worker_id)
+            .bind(s.parallel as i32)
+            .bind(s.active as i32)
+            .execute(&mut *tx)
+            .await?;
+    }
     let row = sqlx::query(&format!(
         "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
          WHERE id = (
-            SELECT id FROM runs WHERE status = 'queued' AND repo = ANY($2)
-              AND NOT (repo = ANY($3))
-              AND (pinned_worker_id IS NULL OR pinned_worker_id = $1)
-              AND agent = ANY($4)
-            ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+            SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.repo = ANY($2)
+              AND NOT (r.repo = ANY($3))
+              AND (r.pinned_worker_id IS NULL OR r.pinned_worker_id = $1)
+              AND r.agent = ANY($4)
+              AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
+              AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
+                   OR r.created_at < now() - make_interval(secs => $6)
+                   OR NOT EXISTS (SELECT 1 FROM workers w WHERE w.id <> $1 AND {CAN_RUN}
+                                  AND w.slots_parallel - w.slots_active > $5))
+            ORDER BY r.created_at LIMIT 1 FOR UPDATE SKIP LOCKED
          )
          RETURNING {RUN_COLS}"
     ))
@@ -391,12 +427,20 @@ pub async fn claim_run(
     .bind(repos)
     .bind(busy_repos)
     .bind(agents)
+    .bind(free)
+    .bind(LEAST_BUSY_GRACE_SECS as f64)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
+        tx.commit().await?;
         return Ok(None);
     };
     let run = row_to_run(&row);
+    // One slot fewer free here until the next heartbeat or claim says otherwise.
+    sqlx::query("UPDATE workers SET slots_active = slots_active + 1 WHERE id = $1 AND slots_active IS NOT NULL")
+        .bind(worker_id)
+        .execute(&mut *tx)
+        .await?;
     let ev = append_event_locked(
         &mut tx,
         run.id,
@@ -409,11 +453,17 @@ pub async fn claim_run(
 }
 
 pub enum FinishOutcome {
-    Finished(Run, RunEvent),
+    /// Finished; the events to broadcast (a `usage_limit` event, then the status).
+    Finished(Run, Vec<RunEvent>),
+    /// The run hit this machine's usage limit and went back in the queue for another machine.
+    Requeued(Run, Vec<RunEvent>),
     NotFound,
     NotOwner,
     AlreadyFinished(Run),
 }
+
+/// How long a machine is left alone after a usage limit with no reset time.
+const DEFAULT_LIMIT_SECS: i64 = 3600;
 
 pub async fn finish_run(
     pool: &PgPool,
@@ -421,6 +471,7 @@ pub async fn finish_run(
     worker_id: &str,
     status: RunStatus,
     result: Option<Value>,
+    usage_limit: Option<&UsageLimit>,
 ) -> sqlx::Result<FinishOutcome> {
     debug_assert!(status.is_terminal());
     let mut tx = pool.begin().await?;
@@ -433,6 +484,59 @@ pub async fn finish_run(
     if run.status != RunStatus::Running {
         return Ok(FinishOutcome::AlreadyFinished(run));
     }
+    let mut events = Vec::new();
+    if let (Some(limit), RunStatus::Failed) = (usage_limit, status) {
+        // The reset time the agent reported, if it is ahead of us; otherwise an hour.
+        let now = Utc::now();
+        let until = limit
+            .resets_at
+            .filter(|t| *t > now && *t < now + chrono::Duration::days(8))
+            .unwrap_or(now + chrono::Duration::seconds(DEFAULT_LIMIT_SECS));
+        sqlx::query(
+            "INSERT INTO worker_limits (worker_id, agent, until) VALUES ($1, $2, $3)
+             ON CONFLICT (worker_id, agent) DO UPDATE SET until = EXCLUDED.until",
+        )
+        .bind(worker_id)
+        .bind(run.agent.as_str())
+        .bind(until)
+        .execute(&mut *tx)
+        .await?;
+        events.push(
+            append_event_locked(&mut tx, run_id, "usage_limit", &json!({"worker_id": worker_id, "agent": run.agent.as_str(), "until": until}))
+                .await?,
+        );
+        // Once, and only when it may run anywhere and another machine can take it now.
+        let requeue = run.pinned_worker_id.is_none()
+            && sqlx::query(&format!(
+                "SELECT r.requeues = 0 AND EXISTS (SELECT 1 FROM workers w WHERE w.id <> $2 AND {CAN_RUN}) AS ok
+                 FROM runs r WHERE r.id = $1"
+            ))
+            .bind(run_id)
+            .bind(worker_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .get::<bool, _>("ok");
+        if requeue {
+            let row = sqlx::query(&format!(
+                "UPDATE runs SET status = 'queued', worker_id = NULL, started_at = NULL, session_id = NULL,
+                 requeues = requeues + 1 WHERE id = $1 RETURNING {RUN_COLS}"
+            ))
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            events.push(
+                append_event_locked(
+                    &mut tx,
+                    run_id,
+                    "status",
+                    &json!({"status": "queued", "reason": "usage limit", "requeued_from": worker_id}),
+                )
+                .await?,
+            );
+            tx.commit().await?;
+            return Ok(FinishOutcome::Requeued(row_to_run(&row), events));
+        }
+    }
     let result = result.map(|r| sidefleet_core::redact::redact_json(&r));
     let row = sqlx::query(&format!(
         "UPDATE runs SET status = $2, finished_at = now(), result = $3 WHERE id = $1 RETURNING {RUN_COLS}"
@@ -442,9 +546,9 @@ pub async fn finish_run(
     .bind(result)
     .fetch_one(&mut *tx)
     .await?;
-    let ev = append_event_locked(&mut tx, run_id, "status", &status_payload(status)).await?;
+    events.push(append_event_locked(&mut tx, run_id, "status", &status_payload(status)).await?);
     tx.commit().await?;
-    Ok(FinishOutcome::Finished(row_to_run(&row), ev))
+    Ok(FinishOutcome::Finished(row_to_run(&row), events))
 }
 
 /// Runs assigned to `worker_id` that are `running` but not in `active`: the
@@ -521,17 +625,20 @@ pub async fn upsert_worker(
     caps: &Capabilities,
 ) -> sqlx::Result<Worker> {
     let row = sqlx::query(
-        "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at)
-         VALUES ($1, $2, $3, $4, now())
+        "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active)
+         VALUES ($1, $2, $3, $4, now(), $5, $6)
          ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name,
             token_hash = EXCLUDED.token_hash, capabilities = EXCLUDED.capabilities,
-            last_heartbeat_at = now(), update_requested = false
+            last_heartbeat_at = now(), update_requested = false,
+            slots_parallel = EXCLUDED.slots_parallel, slots_active = EXCLUDED.slots_active
          RETURNING id, display_name, capabilities, last_heartbeat_at",
     )
     .bind(id)
     .bind(display_name)
     .bind(token_hash)
     .bind(serde_json::to_value(caps).unwrap_or(Value::Null))
+    .bind(caps.slots.as_ref().map(|s| s.parallel as i32))
+    .bind(caps.slots.as_ref().map(|s| s.active as i32))
     .fetch_one(pool)
     .await?;
     Ok(row_to_worker(&row))
@@ -545,12 +652,15 @@ pub async fn heartbeat(
     caps: &Capabilities,
 ) -> sqlx::Result<bool> {
     let res = sqlx::query(
-        "UPDATE workers SET capabilities = $3, last_heartbeat_at = now()
+        "UPDATE workers SET capabilities = $3, last_heartbeat_at = now(),
+            slots_parallel = $4, slots_active = $5
          WHERE id = $1 AND token_hash = $2",
     )
     .bind(id)
     .bind(token_hash)
     .bind(serde_json::to_value(caps).unwrap_or(Value::Null))
+    .bind(caps.slots.as_ref().map(|s| s.parallel as i32))
+    .bind(caps.slots.as_ref().map(|s| s.active as i32))
     .execute(pool)
     .await?;
     Ok(res.rows_affected() == 1)
@@ -577,6 +687,17 @@ pub async fn list_workers(pool: &PgPool) -> sqlx::Result<Vec<Worker>> {
     .fetch_all(pool)
     .await?;
     Ok(rows.iter().map(row_to_worker).collect())
+}
+
+/// Agents each machine may not use until their usage limit resets: worker id -> agent -> until.
+pub async fn active_limits(pool: &PgPool) -> sqlx::Result<std::collections::HashMap<String, serde_json::Map<String, Value>>> {
+    let rows = sqlx::query("SELECT worker_id, agent, until FROM worker_limits WHERE until > now()").fetch_all(pool).await?;
+    let mut out: std::collections::HashMap<String, serde_json::Map<String, Value>> = Default::default();
+    for r in rows {
+        let until: DateTime<Utc> = r.get("until");
+        out.entry(r.get("worker_id")).or_default().insert(r.get("agent"), json!(until));
+    }
+    Ok(out)
 }
 
 pub fn is_online(last_heartbeat_at: DateTime<Utc>) -> bool {

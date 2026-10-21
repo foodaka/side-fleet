@@ -1,16 +1,59 @@
+import type { AgentId, Worker } from './types';
+
+export const AGENTS: { id: AgentId; name: string; hint: string }[] = [
+	{ id: 'claude', name: 'Claude Code', hint: "Anthropic's agent, with the machine's Claude sign-in" },
+	{ id: 'codex', name: 'Codex', hint: "OpenAI's agent, with the machine's ChatGPT sign-in" },
+	{ id: 'opencode', name: 'opencode', hint: 'Open source; any model it is set up for (OpenRouter, local…)' }
+];
+
+export const agentName = (id: string | null | undefined) => AGENTS.find((a) => a.id === id)?.name ?? 'Claude Code';
+
+/** Claude Code's models; Codex and opencode offer whatever each machine reports. */
 export const MODELS = [
 	{ id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', hint: 'Balanced' },
 	{ id: 'claude-opus-5-5', name: 'Opus 5.5', hint: 'Most capable' },
 	{ id: 'claude-haiku-5-5', name: 'Haiku 5.5', hint: 'Fastest' }
 ] as const;
 
-export const modelName = (id: string) => MODELS.find((m) => m.id === id)?.name ?? id;
+/** How a model reads: `Sonnet 5.5`, `gpt-6-luna`, `moonshotai/kimi-k2` (opencode's provider prefix dropped). */
+export function modelName(id: string, agent?: string | null) {
+	if (!id) return 'default model';
+	const claude = MODELS.find((m) => m.id === id);
+	if (claude) return claude.name;
+	return agent === 'opencode' && id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
+}
+
+/** `Claude Code · Sonnet 5.5`, `opencode · moonshotai/kimi-k2`. */
+export const agentModel = (agent: string | null | undefined, model: string) => `${agentName(agent)} · ${modelName(model, agent)}`;
+
+/** Whether a machine can run tasks with this agent (an older control plane run without `agent` is Claude Code). */
+export const hasAgent = (w: Worker, agent: AgentId) => !!w.capabilities.agents?.[agent];
+
+/** Models the given machines offer for an agent, most common first. */
+export function machineModels(workers: Worker[], agent: AgentId): string[] {
+	const count = new Map<string, number>();
+	workers.forEach((w) => {
+		const a = w.capabilities.agents;
+		const list = agent === 'codex' ? a.codex?.models : agent === 'opencode' ? a.opencode?.models : undefined;
+		(list ?? []).forEach((m) => count.set(m, (count.get(m) ?? 0) + 1));
+	});
+	return [...count.keys()].sort((x, y) => count.get(y)! - count.get(x)! || 0);
+}
 
 export const PERMISSIONS = [
 	{ id: 'acceptEdits', name: 'Read & edit files', hint: 'Can change files; shell commands are refused' },
 	{ id: 'bypassPermissions', name: 'Full access', hint: 'Can also run commands on that machine' },
 	{ id: 'plan', name: 'Read only', hint: 'Looks and answers, changes nothing' }
 ] as const;
+
+/** What a permission mode means for an agent: Codex maps them onto its sandbox. */
+export function permHint(id: string, agent: AgentId): string {
+	if (agent === 'codex') {
+		if (id === 'acceptEdits') return 'Edits files and runs commands inside its sandbox, no network';
+		if (id === 'bypassPermissions') return 'No sandbox: runs anything on that machine';
+	}
+	return PERMISSIONS.find((p) => p.id === id)?.hint ?? '';
+}
 
 export const permName = (id: string | null | undefined) =>
 	PERMISSIONS.find((p) => p.id === id)?.name ?? (id === 'default' ? 'Default permissions' : id ?? '');

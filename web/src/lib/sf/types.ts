@@ -2,9 +2,13 @@
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'stopped';
 
+export type AgentId = 'claude' | 'codex' | 'opencode';
+
 export interface Run {
 	id: string;
 	task: string;
+	agent: AgentId;
+	/** Empty means the machine's default model (Codex, opencode). */
 	model: string;
 	repo: string;
 	status: RunStatus;
@@ -50,7 +54,9 @@ export interface SystemStats {
 export interface Capabilities {
 	agents: {
 		claude?: { version: string; signed_in: boolean; sign_in_error?: string };
-		codex?: { version: string };
+		codex?: { version: string; signed_in?: boolean; models?: string[] };
+		/** `models` is capped; `models_total` is how many opencode reported. */
+		opencode?: { version: string; models: string[]; models_total: number };
 		ollama?: { version: string; models: string[] };
 	};
 	/** `id` is the project's identity across machines (normalised git remote, or the folder name). */

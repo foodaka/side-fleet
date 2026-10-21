@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a15d87-b42a-7e40-a8ef-059317c5b5d9"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run `ls` once, then append `world` to `a.txt`."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"a.txt\nerr.txt\nout.jsonl\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc \"printf 'world\\\\n' >> a.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc \"printf 'world\\\\n' >> a.txt\"","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":59711,"cached_input_tokens":51712,"cache_write_input_tokens":0,"output_tokens":223,"reasoning_output_tokens":0}}

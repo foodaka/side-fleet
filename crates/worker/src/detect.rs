@@ -1,10 +1,10 @@
-//! Capability detection: which agents are installed (and whether Claude Code is
-//! signed in) and which git checkouts live under the repos root.
+//! Capability detection: which agents are installed (whether they are signed
+//! in, which models they offer) and which git checkouts live under the repos root.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sidefleet_core::{repo_identity, Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, RepoInfo, SystemStats};
+use sidefleet_core::{repo_identity, Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, OpencodeAgent, RepoInfo, SystemStats};
 use std::sync::Mutex;
 use tokio::process::Command;
 
@@ -66,11 +66,74 @@ pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent
     }
 }
 
-pub async fn detect_codex() -> Option<CodexAgent> {
-    let mut cmd = Command::new("codex");
+/// Codex: version, sign-in (`codex login status`, no model call) and the models
+/// its catalog lists for this account (`codex debug models`).
+pub async fn detect_codex(bin: &str, check_sign_in: bool) -> Option<CodexAgent> {
+    let mut cmd = Command::new(bin);
     cmd.arg("--version");
     let (ok, out, _) = run_with_timeout(cmd, Duration::from_secs(10)).await?;
-    ok.then(|| CodexAgent { version: version_from(&out) })
+    if !ok {
+        return None;
+    }
+    let version = version_from(&out);
+    let signed_in = if check_sign_in {
+        let mut cmd = Command::new(bin);
+        cmd.args(["login", "status"]);
+        Some(matches!(run_with_timeout(cmd, Duration::from_secs(15)).await, Some((true, out, err)) if format!("{out}{err}").contains("Logged in")))
+    } else {
+        None
+    };
+    let mut cmd = Command::new(bin);
+    cmd.args(["debug", "models"]);
+    let models = match run_with_timeout(cmd, Duration::from_secs(15)).await {
+        Some((true, out, _)) => codex_models(&out),
+        _ => vec![],
+    };
+    Some(CodexAgent { version, signed_in, models })
+}
+
+/// The `list`-visible slugs from `codex debug models`, in Codex's own order.
+pub fn codex_models(json: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return vec![] };
+    let list = v.get("models").unwrap_or(&v).as_array().cloned().unwrap_or_default();
+    let mut models: Vec<(i64, String)> = list
+        .iter()
+        .filter(|m| m.get("visibility").and_then(|x| x.as_str()).unwrap_or("list") == "list")
+        .filter_map(|m| {
+            let slug = m.get("slug").and_then(|x| x.as_str())?;
+            Some((m.get("priority").and_then(|x| x.as_i64()).unwrap_or(i64::MAX), slug.to_string()))
+        })
+        .collect();
+    models.sort();
+    models.into_iter().map(|(_, s)| s).collect()
+}
+
+/// How many opencode models a machine reports; OpenRouter alone has hundreds.
+pub const OPENCODE_MODELS_MAX: usize = 400;
+
+/// opencode: version and the `provider/model` ids it can use here (only
+/// providers that are configured or signed in are listed).
+pub async fn detect_opencode(bin: &str) -> Option<OpencodeAgent> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--version");
+    let (ok, out, _) = run_with_timeout(cmd, Duration::from_secs(15)).await?;
+    if !ok {
+        return None;
+    }
+    let version = version_from(&out);
+    let mut cmd = Command::new(bin);
+    cmd.arg("models");
+    let all: Vec<String> = match run_with_timeout(cmd, Duration::from_secs(30)).await {
+        Some((true, out, _)) => out
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains('/') && !l.contains(char::is_whitespace))
+            .map(str::to_string)
+            .collect(),
+        _ => vec![],
+    };
+    let models_total = all.len();
+    Some(OpencodeAgent { version, models: all.into_iter().take(OPENCODE_MODELS_MAX).collect(), models_total })
 }
 
 pub async fn detect_ollama() -> Option<OllamaAgent> {
@@ -245,19 +308,22 @@ pub fn system_stats(repos_root: &Path) -> SystemStats {
 
 pub struct DetectOptions {
     pub claude_bin: String,
+    pub codex_bin: String,
+    pub opencode_bin: String,
     pub repos_root: PathBuf,
     pub check_sign_in: bool,
     pub scan_depth: usize,
 }
 
 pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
-    let (claude, codex, ollama) = tokio::join!(
+    let (claude, codex, opencode, ollama) = tokio::join!(
         detect_claude(&opts.claude_bin, opts.check_sign_in),
-        detect_codex(),
+        detect_codex(&opts.codex_bin, opts.check_sign_in),
+        detect_opencode(&opts.opencode_bin),
         detect_ollama()
     );
     Capabilities {
-        agents: Agents { claude, codex, ollama },
+        agents: Agents { claude, codex, opencode, ollama },
         repos: scan_repos(&opts.repos_root, opts.scan_depth),
         hostname: gethostname::gethostname().to_string_lossy().to_string(),
         os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
@@ -300,10 +366,18 @@ mod tests {
     }
 
     #[test]
+    fn lists_codex_models_in_catalog_order() {
+        let json = r#"{"models":[{"slug":"gpt-reserve","visibility":"hide","priority":4},{"slug":"gpt-5.6-terra","visibility":"list","priority":8},{"slug":"gpt-6-luna","visibility":"list","priority":5}]}"#;
+        assert_eq!(codex_models(json), vec!["gpt-6-luna", "gpt-5.6-terra"]);
+        assert!(codex_models("not json").is_empty());
+    }
+
+    #[test]
     fn parses_versions() {
         assert_eq!(version_from("2.1.302 (Claude Code)"), "2.1.302");
         assert_eq!(version_from("codex-cli 0.42.0"), "0.42.0");
         assert_eq!(version_from("ollama version is 0.5.7"), "0.5.7");
+        assert_eq!(version_from("1.19.3"), "1.19.3");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sidefleet_core::{Capabilities, NewEvent, Run, RunStatus, Slots};
+use sidefleet_core::{Agent, Capabilities, NewEvent, Run, RunStatus, Slots};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -25,6 +25,8 @@ pub struct WorkerConfig {
     pub display_name: String,
     pub repos_root: PathBuf,
     pub claude_bin: String,
+    pub codex_bin: String,
+    pub opencode_bin: String,
     pub permission_mode: String,
     pub max_turns: Option<u32>,
     pub extra_args: Vec<String>,
@@ -48,6 +50,8 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     let client = ControlClient::new(&cfg.control_url, &cfg.token, &cfg.worker_id)?;
     let detect_opts = DetectOptions {
         claude_bin: cfg.claude_bin.clone(),
+        codex_bin: cfg.codex_bin.clone(),
+        opencode_bin: cfg.opencode_bin.clone(),
         repos_root: cfg.repos_root.clone(),
         check_sign_in: cfg.check_sign_in,
         scan_depth: cfg.scan_depth,
@@ -147,6 +151,13 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             v.dedup();
             v
         };
+        // Only ask for tasks of agents installed here.
+        let agents: Vec<String> = caps.lock().await.agents.runnable().iter().map(|a| a.as_str().to_string()).collect();
+        if agents.is_empty() {
+            drop(permit);
+            tokio::time::sleep(cfg.poll_interval.max(Duration::from_secs(10))).await;
+            continue;
+        }
         let busy: Vec<String> = active
             .lock()
             .await
@@ -154,7 +165,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             .filter(|(_, iso)| iso == "checkout")
             .map(|(repo, _)| repo.clone())
             .collect();
-        match client.claim(&repos, &busy).await {
+        match client.claim(&repos, &busy, &agents).await {
             Ok(Some(run)) => {
                 backoff.reset();
                 let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
@@ -234,12 +245,17 @@ async fn register_with_backoff(
 }
 
 fn log_caps(caps: &Capabilities) {
-    match &caps.agents.claude {
-        Some(c) => tracing::info!(version = %c.version, signed_in = c.signed_in, error = c.sign_in_error.as_deref().unwrap_or(""), "claude code"),
-        None => tracing::warn!("claude code not found"),
+    if let Some(c) = &caps.agents.claude {
+        tracing::info!(version = %c.version, signed_in = c.signed_in, error = c.sign_in_error.as_deref().unwrap_or(""), "claude code");
     }
     if let Some(c) = &caps.agents.codex {
-        tracing::info!(version = %c.version, "codex found");
+        tracing::info!(version = %c.version, signed_in = ?c.signed_in, models = c.models.len(), "codex");
+    }
+    if let Some(o) = &caps.agents.opencode {
+        tracing::info!(version = %o.version, models = o.models_total, "opencode");
+    }
+    if caps.agents.runnable().is_empty() {
+        tracing::warn!("no coding agent found (claude, codex or opencode); this machine will not take tasks");
     }
     if let Some(o) = &caps.agents.ollama {
         tracing::info!(version = %o.version, models = o.models.len(), "ollama found");
@@ -249,7 +265,7 @@ fn log_caps(caps: &Capabilities) {
 
 /// A per-task git worktree: `<worktrees_dir>/<repo-slug>/<root run id>` on branch
 /// `sidefleet/<first 8 of root id>`. Follow-ups reuse the root's worktree so the
-/// Claude Code session (keyed by cwd) resumes in the same place.
+/// agent's session (Claude Code keys sessions by cwd) resumes in the same place.
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
@@ -292,7 +308,7 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
 /// Execute one claimed run: forward events as they arrive, poll for stop, report the outcome.
 async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_path: Option<PathBuf>) {
     let run_id = run.id;
-    tracing::info!(run_id = %run_id, repo = %run.repo, model = %run.model, isolation = %run.isolation, "executing run");
+    tracing::info!(run_id = %run_id, repo = %run.repo, agent = %run.agent, model = %run.model, isolation = %run.isolation, "executing run");
 
     let Some(repo_dir) = repo_path else {
         let msg = format!("repo {} is no longer present under {}", run.repo, cfg.repos_root.display());
@@ -329,8 +345,14 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         tracing::warn!(error = %e, "posting workspace event failed");
     }
 
+    let bin = match run.agent {
+        Agent::Claude => &cfg.claude_bin,
+        Agent::Codex => &cfg.codex_bin,
+        Agent::Opencode => &cfg.opencode_bin,
+    };
     let spec = AgentSpec {
-        bin: cfg.claude_bin.clone(),
+        agent: run.agent,
+        bin: bin.clone(),
         task: run.task.clone(),
         model: run.model.clone(),
         cwd,

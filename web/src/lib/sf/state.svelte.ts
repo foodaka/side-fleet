@@ -100,10 +100,6 @@ class Fleet {
 		return picked.sort((a, b) => a.localeCompare(b));
 	});
 
-	workerFor(repo: string) {
-		return this.online.find((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo || r.name === repo));
-	}
-
 	#migrated = false;
 	/** Repos chosen before identities existed are stored by folder name; convert them once. */
 	async #migrateAdded(workers: Worker[], added: string[]) {

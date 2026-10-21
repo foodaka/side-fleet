@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sidefleet_core::{
-    ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
+    Agent, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
     HeartbeatRequest, HeartbeatResponse, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, PERMISSION_MODES,
 };
@@ -37,9 +37,8 @@ use crate::AppState;
 #[folder = "web-dist/"]
 struct WebApp;
 const CONNECT_MD: &str = include_str!("../static/connect.md");
-/// Tasks and replies up to this many bytes; well under what `claude -p` accepts as an argument.
+/// Tasks and replies up to this many bytes; well under what an agent CLI accepts as an argument.
 pub const MAX_TASK_BYTES: usize = 100_000;
-pub const ALLOWED_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 pub fn router(state: AppState) -> Router {
     let dev = Router::new()
@@ -149,12 +148,15 @@ async fn create_run(
     if task.len() > MAX_TASK_BYTES {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("task is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
     }
-    if !ALLOWED_MODELS.contains(&req.model.as_str()) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            format!("model must be one of {}", ALLOWED_MODELS.join(", ")),
-        ));
-    }
+    let agent = match req.agent.as_deref().map(str::trim) {
+        None | Some("") => Agent::Claude,
+        Some(a) => Agent::parse(a).ok_or_else(|| {
+            let all: Vec<&str> = sidefleet_core::AGENTS.iter().map(Agent::as_str).collect();
+            ApiError(StatusCode::BAD_REQUEST, format!("agent must be one of {}", all.join(", ")))
+        })?,
+    };
+    let model = req.model.trim();
+    agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let repo = req.repo.trim();
     if repo.is_empty() || repo.contains("..") || repo.starts_with('/') {
         return Err(ApiError(StatusCode::BAD_REQUEST, "repo must be a relative repo name".into()));
@@ -170,9 +172,10 @@ async fn create_run(
         Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
-    let (run, ev) = db::create_run(&state.pool, task, &req.model, repo, mode, isolation, worker).await?;
+    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker };
+    let (run, ev) = db::create_run(&state.pool, new).await?;
     state.events.publish(ev);
-    tracing::info!(run_id = %run.id, model = %run.model, repo = %run.repo, "run queued");
+    tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
 }
 
@@ -212,7 +215,7 @@ async fn get_thread(
     Ok(Json(db::thread_runs(&state.pool, run.parent_id.unwrap_or(run.id)).await?))
 }
 
-/// Continue the conversation: queue a run that resumes the thread's Claude Code session.
+/// Continue the conversation: queue a run that resumes the thread's session, with the same agent.
 async fn follow_up(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -226,12 +229,11 @@ async fn follow_up(
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("message is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
     }
     if let Some(m) = &req.model {
-        if !ALLOWED_MODELS.contains(&m.as_str()) {
-            return Err(ApiError(StatusCode::BAD_REQUEST, format!("model must be one of {}", ALLOWED_MODELS.join(", "))));
-        }
+        let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
+        run.agent.check_model(m.trim()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     }
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    match db::create_follow_up(&state.pool, id, task, req.model.as_deref(), mode).await? {
+    match db::create_follow_up(&state.pool, id, task, req.model.as_deref().map(str::trim), mode).await? {
         FollowUpOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");
@@ -239,7 +241,7 @@ async fn follow_up(
         }
         FollowUpOutcome::NotFound => Err(not_found()),
         FollowUpOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the previous message is still running; wait for it to finish or stop it".into())),
-        FollowUpOutcome::NoSession(_) => Err(ApiError(StatusCode::CONFLICT, "this thread has no Claude Code session to resume; start a new task instead".into())),
+        FollowUpOutcome::NoSession(_) => Err(ApiError(StatusCode::CONFLICT, "this thread has no agent session to resume; start a new task instead".into())),
     }
 }
 
@@ -514,7 +516,9 @@ async fn claim_run(
     if req.repos.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    match db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos).await? {
+    // Workers from before multi-agent support only run Claude Code.
+    let agents = if req.agents.is_empty() { vec![Agent::Claude.as_str().to_string()] } else { req.agents.clone() };
+    match db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents).await? {
         Some((run, ev)) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, worker = %req.worker_id, "run claimed");

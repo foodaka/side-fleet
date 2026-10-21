@@ -118,9 +118,28 @@
 				<Tooltip.Content>{c.agents.claude.signed_in ? 'Signed in; tasks run with this account' : 'Not signed in: run `claude` on this machine once'}</Tooltip.Content>
 			</Tooltip.Root>
 		{/if}
-		{#if c.agents.codex}<span class="inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs">Codex <span class="tnum text-muted-foreground">{c.agents.codex.version}</span></span>{/if}
+		{#if c.agents.codex}
+			{@const out = c.agents.codex.signed_in === false}
+			<Tooltip.Root>
+				<Tooltip.Trigger class="inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs {out ? 'border-err/40 text-err-ink' : ''}">
+					{#if out}<TriangleAlert class="size-3.5" />{:else if c.agents.codex.signed_in}<CircleCheck class="size-3.5 text-ok" />{/if}
+					Codex <span class="tnum text-muted-foreground">{c.agents.codex.version}</span>
+				</Tooltip.Trigger>
+				<Tooltip.Content>{out ? 'Not signed in: run `codex login` on this machine once' : c.agents.codex.signed_in ? `Signed in; ${c.agents.codex.models?.length ?? 0} models` : 'Sign-in not checked (older Sidefleet)'}</Tooltip.Content>
+			</Tooltip.Root>
+		{/if}
+		{#if c.agents.opencode}
+			{@const none = !c.agents.opencode.models_total}
+			<Tooltip.Root>
+				<Tooltip.Trigger class="inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs {none ? 'border-err/40 text-err-ink' : ''}">
+					{#if none}<TriangleAlert class="size-3.5" />{:else}<CircleCheck class="size-3.5 text-ok" />{/if}
+					opencode <span class="tnum text-muted-foreground">{none ? c.agents.opencode.version : `${c.agents.opencode.models_total} models`}</span>
+				</Tooltip.Trigger>
+				<Tooltip.Content>{none ? 'No provider set up: run `opencode auth login` on this machine (e.g. OpenRouter)' : `Version ${c.agents.opencode.version}`}</Tooltip.Content>
+			</Tooltip.Root>
+		{/if}
 		{#if c.agents.ollama}<span class="inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs">Ollama <span class="tnum text-muted-foreground">{c.agents.ollama.models.length} models</span></span>{/if}
-		{#if !c.agents.claude && !c.agents.codex && !c.agents.ollama}<span class="inline-flex h-6 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">No coding agent found</span>{/if}
+		{#if !c.agents.claude && !c.agents.codex && !c.agents.opencode}<span class="inline-flex h-6 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">No coding agent found</span>{/if}
 		<button type="button" onclick={() => (fleet.pickerOpen = true)} class="inline-flex h-6 items-center rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
 			<span class="tnum">{repos} repos{fleet.added?.size ? `, ${chosen} chosen` : ''}</span>
 		</button>

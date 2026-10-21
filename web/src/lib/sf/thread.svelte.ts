@@ -2,6 +2,7 @@ import { api } from './api';
 import { followRun } from './sse';
 import { fleet } from './state.svelte';
 import type { Run, RunEvent } from './types';
+import { agentName } from './format';
 
 export type Item =
 	| { kind: 'text'; key: string; text: string; at: string }
@@ -37,6 +38,8 @@ export interface Turn {
 		durationMs: number | null;
 		turns: number | null;
 		cost: number | null;
+		/** Tokens used, for agents that report no cost (Codex). */
+		tokens: number | null;
 	} | null;
 	lastText: string;
 	reconnecting: boolean;
@@ -144,7 +147,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
 				t.machine = run.worker_id;
-				t.activity = 'Starting Claude Code';
+				t.activity = 'Starting ' + agentName(run.agent);
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
@@ -203,7 +206,8 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				subtype: p.subtype ?? '',
 				durationMs: p.duration_ms ?? null,
 				turns: p.num_turns ?? null,
-				cost: p.total_cost_usd ?? null
+				cost: p.total_cost_usd ?? null,
+				tokens: tokenCount(p.usage)
 			};
 			t.activity = null;
 			break;
@@ -220,4 +224,11 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			t.activity = null;
 			break;
 	}
+}
+
+/** Input plus output tokens from Codex or opencode usage. */
+function tokenCount(u: Record<string, any> | null | undefined): number | null {
+	if (!u) return null;
+	const n = (Number(u.input) || 0) + (Number(u.output) || 0);
+	return n || null;
 }

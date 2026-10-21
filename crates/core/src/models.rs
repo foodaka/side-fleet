@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::agent::Agent;
+
 /// Lifecycle of a run. Transitions: queued -> running -> succeeded|failed|stopped,
 /// and queued -> stopped when stopped before any worker claimed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +51,10 @@ impl RunStatus {
 pub struct Run {
     pub id: Uuid,
     pub task: String,
+    /// Which coding agent runs the task; a thread keeps the agent of its first run.
+    #[serde(default = "default_agent")]
+    pub agent: Agent,
+    /// Model id for that agent; empty means the machine's default (Codex, opencode).
     pub model: String,
     pub repo: String,
     pub status: RunStatus,
@@ -61,21 +67,25 @@ pub struct Run {
     /// Root run of the thread this run continues (None for a root).
     #[serde(default)]
     pub parent_id: Option<Uuid>,
-    /// Claude Code session id reported by the agent for this run.
+    /// Session id reported by the agent for this run.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Session to resume (`claude -p --resume`), set on follow-ups.
+    /// Session to resume (`claude --resume`, `codex exec resume`, `opencode run --session`), set on follow-ups.
     #[serde(default)]
     pub resume_session_id: Option<String>,
     /// Only this worker may claim the run (follow-ups must run where the session lives).
     #[serde(default)]
     pub pinned_worker_id: Option<String>,
-    /// Permission mode for Claude Code; None means the worker's default.
+    /// Permission mode (Claude Code's names; mapped for other agents); None means the worker's default.
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// `worktree` (own checkout and branch, default) or `checkout` (in place, one at a time per repo).
     #[serde(default = "default_isolation")]
     pub isolation: String,
+}
+
+pub fn default_agent() -> Agent {
+    Agent::Claude
 }
 
 pub fn default_isolation() -> String {
@@ -163,7 +173,27 @@ pub struct Agents {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<CodexAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<OpencodeAgent>,
+    /// A local model server, not an agent: opencode can use its models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ollama: Option<OllamaAgent>,
+}
+
+impl Agents {
+    /// The agents this machine can run tasks with.
+    pub fn runnable(&self) -> Vec<Agent> {
+        let mut v = Vec::new();
+        if self.claude.is_some() {
+            v.push(Agent::Claude);
+        }
+        if self.codex.is_some() {
+            v.push(Agent::Codex);
+        }
+        if self.opencode.is_some() {
+            v.push(Agent::Opencode);
+        }
+        v
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -178,6 +208,24 @@ pub struct ClaudeAgent {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexAgent {
     pub version: String,
+    /// From `codex login status`; None when not checked (older workers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// Models this machine's Codex offers (`codex debug models`, the listed ones).
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpencodeAgent {
+    pub version: String,
+    /// `provider/model` ids opencode can use here (`opencode models`), e.g.
+    /// `openrouter/moonshotai/kimi-k2`; capped, see the worker's detection.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Number of models before the cap.
+    #[serde(default)]
+    pub models_total: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -269,6 +317,11 @@ mod identity_tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRunRequest {
     pub task: String,
+    /// claude (default), codex or opencode.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// A model for that agent; may be empty for codex and opencode (the machine's default).
+    #[serde(default)]
     pub model: String,
     pub repo: String,
     /// acceptEdits (default), bypassPermissions, plan, default, dontAsk.
@@ -282,7 +335,7 @@ pub struct CreateRunRequest {
     pub worker_id: Option<String>,
 }
 
-/// Continue a thread: a new run that resumes the previous Claude Code session.
+/// Continue a thread: a new run that resumes the previous session with the same agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FollowUpRequest {
     pub task: String,
@@ -340,6 +393,10 @@ pub struct ClaimRequest {
     /// Repos where an in-place (`checkout`) run is active; runs for these are skipped.
     #[serde(default)]
     pub busy_repos: Vec<String>,
+    /// Agents installed on this machine (claude, codex, opencode). Empty from
+    /// older workers, which only run Claude Code.
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -2,11 +2,12 @@
 
 **Run coding agents on your own machines, from anywhere.**
 
-Type a task on a web page, pick a model and a repo, and a machine you own picks it up: your desk
-Mac, a Mac mini, a VPS. It runs Claude Code in its own git worktree and streams the agent's
-narration back live; reply to keep the conversation going. No API keys: it drives the Claude Code
-sign-in already on that machine. No open ports: machines only make outbound calls to your control
-plane. One Rust binary, macOS and Linux.
+Type a task on a web page, pick an agent, a model and a repo, and a machine you own picks it up:
+your desk Mac, a Mac mini, a VPS. It runs Claude Code, Codex or opencode in its own git worktree
+and streams the agent's narration back live; reply to keep the conversation going. No API keys for
+Claude or Codex: it drives the sign-in already on that machine. opencode brings any other model
+(Kimi, GLM, DeepSeek, Qwen through OpenRouter, or local ones). No open ports: machines only make
+outbound calls to your control plane. One Rust binary, macOS and Linux.
 
 ![A task running on a VPS, streamed live to the page](docs/screenshots/run-live.png)
 
@@ -15,12 +16,15 @@ plane. One Rust binary, macOS and Linux.
                               ▲
                               │ outbound HTTP only (register, heartbeat, claim, events)
                               │
-                       sidefleet run ──spawns──▶ claude -p "<task>" --output-format stream-json
+                       sidefleet run ──spawns──▶ claude -p / codex exec --json / opencode run --format json
                        (worker on your Mac, VPS, Linux box: cwd = the repo)
 ```
 
 ## Features
 
+- **Bring your agent**: Claude Code, Codex or opencode, chosen per task. Each one runs as its own
+  CLI with its own sign-in, and its output is mapped to the same live view. Tasks only go to
+  machines that have the chosen agent.
 - **Your machines, one page**: every connected machine with its repos, agents, CPU and running
   tasks on a live fleet map; tasks go to any machine that has the repo, or pin one to a machine.
 - **Isolated by default**: each task gets its own git worktree and branch (`sidefleet/<id>`), so
@@ -92,13 +96,33 @@ runs a worker on it too, so a single box is one command.
 
 **2. Open the page** and paste the developer key.
 
-**3. Connect more machines.** On any machine with Claude Code signed in, run the install line, then
-the connect line the page shows you. The page switches to the compose box as soon as the first
+**3. Connect more machines.** On any machine with an agent set up (see [Agents](#agents)), run the
+install line, then the connect line the page shows you. The page switches to the compose box as soon as the first
 heartbeat lands.
 
 Across networks, put the control plane on [Tailscale](https://tailscale.com) and use its tailnet
 IP: no port forwarding, no public exposure. Running it on a VPS or a spare machine is covered in
 [HOSTING.md](HOSTING.md).
+
+## Agents
+
+| Agent | Set it up on the machine | Models |
+|---|---|---|
+| Claude Code | `claude`, sign in once | Opus, Sonnet, Haiku |
+| Codex | `codex login` (ChatGPT sign-in or API key) | what `codex debug models` lists for the account, or its default |
+| opencode | `opencode auth login`, e.g. OpenRouter; or add `OPENROUTER_API_KEY=…` to `~/.sidefleet/worker.env` | any `provider/model` it lists, e.g. `openrouter/moonshotai/kimi-k2` |
+
+`sidefleet connect` reports which agents it found and whether they are signed in, and the Machines
+page shows the same. Local models (Ollama, LM Studio) run through opencode once you add them as an
+opencode provider.
+
+The page's permission modes map onto each agent:
+
+| Mode | Claude Code | Codex | opencode |
+|---|---|---|---|
+| Read & edit files | `acceptEdits` | sandbox `workspace-write` (commands run sandboxed, no network) | shell denied |
+| Full access | `bypassPermissions` | no sandbox | all permissions granted |
+| Read only | `plan` | sandbox `read-only` | `plan` agent, edits, shell and fetches denied |
 
 ## Command line
 
@@ -136,7 +160,7 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
 
 ## Layout
 
-- `crates/core`: shared models, stream-json → event mapping, redaction.
+- `crates/core`: shared models, the agents and the mapping of each one's output to events, redaction.
 - `crates/server`: Axum control plane, Postgres via sqlx migrations; embeds the web app.
 - `crates/worker`: machine detection, control-plane client, process-group executor, worker loop.
 - `crates/cli`: the `sidefleet` binary.
@@ -144,13 +168,18 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
 
 ## Known limitations
 
-- **This drives your own Claude Code sign-in, headless.** Usage counts against that account's
-  plan. Check the terms that apply to your subscription for automated or unattended use, and never
-  share or resell access to the account through it. Anthropic's Remote Control and cloud sessions
-  cover a similar moment natively; Sidefleet is the vendor-neutral, your-own-machines version.
+- **This drives your own agent sign-ins, headless** (Claude, ChatGPT, or the API keys opencode
+  uses). Usage counts against those accounts' plans or bills. Check the terms that apply to your
+  subscriptions for automated or unattended use, and never share or resell access to an account
+  through it.
 - One shared developer key, no users or roles, no built-in TLS. Keep the control plane on a private
   network (LAN or Tailscale), or put TLS in front of it.
-- Only Claude Code executes tasks; Codex and Ollama are detected but not run yet.
+- A thread keeps the agent it started with; switching agents means a new task.
+- Codex's sandbox only writes inside the worktree, and a worktree's git data lives in the main
+  checkout, so `git commit` by Codex can fail under "Read & edit files". Commit from the branch
+  afterwards, or use Full access.
+- opencode's output format was mapped from its source (1.19), not yet from a live run; its cost is
+  what opencode reports per step.
 - Tool permission prompts are not relayed to the page; whatever the mode does not allow is denied.
 - Worktrees start from the repo's `HEAD` without untracked or ignored files (`node_modules`,
   `.env`), and are kept until you remove them (`git worktree remove`, or delete the folder under

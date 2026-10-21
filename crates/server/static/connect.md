@@ -1,18 +1,25 @@
 # Connect this machine to Sidefleet
 
 You are connecting this machine to a Sidefleet control plane at `{{ORIGIN}}`, so the person
-who runs it can start coding-agent tasks here from a web page. The worker uses the Claude Code
-sign-in that already exists on this machine, makes only outbound HTTP calls to that address, and
-needs no open ports. The user will give you a **worker token**. Treat it as a secret: never print
+who runs it can start coding-agent tasks here from a web page. The worker runs the coding agents
+already set up on this machine (Claude Code, Codex and/or opencode) with their existing sign-ins,
+makes only outbound HTTP calls to that address, and needs no open ports. The user will give you a **worker token**. Treat it as a secret: never print
 it, never commit it, and keep it out of your final summary.
 
 Do these steps in order and stop to ask if one fails.
 
-## 1. Check Claude Code
+## 1. Check the coding agents
 
-Run `claude --version`, then `claude -p "Reply with OK" --max-turns 1` and confirm it prints OK.
-If it reports a sign-in problem, stop and tell the user to run `claude` once and sign in; the
-worker cannot work without that.
+At least one of these must work; check each that is installed:
+
+- Claude Code: `claude --version`, then `claude -p "Reply with OK" --max-turns 1` prints OK.
+  On a sign-in problem, tell the user to run `claude` once and sign in.
+- Codex: `codex --version`, then `codex login status` says it is logged in. Otherwise tell the
+  user to run `codex login`.
+- opencode: `opencode --version`, then `opencode models` lists at least one model. Otherwise tell
+  the user to run `opencode auth login` (for example with an OpenRouter key).
+
+If none of them works, stop and tell the user; the worker takes no tasks without an agent.
 
 ## 2. Install Sidefleet
 
@@ -39,5 +46,6 @@ for its LAN or Tailscale address and retry.
 
 ## 4. Confirm and report
 
-Run `sidefleet status`. Tell the user the machine's name, how many repos were found, and that it
-should now show as online at {{ORIGIN}}/#/machines. Do not include the token.
+Run `sidefleet status`. Tell the user the machine's name, which agents it found, how many repos
+were found, and that it should now show as online at {{ORIGIN}}/#/machines. Do not include the
+token.

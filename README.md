@@ -2,10 +2,15 @@
 
 Run coding agents on your own machines, from anywhere.
 
-You type a task on a web page and pick a model. A machine you own that has Claude Code signed
-in and the repo checked out picks it up, runs it, and streams the agent's narration back live.
-No API keys: it drives the Claude Code sign-in that is already on that machine. No open ports:
-machines only make outbound calls to your control plane.
+Type a task on a web page and pick a model. A machine you own picks it up, runs Claude Code
+in the repo, and streams the agent's narration back to the page live. When it finishes, reply
+to keep going in the same session.
+
+- **No API keys.** It drives the Claude Code sign-in already on each machine.
+- **No open ports.** Machines only make outbound calls to your control plane.
+- **Your checkout stays clean.** Each task gets its own git worktree and branch.
+
+![A task running on a VPS, streamed live to the page](docs/screenshots/run-live.png)
 
 ```
  browser ──HTTP/SSE──▶ sidefleet serve   (control plane: web page + API + Postgres)
@@ -24,28 +29,34 @@ One binary, no sudo, macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh
 ```
 
-It downloads a prebuilt `sidefleet` into `~/.local/bin` when a release exists for your platform,
-otherwise it builds from source (installing Rust if needed, a few minutes).
+This puts `sidefleet` in `~/.local/bin`. It downloads a prebuilt binary when a release exists
+for your platform; otherwise it builds from source (installing Rust if needed, a few minutes).
 
-While the repository is private, GitHub returns 404 for that raw URL. Either make the repo public,
-or install with the GitHub CLI signed in (`gh auth login`), which the script then uses for the
-release download and the source clone:
+<details>
+<summary>While the repository is private</summary>
+
+GitHub returns 404 for the raw URL above. Use the GitHub CLI instead (`gh auth login` first);
+the script then uses it for the release download and the source clone:
 
 ```bash
 gh api repos/foodaka/side-fleet/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
 ```
 
-Or clone it (over SSH with your GitHub key) and run the script from the checkout; it then builds
-from that folder and never contacts GitHub:
+Or clone over SSH and run the script from the checkout. It builds from that folder and never
+contacts GitHub:
 
 ```bash
 git clone git@github.com:foodaka/side-fleet.git && sh side-fleet/install.sh
 ```
 
-## Set up in three steps
+</details>
 
-**1. Start the control plane** on the machine that will host the page (your desk Mac, a Mac mini,
-a VPS). It needs Postgres; the easiest is Docker:
+## Quick start
+
+### 1. Start the control plane
+
+Pick the machine that will host the page (your desk Mac, a Mac mini, a VPS). It needs Postgres;
+the easiest way is Docker:
 
 ```bash
 docker run -d --name sidefleet-db --restart unless-stopped \
@@ -57,11 +68,6 @@ sidefleet serve
 On first run it generates a developer key and a worker token, saves them to
 `~/.sidefleet/server.env`, and prints:
 
-If that machine has a coding agent installed (Claude Code, Codex or Ollama), `serve` also runs
-a worker on it, so a single box is one command (`--no-worker` turns that off; checkouts are
-found under the home folder, `--repos` overrides). Only Claude Code executes tasks in this version; the others are
-reported as capabilities.
-
 ```
 Sidefleet control plane is running.
 
@@ -70,42 +76,86 @@ Sidefleet control plane is running.
   Connect a machine:    sidefleet connect --control http://192.168.1.20:7373 --token 7b2e…
 ```
 
-**2. Open the page** and paste the developer key. You land on "Connect your first machine".
+If this machine has a coding agent installed (Claude Code, Codex or Ollama), `serve` also runs a
+worker on it, so a single box needs only this one command. `--no-worker` turns that off;
+checkouts are found under the home folder unless you pass `--repos`. Only Claude Code
+executes tasks in this version; Codex and Ollama are reported as capabilities.
 
-**3. Connect a machine.** On any machine with Claude Code signed in (the control plane machine
-itself is fine), run the install line, then the connect line the page shows you:
+### 2. Open the page
+
+Open the printed URL and paste the developer key. You land on "Connect your first machine".
+
+### 3. Connect more machines
+
+On any machine with Claude Code signed in, run the install line, then the connect line the page
+shows you:
 
 ```bash
 sidefleet connect --control http://192.168.1.20:7373 --token 7b2e…
 ```
 
-`connect` checks Claude Code and its sign-in, finds your git checkouts (home folder, three levels
-deep, skipping hidden and build folders; `--repos <folder>` overrides), registers
-once, saves the settings to `~/.sidefleet/worker.env`, and installs a background service
-(launchd on macOS, a systemd user unit on Linux) so the worker keeps running and comes back after
-reboots. The page flips from onboarding to the compose box the moment the first heartbeat lands.
+`connect` does the following:
 
-Even lazier: the page has a "Copy prompt" button. Paste that into Claude Code on the other
-machine and it does steps 2 and 3 for you by reading `http://<control plane>/connect.md`.
+1. Checks Claude Code and its sign-in.
+2. Finds your git checkouts: the home folder, three levels deep, skipping hidden and build
+   folders. `--repos <folder>` overrides this.
+3. Registers the machine and saves the settings to `~/.sidefleet/worker.env`.
+4. Installs a background service (launchd on macOS, a systemd user unit on Linux), so the worker
+   keeps running and comes back after reboots.
 
-Then type a task, pick a model, a repo and what the agent may do (read and edit files by default,
-full access when it should run commands, read only for questions), press the arrow, and watch it
-run. Each task gets its **own git worktree and branch** (`sidefleet/<id>`) under
-`~/.sidefleet/worktrees` on that machine, so several tasks on the same repo run side by side
-without touching each other or your checkout; when a task finishes, merge or push its branch.
-Pick "In place" instead for work that needs the real checkout (installed dependencies, local
-config); in-place tasks run one at a time per repo. A machine runs up to three tasks at once
-(`--parallel`). When it finishes, reply in the box at the bottom: the reply continues the same Claude Code
-session on the same machine, and the page shows the whole thread like a chat.
+The page switches from onboarding to the task box as soon as the first heartbeat lands.
 
-Hosting the control plane on a VPS or a spare machine, including a prompt you can hand to Claude
-Code there to do the setup: see [HOSTING.md](HOSTING.md).
+**Shortcut:** the page has a "Copy prompt" button. Paste that prompt into Claude Code on the
+other machine and it does the install and connect steps for you by reading
+`http://<control plane>/connect.md`.
+
+To host the control plane on a VPS or a spare machine, see [HOSTING.md](HOSTING.md). It
+includes a prompt you can hand to Claude Code there to do the setup.
+
+## Using it
+
+![The task box and recent runs](docs/screenshots/home.png)
+
+Type a task, then pick:
+
+- **Model:** Opus, Sonnet or Haiku.
+- **Repo:** matched by git remote, so the same project is found on every machine whatever its
+  folder is called.
+- **Machine:** any machine that has the repo (whichever is free first), or pin it to one.
+- **Permissions:** read and edit files (the default), full access when the agent should run
+  commands, or read only for questions.
+- **Workspace:** its own branch (the default) or in place.
+
+Press the arrow and watch it run.
+
+**Own branch.** Each task gets its own git worktree and branch (`sidefleet/<id>`) under
+`~/.sidefleet/worktrees` on that machine. Several tasks on the same repo run side by side without
+touching each other or your checkout. When a task finishes, merge or push its branch.
+
+**In place.** Use this for work that needs the real checkout, such as installed dependencies or
+local config. In-place tasks run one at a time per repo.
+
+A machine runs up to three tasks at once (`--parallel` changes this).
+
+**Follow-ups.** When a task finishes, reply in the box at the bottom. The reply continues the
+same Claude Code session on the same machine and branch, and the page shows the whole thread
+like a chat.
+
+![A finished thread, ready for a follow-up](docs/screenshots/run-thread.png)
+
+**Machines.** The Machines page shows every connected machine: whether it is online, CPU, memory,
+disk, busy task slots, the agents it has and its Sidefleet build, with a live map of heartbeats
+and tasks.
+
+![The Machines page](docs/screenshots/machines.png)
+
+## Reference
 
 ### Reaching the control plane from other machines
 
 Workers need to reach the address you gave `--control`. On one LAN the printed IP works. Across
-networks, put the control plane on [Tailscale](https://tailscale.com) and use its tailnet IP; no
-port forwarding, no public exposure. If you do expose it publicly, put TLS in front of it.
+networks, put the control plane on [Tailscale](https://tailscale.com) and use its tailnet IP: no
+port forwarding and no public exposure. If you do expose it publicly, put TLS in front of it.
 
 ### Worker commands
 

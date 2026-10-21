@@ -24,8 +24,8 @@
 	};
 	let model = $state(initialModel(savedAgent));
 	let machine = $state(load('sidefleet_machine'));
-	let perm = $state('acceptEdits');
-	let iso = $state('worktree');
+	let perm = $state(PERMISSIONS.some((p) => p.id === load('sidefleet_perm')) ? load('sidefleet_perm') : 'acceptEdits');
+	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
 	let repo = $state(load('sidefleet_repo'));
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
@@ -254,14 +254,14 @@
 						</Select.Root>
 					{/if}
 
-					<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
+					<Select.Root type="single" value={perm} onValueChange={(v) => { perm = v; save('sidefleet_perm', v); }}>
 						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === perm)?.name}</Select.Trigger>
 						<Select.Content>
 							{#each PERMISSIONS as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
 						</Select.Content>
 					</Select.Root>
 
-					<Select.Root type="single" value={iso} onValueChange={(v) => (iso = v)}>
+					<Select.Root type="single" value={iso} onValueChange={(v) => { iso = v; save('sidefleet_iso', v); }}>
 						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Workspace">{WORKSPACES.find((w) => w.id === iso)?.name}</Select.Trigger>
 						<Select.Content>
 							{#each WORKSPACES as w (w.id)}<Select.Item value={w.id} label={w.name}><span class="flex flex-col"><span>{w.name}</span><span class="text-xs text-muted-foreground">{w.hint}</span></span></Select.Item>{/each}

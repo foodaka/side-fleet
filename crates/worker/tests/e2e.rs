@@ -1,5 +1,5 @@
 //! End to end: real worker loop against an in-process control plane and the
-//! fake agent. Needs Postgres (docker compose up -d).
+//! fake agents (Claude Code and Codex; no opencode). Needs Postgres (docker compose up -d).
 
 use std::time::Duration;
 
@@ -25,11 +25,16 @@ fn git_init(dir: &std::path::Path) {
     run(&["commit", "-q", "-m", "init"]);
 }
 
-fn fake_bin() -> String {
+fn fixture(name: &str) -> String {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/fake_claude.sh")
+        .join("tests/fixtures")
+        .join(name)
         .to_string_lossy()
         .to_string()
+}
+
+fn fake_bin() -> String {
+    fixture("fake_claude.sh")
 }
 
 struct Harness {
@@ -54,6 +59,8 @@ impl Harness {
             display_name: "Test Worker".into(),
             repos_root: repos.path().to_path_buf(),
             claude_bin: fake_bin(),
+            codex_bin: fixture("fake_codex.sh"),
+            opencode_bin: "/nonexistent/opencode".into(),
             permission_mode: "acceptEdits".into(),
             max_turns: None,
             extra_args: vec![],
@@ -90,11 +97,15 @@ impl Harness {
     }
 
     async fn create(&self, task: &str, repo: &str) -> Uuid {
+        self.create_with(task, repo, "claude", "claude-haiku-5-5").await
+    }
+
+    async fn create_with(&self, task: &str, repo: &str, agent: &str, model: &str) -> Uuid {
         let r = self
             .http
             .post(format!("{}/v1/runs", self.env.base_url))
             .bearer_auth(DEV_KEY)
-            .json(&json!({"task": task, "model": "claude-haiku-5-5", "repo": repo}))
+            .json(&json!({"task": task, "agent": agent, "model": model, "repo": repo}))
             .send()
             .await
             .unwrap();
@@ -360,5 +371,47 @@ async fn in_place_tasks_on_the_same_repo_run_one_at_a_time() {
     h.wait_status(b, RunStatus::Succeeded, Duration::from_secs(15)).await;
     let ws = sidefleet_server::db::events_since(&h.env.pool, b, 0).await.unwrap().into_iter().find(|e| e.kind == "workspace").unwrap().payload;
     assert_eq!(ws["mode"], "checkout");
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn tasks_go_to_machines_with_their_agent_and_codex_threads_resume() {
+    let h = Harness::start(3).await;
+    let ws: Vec<serde_json::Value> = h.dev_get("/v1/workers").await;
+    let codex = &ws[0]["capabilities"]["agents"]["codex"];
+    assert_eq!(codex["signed_in"], true, "{codex}");
+    assert_eq!(codex["models"], json!(["gpt-fake"]));
+    assert!(ws[0]["capabilities"]["agents"].get("opencode").is_none());
+
+    // No opencode on this machine: its task waits for a machine that has it.
+    let oc = h.create_with("for opencode", "demo", "opencode", "openrouter/moonshotai/kimi-k2").await;
+    let id = h.create_with("fix the build", "demo", "codex", "gpt-fake").await;
+    let run = h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(10)).await;
+    assert_eq!(run.agent, sidefleet_core::Agent::Codex);
+    assert_eq!(run.session_id.as_deref(), Some("fake-thread"));
+    assert_eq!(run.result.as_ref().unwrap()["result"], "task=fix the build");
+    let events = h.sse_collect(id, Duration::from_secs(3)).await;
+    let init = events.iter().find(|(e, _)| e.kind == "agent_init").expect("agent_init").0.clone();
+    assert_eq!(init.payload["agent"], "codex");
+    let started = events.iter().find(|(e, _)| e.kind == "started").unwrap().0.clone();
+    assert!(started.payload["command"].as_str().unwrap().contains("exec --json"), "{}", started.payload);
+
+    // A reply resumes the Codex thread.
+    let r = h
+        .http
+        .post(format!("{}/v1/runs/{id}/messages", h.env.base_url))
+        .bearer_auth(DEV_KEY)
+        .json(&json!({"task": "now add a test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let follow: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let run = h.wait_status(follow, RunStatus::Succeeded, Duration::from_secs(10)).await;
+    assert_eq!(run.agent, sidefleet_core::Agent::Codex);
+    assert_eq!(run.resume_session_id.as_deref(), Some("fake-thread"));
+    assert_eq!(run.result.as_ref().unwrap()["result"], "task=now add a test");
+
+    assert_eq!(h.wait_status(oc, RunStatus::Queued, Duration::from_secs(1)).await.status, RunStatus::Queued);
     h.teardown().await;
 }

@@ -11,7 +11,7 @@
 <div class="flex min-w-0 flex-col gap-4">
 	<div class="inline-flex w-fit rounded-full bg-muted p-0.5 text-[13px]" role="tablist" aria-label="How to set it up">
 		<button role="tab" aria-selected={mode === 'terminal'} class="rounded-full px-3 py-1 {mode === 'terminal' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}" onclick={() => (mode = 'terminal')}>In a terminal</button>
-		<button role="tab" aria-selected={mode === 'agent'} class="rounded-full px-3 py-1 {mode === 'agent' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}" onclick={() => (mode = 'agent')}>Ask Claude Code</button>
+		<button role="tab" aria-selected={mode === 'agent'} class="rounded-full px-3 py-1 {mode === 'agent' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}" onclick={() => (mode = 'agent')}>Ask an agent</button>
 	</div>
 
 	{#if mode === 'terminal'}
@@ -21,13 +21,13 @@
 				<Command shown={installCmd} />
 			</li>
 			<li class="flex flex-col gap-2">
-				<span class="text-[13px]"><span class="tnum mr-2 text-muted-foreground">2</span>Connect it. It checks Claude Code, finds your git checkouts, and stays connected after a reboot.</span>
+				<span class="text-[13px]"><span class="tnum mr-2 text-muted-foreground">2</span>Connect it. It checks which agents are installed and signed in, finds your git checkouts, and stays connected after a reboot.</span>
 				<Command shown={connectCmd(true)} copy={connectCmd(false)} />
 			</li>
 		</ol>
 	{:else}
 		<div class="flex flex-col gap-2">
-			<span class="text-[13px]">Paste this into Claude Code on that machine. It reads the setup steps from this control plane and does the install and connect for you.</span>
+			<span class="text-[13px]">Paste this into Claude Code or Codex on that machine. It reads the setup steps from this control plane and does the install and connect for you.</span>
 			<Command shown={agentPrompt(true)} copy={agentPrompt(false)} label="Copy prompt" wrap />
 		</div>
 	{/if}

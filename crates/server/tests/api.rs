@@ -689,3 +689,62 @@ async fn a_run_can_be_pinned_to_a_machine() {
     assert!(api.claim("w1", &["r"]).await.is_none(), "pinned run leaked to another machine");
     assert_eq!(api.claim("w2", &["r"]).await.expect("chosen machine claims it").id, id);
 }
+
+#[tokio::test]
+async fn runs_carry_an_agent_and_only_machines_with_it_claim_them() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let create = |body: Value| api.dev(reqwest::Method::POST, "/v1/runs").json(&body).send();
+
+    // Validation: known agents only, and a model that suits the agent.
+    let r = create(json!({"task": "x", "agent": "gemini", "model": "m", "repo": "r"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(r.text().await.unwrap().contains("claude, codex, opencode"));
+    let r = create(json!({"task": "x", "agent": "claude", "model": "gpt-6-luna", "repo": "r"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "a Claude Code task takes a Claude model");
+    let r = create(json!({"task": "x", "agent": "opencode", "model": "--yolo", "repo": "r"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "a model must not look like a flag");
+
+    let id_of = |v: Value| -> Uuid { v["id"].as_str().unwrap().parse().unwrap() };
+    let r = create(json!({"task": "kimi", "agent": "opencode", "model": "openrouter/moonshotai/kimi-k2", "repo": "r"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let oc = id_of(r.json().await.unwrap());
+    let r = create(json!({"task": "codex default model", "agent": "codex", "repo": "r"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED, "codex may use the machine's default model");
+    let cx = id_of(r.json().await.unwrap());
+    let (_, body) = api.create_run("no agent given", "r").await;
+    let cl = id_of(body);
+
+    let run = api.get_run(oc).await;
+    assert_eq!(run.agent, sidefleet_core::Agent::Opencode);
+    assert_eq!(run.model, "openrouter/moonshotai/kimi-k2");
+    assert_eq!(api.get_run(cx).await.model, "");
+    assert_eq!(api.get_run(cl).await.agent, sidefleet_core::Agent::Claude, "claude is the default");
+
+    let claim = |agents: Value| {
+        api.worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": "w", "repos": ["r"], "busy_repos": [], "agents": agents}))
+            .send()
+    };
+    // A worker from before agents existed sends none and only gets Claude Code tasks.
+    assert_eq!(api.claim("w", &["r"]).await.expect("old worker claims").id, cl);
+    let r = claim(json!(["claude"])).await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "no claude tasks left");
+    let r = claim(json!(["codex", "opencode"])).await.unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().id, oc, "oldest first among the agents it has");
+    let r = claim(json!(["codex"])).await.unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().id, cx);
+
+    // A follow-up keeps the thread's agent; its model is checked against that agent.
+    api.post_events("w", oc, json!([{"kind": "agent_init", "payload": {"session_id": "ses_1"}}])).await;
+    api.finish("w", oc, "succeeded", json!({})).await;
+    let reply = |body: Value| api.dev(reqwest::Method::POST, &format!("/v1/runs/{oc}/messages")).json(&body).send();
+    let r = reply(json!({"task": "more", "model": "claude-opus-5-5"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED, "any valid id is a valid opencode model");
+    let f = id_of(r.json().await.unwrap());
+    let run = api.get_run(f).await;
+    assert_eq!(run.agent, sidefleet_core::Agent::Opencode);
+    assert_eq!(run.resume_session_id.as_deref(), Some("ses_1"));
+    env.teardown().await;
+}

@@ -56,7 +56,7 @@ enum Cmd {
         /// Folder with this machine's git checkouts, for the built-in worker (default: your home folder, scanned 3 levels deep).
         #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~")]
         repos: String,
-        /// Permission mode for the built-in worker's Claude Code runs.
+        /// Default permission mode for the built-in worker's tasks.
         #[arg(long, env = "SIDEFLEET_PERMISSION_MODE", default_value = "acceptEdits")]
         permission_mode: String,
         /// How many tasks the built-in worker runs at the same time.
@@ -87,7 +87,7 @@ enum Cmd {
         /// Name shown on the Machines page (defaults to this machine's hostname).
         #[arg(long, env = "SIDEFLEET_NAME")]
         name: Option<String>,
-        /// Permission mode for Claude Code: acceptEdits (default), bypassPermissions, default, plan.
+        /// Default permission mode for tasks: acceptEdits (default), bypassPermissions, default, plan.
         #[arg(long, env = "SIDEFLEET_PERMISSION_MODE", default_value = "acceptEdits")]
         permission_mode: String,
         /// Save settings but do not install or start the background service.
@@ -112,9 +112,15 @@ enum Cmd {
         /// Claude Code executable.
         #[arg(long, env = "SIDEFLEET_CLAUDE_BIN", default_value = "claude")]
         claude_bin: String,
+        /// Codex CLI executable.
+        #[arg(long, env = "SIDEFLEET_CODEX_BIN", default_value = "codex")]
+        codex_bin: String,
+        /// opencode executable.
+        #[arg(long, env = "SIDEFLEET_OPENCODE_BIN", default_value = "opencode")]
+        opencode_bin: String,
         #[arg(long, env = "SIDEFLEET_PERMISSION_MODE")]
         permission_mode: Option<String>,
-        /// Cap on agent turns per run.
+        /// Cap on agent turns per run (Claude Code only).
         #[arg(long, env = "SIDEFLEET_MAX_TURNS")]
         max_turns: Option<u32>,
         /// Extra arguments appended to the claude command line (repeatable).
@@ -123,7 +129,7 @@ enum Cmd {
         /// Seconds between claim polls.
         #[arg(long, default_value_t = 2)]
         poll_interval: u64,
-        /// Skip the sign-in probe (a trivial `claude -p`) at start.
+        /// Skip the sign-in checks (a trivial `claude -p`, `codex login status`) at start.
         #[arg(long)]
         skip_sign_in_check: bool,
         /// How many directory levels below --repos to scan for checkouts.
@@ -143,6 +149,10 @@ enum Cmd {
         repos: String,
         #[arg(long, env = "SIDEFLEET_CLAUDE_BIN", default_value = "claude")]
         claude_bin: String,
+        #[arg(long, env = "SIDEFLEET_CODEX_BIN", default_value = "codex")]
+        codex_bin: String,
+        #[arg(long, env = "SIDEFLEET_OPENCODE_BIN", default_value = "opencode")]
+        opencode_bin: String,
         #[arg(long)]
         skip_sign_in_check: bool,
         #[arg(long, default_value_t = 3)]
@@ -266,7 +276,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Connect { control, token, repos, name, permission_mode, no_service, parallel } => connect(control, token, repos, name, permission_mode, no_service, parallel).await,
-        Cmd::Run { control, token, repos, id, name, claude_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth, parallel } => {
+        Cmd::Run { control, token, repos, id, name, claude_bin, codex_bin, opencode_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth, parallel } => {
             let control = control.context("no control plane address: run `sidefleet connect --control <url> --token <token>` first, or pass --control")?;
             let token = token.context("no worker token: run `sidefleet connect` first, or pass --token / SIDEFLEET_TOKEN")?;
             let id = id.unwrap_or_else(default_worker_id);
@@ -277,6 +287,8 @@ async fn main() -> Result<()> {
                 worker_id: id,
                 repos_root: expand_home(&repos.unwrap_or_else(|| "~".into())),
                 claude_bin,
+                codex_bin,
+                opencode_bin,
                 permission_mode: permission_mode.unwrap_or_else(|| "acceptEdits".into()),
                 max_turns,
                 extra_args: claude_args,
@@ -301,9 +313,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Status => status(),
         Cmd::Disconnect => disconnect(),
-        Cmd::Detect { repos, claude_bin, skip_sign_in_check, scan_depth } => {
+        Cmd::Detect { repos, claude_bin, codex_bin, opencode_bin, skip_sign_in_check, scan_depth } => {
             let caps = sidefleet_worker::detect::detect_all(&sidefleet_worker::detect::DetectOptions {
                 claude_bin,
+                codex_bin,
+                opencode_bin,
                 repos_root: expand_home(&repos),
                 check_sign_in: !skip_sign_in_check,
                 scan_depth,
@@ -344,7 +358,7 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     std::env::set_var("SIDEFLEET_WORKER_TOKENS", &worker_tokens);
     std::env::set_var("SIDEFLEET_BUILD", version_string());
     // Tell the page which machine hosts the control plane (when it runs a worker too).
-    let builtin_worker = !no_worker && ["claude", "codex", "ollama"].iter().any(|b| which(b)) && repos.is_dir();
+    let builtin_worker = !no_worker && ["claude", "codex", "opencode"].iter().any(|b| which(b)) && repos.is_dir();
     if builtin_worker {
         std::env::set_var("SIDEFLEET_HOST_WORKER", default_worker_id());
     }
@@ -397,7 +411,7 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     println!();
 
     // This machine is a worker too when it has any coding agent, so one box is one command.
-    let agents: Vec<&str> = [("claude", "Claude Code"), ("codex", "Codex"), ("ollama", "Ollama")]
+    let agents: Vec<&str> = [("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "opencode")]
         .iter()
         .filter(|(bin, _)| which(bin))
         .map(|(_, name)| *name)
@@ -405,14 +419,11 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     if no_worker {
         println!("  Built-in worker: off (--no-worker).");
     } else if agents.is_empty() {
-        println!("  Built-in worker: off, no coding agent found here (claude, codex or ollama). Connect machines that have one.");
+        println!("  Built-in worker: off, no coding agent found here (claude, codex or opencode). Connect machines that have one.");
     } else if !repos.is_dir() {
         println!("  Built-in worker: off, {} does not exist. Pass --repos <folder with your git checkouts>.", repos.display());
     } else {
         println!("  Built-in worker: on ({} found). Up to {parallel} tasks at a time, each in its own git worktree under {}.", agents.join(", "), worktrees_dir().display());
-        if !which("claude") {
-            println!("  Note: only Claude Code can execute tasks in this version; Codex and Ollama are listed as capabilities for now.");
-        }
         let id = default_worker_id();
         let cfg = WorkerConfig {
             control_url: format!("http://127.0.0.1:{port}"),
@@ -421,6 +432,8 @@ async fn serve(opts: ServeOpts) -> Result<()> {
             worker_id: id,
             repos_root: repos,
             claude_bin: "claude".into(),
+            codex_bin: "codex".into(),
+            opencode_bin: "opencode".into(),
             permission_mode,
             max_turns: None,
             extra_args: vec![],
@@ -484,6 +497,8 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
     println!("Checking this machine…");
     let caps = sidefleet_worker::detect::detect_all(&sidefleet_worker::detect::DetectOptions {
         claude_bin: "claude".into(),
+        codex_bin: "codex".into(),
+        opencode_bin: "opencode".into(),
         repos_root: repos_root.clone(),
         check_sign_in: true,
         scan_depth: 3,
@@ -492,13 +507,23 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
     match &caps.agents.claude {
         Some(c) if c.signed_in => println!("  Claude Code {}: signed in", c.version),
         Some(c) => println!("  Claude Code {}: NOT signed in ({}). Run `claude` once to sign in; tasks will fail until then.", c.version, c.sign_in_error.as_deref().unwrap_or("unknown")),
-        None => println!("  Claude Code: not found on PATH. Install it and sign in, then run connect again."),
+        None => println!("  Claude Code: not found"),
     }
-    if let Some(c) = &caps.agents.codex {
-        println!("  Codex {}", c.version);
+    match &caps.agents.codex {
+        Some(c) if c.signed_in == Some(false) => println!("  Codex {}: NOT signed in. Run `codex login` once; Codex tasks will fail until then.", c.version),
+        Some(c) => println!("  Codex {}: signed in, {} models", c.version, c.models.len()),
+        None => println!("  Codex: not found"),
+    }
+    match &caps.agents.opencode {
+        Some(o) if o.models_total == 0 => println!("  opencode {}: no providers set up. Run `opencode auth login` (e.g. OpenRouter) so it has models.", o.version),
+        Some(o) => println!("  opencode {}: {} models", o.version, o.models_total),
+        None => println!("  opencode: not found"),
     }
     if let Some(o) = &caps.agents.ollama {
-        println!("  Ollama {} ({} models)", o.version, o.models.len());
+        println!("  Ollama {} ({} models; add it as an opencode provider to run tasks with them)", o.version, o.models.len());
+    }
+    if caps.agents.runnable().is_empty() {
+        println!("  No coding agent found. Install Claude Code, Codex or opencode and sign in, then run connect again; until then this machine takes no tasks.");
     }
     println!("  {} git checkouts under {}", caps.repos.len(), repos_root.display());
     if caps.repos.is_empty() {
@@ -522,7 +547,14 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
         "SIDEFLEET_CONTROL={control}\nSIDEFLEET_TOKEN={token}\nSIDEFLEET_REPOS={}\nSIDEFLEET_NAME={display}\nSIDEFLEET_PERMISSION_MODE={permission_mode}\nSIDEFLEET_PARALLEL={parallel}\n",
         repos_root.display()
     );
-    write_private(&worker_env_path(), &env)?;
+    // Keep anything else the user added (e.g. OPENROUTER_API_KEY for opencode).
+    let kept: String = std::fs::read_to_string(worker_env_path())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("SIDEFLEET_"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    write_private(&worker_env_path(), &format!("{env}{kept}"))?;
     println!("Saved settings to {}", worker_env_path().display());
 
     if no_service {
@@ -728,7 +760,7 @@ fn nix_uid() -> u32 {
         .unwrap_or(501)
 }
 
-/// PATH for the service: the user's PATH at connect time, so `claude` is found.
+/// PATH for the service: the user's PATH at connect time, so `claude`, `codex` and `opencode` are found.
 fn service_path() -> String {
     let mut p = std::env::var("PATH").unwrap_or_default();
     for extra in ["/usr/local/bin", "/opt/homebrew/bin", &format!("{}/.local/bin", home().display()), &format!("{}/.cargo/bin", home().display())] {
@@ -748,7 +780,8 @@ fn status() -> Result<()> {
     println!("Settings ({})", p.display());
     for line in std::fs::read_to_string(&p)?.lines() {
         if let Some((k, v)) = line.split_once('=') {
-            let v = if k == "SIDEFLEET_TOKEN" { mask(v) } else { v.to_string() };
+            let secret = ["TOKEN", "KEY", "SECRET", "PASSWORD"].iter().any(|w| k.to_ascii_uppercase().contains(w));
+            let v = if secret { mask(v) } else { v.to_string() };
             println!("  {k} = {v}");
         }
     }

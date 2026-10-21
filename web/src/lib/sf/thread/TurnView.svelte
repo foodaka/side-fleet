@@ -4,7 +4,7 @@
 	import { Shimmer } from '#lib/components/ai-elements/shimmer';
 	import * as Collapsible from '#lib/components/ui/collapsible';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
-	import { clock, modelName, permName, repoLabel } from '../format';
+	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
 	import ToolRow from './ToolRow.svelte';
 	import type { Turn } from '../thread.svelte';
 
@@ -40,11 +40,11 @@
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
-						Waiting for {run.pinned_worker_id ?? 'a machine that has ' + repoLabel(run.repo)}…
+						Waiting for {run.pinned_worker_id ?? `a machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}…
 					{:else}
 						{run.resume_session_id ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
 						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}
-						{#if turn.sessionModel || run.model}<span>with {modelName(run.model)}</span>{/if}
+						<span>with {agentModel(run.agent, run.model)}</span>
 					{/if}
 				</Collapsible.Trigger>
 				{#if turn.command}
@@ -85,10 +85,10 @@
 				<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.result.text} /></div>
 			{/if}
 			<p class="tnum flex flex-wrap gap-x-3 pt-1 text-xs text-muted-foreground">
-				{#if !turn.result.ok}<span class="text-err-ink">Claude Code reported an error{turn.result.subtype ? ` (${turn.result.subtype})` : ''}</span>{/if}
+				{#if !turn.result.ok}<span class="text-err-ink">{agentName(run.agent)} reported an error{turn.result.subtype && turn.result.subtype !== 'error' ? ` (${turn.result.subtype})` : ''}</span>{/if}
 				{#if turn.result.durationMs != null}<span>{(turn.result.durationMs / 1000).toFixed(1)}s</span>{/if}
 				{#if turn.result.turns != null}<span>{turn.result.turns} turn{turn.result.turns === 1 ? '' : 's'}</span>{/if}
-				{#if turn.result.cost != null}<span>${turn.result.cost.toFixed(4)}</span>{/if}
+				{#if turn.result.cost != null}<span>${turn.result.cost.toFixed(4)}</span>{:else if turn.result.tokens}<span>{turn.result.tokens.toLocaleString()} tokens</span>{/if}
 			</p>
 		{/if}
 	</div>

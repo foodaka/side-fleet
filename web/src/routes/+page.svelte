@@ -6,14 +6,23 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { MODELS, PERMISSIONS, WORKSPACES, modelName, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, hasAgent, machineModels, modelName, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
 	const PICK = '__pick__';
 	const ANY = '__any__';
 	let task = $state('');
-	let model = $state(MODELS.some((m) => m.id === load('sidefleet_model')) ? load('sidefleet_model') : 'claude-sonnet-5-5');
+	const savedAgent: AgentId = AGENTS.some((a) => a.id === load('sidefleet_agent')) ? (load('sidefleet_agent') as AgentId) : 'claude';
+	let agent = $state<AgentId>(savedAgent);
+	// One remembered model per agent; the Claude one keeps its old key.
+	const modelKey = (a: AgentId) => (a === 'claude' ? 'sidefleet_model' : `sidefleet_model_${a}`);
+	const initialModel = (a: AgentId) => {
+		const m = load(modelKey(a));
+		return a === 'claude' ? (MODELS.some((x) => x.id === m) ? m : 'claude-sonnet-5-5') : m;
+	};
+	let model = $state(initialModel(savedAgent));
 	let machine = $state(load('sidefleet_machine'));
 	let perm = $state(PERMISSIONS.some((p) => p.id === load('sidefleet_perm')) ? load('sidefleet_perm') : 'acceptEdits');
 	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
@@ -35,13 +44,25 @@
 		const first = repos.find((r) => online.has(r));
 		if (first) repo = first;
 	});
-	/** Online machines that have the repo; the menu only shows when there is a choice. */
-	const machines = $derived(repo ? fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo)) : []);
-	// The remembered machine applies only where it has the repo; otherwise any machine.
+	/** Online machines that have the repo. */
+	const withRepo = $derived(repo ? fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo)) : []);
+	/** ...and the agent; the machine menu only shows when there is a choice. */
+	const machines = $derived(withRepo.filter((w) => hasAgent(w, agent)));
+	// The remembered machine applies only where it has the repo and agent; otherwise any machine.
 	const pinned = $derived(machines.find((w) => w.id === machine));
-	const target = $derived(pinned ?? (repo ? fleet.workerFor(repo) : undefined));
-	const claude = $derived(target?.capabilities.agents.claude);
-	const canRun = $derived(!!task.trim() && !!repo && online.has(repo) && !busy);
+	const target = $derived(pinned ?? machines[0]);
+	const models = $derived(machineModels(pinned ? [pinned] : machines, agent));
+	const modelOk = $derived(agent === 'claude' ? MODELS.some((m) => m.id === model) : /^[A-Za-z0-9._:/@+-]*$/.test(model) && !model.startsWith('-'));
+	const canRun = $derived(!!task.trim() && !!repo && machines.length > 0 && modelOk && !busy);
+	/** Why the chosen machine may fail the task, if it can tell. */
+	const warning = $derived.by(() => {
+		const a = target?.capabilities.agents;
+		if (!a) return '';
+		if (agent === 'claude' && a.claude && !a.claude.signed_in) return 'where Claude Code is not signed in';
+		if (agent === 'codex' && a.codex?.signed_in === false) return 'where Codex is not signed in (run `codex login` there)';
+		if (agent === 'opencode' && a.opencode && !a.opencode.models_total) return 'where opencode has no provider set up (run `opencode auth login` there)';
+		return '';
+	});
 
 	function pickRepo(v: string) {
 		if (v === PICK) { fleet.pickerOpen = true; return; }
@@ -49,9 +70,22 @@
 		save('sidefleet_repo', v);
 	}
 
+	// When no machine with this repo has the chosen agent, switch to one that does (not remembered).
+	$effect(() => {
+		if (!withRepo.length || machines.length) return;
+		const other = AGENTS.find((a) => withRepo.some((w) => hasAgent(w, a.id)));
+		if (other && other.id !== agent) { agent = other.id; model = initialModel(other.id); }
+	});
+
+	function pickAgent(v: string) {
+		agent = v as AgentId;
+		save('sidefleet_agent', v);
+		model = initialModel(agent);
+	}
+
 	function pickModel(v: string) {
-		model = v;
-		save('sidefleet_model', v);
+		model = v.trim();
+		save(modelKey(agent), model);
 	}
 
 	function pickMachine(v: string) {
@@ -66,7 +100,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id })
+				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id })
 			});
 			task = '';
 			void fleet.refresh();
@@ -115,7 +149,7 @@
 					{fleet.workers.map((w) => w.display_name).join(', ')} {fleet.workers.length === 1 ? 'has' : 'have'} stopped checking in.
 					Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or connect another machine below.
 				{:else}
-					Sidefleet runs tasks with the Claude Code that's already signed in on your own machines, and streams what it does back here.
+					Sidefleet runs tasks with the coding agents already set up on your own machines (Claude Code, Codex or opencode) and streams what they do back here.
 					Connect a laptop, a Mac mini or a VPS; it needs no open ports.
 				{/if}
 			</p>
@@ -144,12 +178,51 @@
 				></textarea>
 				<div class="flex items-end gap-2 px-3 pb-3">
 					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-					<Select.Root type="single" value={model} onValueChange={pickModel}>
-						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Model">{modelName(model)}</Select.Trigger>
+					<Select.Root type="single" value={agent} onValueChange={pickAgent}>
+						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Agent">{agentName(agent)}</Select.Trigger>
 						<Select.Content>
-							{#each MODELS as m (m.id)}<Select.Item value={m.id} label={m.name}><span class="flex flex-col"><span>{m.name}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
+							{#each AGENTS as a (a.id)}
+								{@const n = withRepo.filter((w) => hasAgent(w, a.id)).length}
+								<Select.Item value={a.id} label={a.name} disabled={!!repo && n === 0}>
+									<span class="flex flex-col"><span>{a.name}</span><span class="text-xs text-muted-foreground">{repo && n === 0 ? `Not on a machine with ${repoLabel(repo)}` : a.hint}</span></span>
+								</Select.Item>
+							{/each}
 						</Select.Content>
 					</Select.Root>
+
+					{#if agent === 'claude'}
+						<Select.Root type="single" value={model} onValueChange={pickModel}>
+							<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Model">{modelName(model)}</Select.Trigger>
+							<Select.Content>
+								{#each MODELS as m (m.id)}<Select.Item value={m.id} label={m.name}><span class="flex flex-col"><span>{m.name}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
+							</Select.Content>
+						</Select.Root>
+					{:else if agent === 'codex' && (models.length || !model)}
+						<Select.Root type="single" value={model} onValueChange={pickModel}>
+							<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted font-mono text-[12.5px] shadow-none hover:bg-accent" aria-label="Model">{model || 'Default model'}</Select.Trigger>
+							<Select.Content>
+								<Select.Item value="" label="Default model"><span class="flex flex-col"><span>Default model</span><span class="text-xs text-muted-foreground">Whatever Codex uses on that machine</span></span></Select.Item>
+								{#if models.length}<Select.Separator />{/if}
+								{#each models as m (m)}<Select.Item value={m} label={m}><span class="font-mono text-[12.5px]">{m}</span></Select.Item>{/each}
+								{#if model && !models.includes(model)}<Select.Item value={model} label={model}><span class="font-mono text-[12.5px]">{model}</span></Select.Item>{/if}
+							</Select.Content>
+						</Select.Root>
+					{:else}
+						<!-- opencode can offer hundreds of models (OpenRouter alone): type to search them. -->
+						<label class="sr-only" for="model">Model</label>
+						<input
+							id="model"
+							list="agent-models"
+							value={model}
+							oninput={(e) => (model = e.currentTarget.value.trim())}
+							onchange={(e) => pickModel(e.currentTarget.value)}
+							placeholder="Default model"
+							spellcheck="false"
+							autocomplete="off"
+							class="h-8 w-[15rem] max-w-full rounded-full bg-muted px-3 font-mono text-[12.5px] outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {modelOk ? '' : 'text-err-ink'}"
+						/>
+						<datalist id="agent-models">{#each models as m (m)}<option value={m}></option>{/each}</datalist>
+					{/if}
 
 					<Select.Root type="single" value={repo} onValueChange={pickRepo}>
 						<Select.Trigger size="sm" class="h-8 max-w-[15rem] rounded-full border-transparent bg-muted font-mono text-[12.5px] shadow-none hover:bg-accent" aria-label="Repo">
@@ -184,7 +257,7 @@
 					<Select.Root type="single" value={perm} onValueChange={(v) => { perm = v; save('sidefleet_perm', v); }}>
 						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === perm)?.name}</Select.Trigger>
 						<Select.Content>
-							{#each PERMISSIONS as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{p.hint}</span></span></Select.Item>{/each}
+							{#each PERMISSIONS as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
 						</Select.Content>
 					</Select.Root>
 
@@ -208,11 +281,13 @@
 			<p class="min-h-5 text-center text-xs text-muted-foreground">
 				{#if !repos.length}
 					Your machines have {online.size} git checkouts. <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.pickerOpen = true)}>Choose the ones you work on</button> to fill the repo menu.
+				{:else if repo && online.has(repo) && !target}
+					None of the machines with {repoLabel(repo)} has {agentName(agent)}. Install it there, or pick another agent.
 				{:else if target}
 					{#if !pinned && machines.length > 1}
-						Runs on whichever of the {machines.length} machines with this repo is free first
+						Runs with {agentName(agent)} on whichever of the {machines.length} machines with this repo is free first
 					{:else}
-						Runs on <span class="text-foreground">{target.display_name}</span>{#if claude && !claude.signed_in}, <span class="text-err-ink">where Claude Code is not signed in</span>{/if}
+						Runs with {agentName(agent)} on <span class="text-foreground">{target.display_name}</span>{#if warning}, <span class="text-err-ink">{warning}</span>{/if}
 					{/if}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
 				{/if}
 			</p>

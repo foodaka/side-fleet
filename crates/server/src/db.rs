@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Capabilities, Run, RunEvent, RunStatus, RunSummary, Worker};
+use sidefleet_core::{Agent, Capabilities, Run, RunEvent, RunStatus, RunSummary, Worker};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -12,6 +12,7 @@ fn row_to_run(r: &PgRow) -> Run {
     Run {
         id: r.get("id"),
         task: r.get("task"),
+        agent: Agent::parse(r.get::<&str, _>("agent")).unwrap_or(Agent::Claude),
         model: r.get("model"),
         repo: r.get("repo"),
         status: RunStatus::parse(&status).unwrap_or(RunStatus::Failed),
@@ -65,7 +66,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation";
+    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -100,20 +101,24 @@ fn status_payload(status: RunStatus) -> Value {
     json!({ "status": status.as_str() })
 }
 
-pub async fn create_run(
-    pool: &PgPool,
-    task: &str,
-    model: &str,
-    repo: &str,
-    permission_mode: Option<&str>,
-    isolation: &str,
-    pinned_worker_id: Option<&str>,
-) -> sqlx::Result<(Run, RunEvent)> {
+/// A task to queue (validated by the route).
+pub struct NewRun<'a> {
+    pub task: &'a str,
+    pub agent: Agent,
+    pub model: &'a str,
+    pub repo: &'a str,
+    pub permission_mode: Option<&'a str>,
+    pub isolation: &'a str,
+    pub pinned_worker_id: Option<&'a str>,
+}
+
+pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
+    let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -122,6 +127,7 @@ pub async fn create_run(
     .bind(permission_mode)
     .bind(isolation)
     .bind(pinned_worker_id)
+    .bind(agent.as_str())
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -168,8 +174,8 @@ pub async fn create_follow_up(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -180,6 +186,7 @@ pub async fn create_follow_up(
     .bind(&worker)
     .bind(permission_mode.or(latest.permission_mode.as_deref()))
     .bind(&latest.isolation)
+    .bind(latest.agent.as_str())
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -366,6 +373,7 @@ pub async fn claim_run(
     worker_id: &str,
     repos: &[String],
     busy_repos: &[String],
+    agents: &[String],
 ) -> sqlx::Result<Option<(Run, RunEvent)>> {
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
@@ -374,6 +382,7 @@ pub async fn claim_run(
             SELECT id FROM runs WHERE status = 'queued' AND repo = ANY($2)
               AND NOT (repo = ANY($3))
               AND (pinned_worker_id IS NULL OR pinned_worker_id = $1)
+              AND agent = ANY($4)
             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
          )
          RETURNING {RUN_COLS}"
@@ -381,6 +390,7 @@ pub async fn claim_run(
     .bind(worker_id)
     .bind(repos)
     .bind(busy_repos)
+    .bind(agents)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {

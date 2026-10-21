@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a15d87-b42a-7e40-a8ef-059317c5b5d9"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"file_change","changes":[{"path":"/home/u/code/app/b.txt","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"file_change","changes":[{"path":"/home/u/code/app/b.txt","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ok"}}
+{"type":"turn.completed","usage":{"input_tokens":130684,"cached_input_tokens":111488,"cache_write_input_tokens":0,"output_tokens":524,"reasoning_output_tokens":172}}

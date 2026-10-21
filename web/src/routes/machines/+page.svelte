@@ -39,7 +39,7 @@
 	{:else}
 		<div class="rounded-xl border bg-card p-6">
 			<h2 class="mb-1 text-[15px] font-medium">No machines yet</h2>
-			<p class="mb-5 text-[13px] text-muted-foreground">Connect one that has Claude Code signed in. It needs no open ports, only a way to reach this page.</p>
+			<p class="mb-5 text-[13px] text-muted-foreground">Connect one with a coding agent set up: Claude Code, Codex or opencode. It needs no open ports, only a way to reach this page.</p>
 			<AddMachine />
 		</div>
 	{/if}
@@ -49,7 +49,7 @@
 	<Dialog.Content class="sm:max-w-[40rem]">
 		<Dialog.Header>
 			<Dialog.Title>Add a machine</Dialog.Title>
-			<Dialog.Description>Any Mac or Linux box with Claude Code signed in. It connects out to this control plane; nothing connects in.</Dialog.Description>
+			<Dialog.Description>Any Mac or Linux box with Claude Code, Codex or opencode set up. It connects out to this control plane; nothing connects in.</Dialog.Description>
 		</Dialog.Header>
 		<AddMachine />
 	</Dialog.Content>

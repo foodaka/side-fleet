@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use sidefleet_core::{map_stream_line, redact, MappedLine, NewEvent, RunStatus};
+use sidefleet_core::{redact, Agent, AgentStream, MappedLine, NewEvent, RunStatus};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
@@ -42,20 +42,33 @@ pub fn kill_all_agents() -> usize {
 
 #[derive(Debug, Clone)]
 pub struct AgentSpec {
+    pub agent: Agent,
     /// Executable, e.g. `claude` or an absolute path.
     pub bin: String,
     pub task: String,
+    /// Empty means the agent's own default (Codex, opencode).
     pub model: String,
     pub cwd: PathBuf,
+    /// Claude Code's permission mode names; mapped onto each agent's own controls.
     pub permission_mode: String,
+    /// Claude Code only.
     pub max_turns: Option<u32>,
+    /// Appended to the Claude Code command line (`--claude-arg`).
     pub extra_args: Vec<String>,
-    /// Continue an earlier Claude Code session on this machine.
+    /// Continue an earlier session of the same agent on this machine.
     pub resume_session_id: Option<String>,
 }
 
 impl AgentSpec {
     pub fn args(&self) -> Vec<String> {
+        match self.agent {
+            Agent::Claude => self.claude_args(),
+            Agent::Codex => self.codex_args(),
+            Agent::Opencode => self.opencode_args(),
+        }
+    }
+
+    fn claude_args(&self) -> Vec<String> {
         let mut a = vec![
             "-p".to_string(),
             self.task.clone(),
@@ -79,6 +92,77 @@ impl AgentSpec {
         a
     }
 
+    /// `codex exec [resume] --json ... -- [<session>] <task>`. Permissions map onto
+    /// Codex's sandbox: read only, writes inside the workspace, or no sandbox.
+    fn codex_args(&self) -> Vec<String> {
+        let mut a: Vec<String> = vec!["exec".into()];
+        if self.resume_session_id.is_some() {
+            a.push("resume".into());
+        }
+        a.extend(["--json".into(), "--skip-git-repo-check".into()]);
+        match self.permission_mode.as_str() {
+            "bypassPermissions" => a.push("--dangerously-bypass-approvals-and-sandbox".into()),
+            "plan" => a.extend(["-c".into(), "sandbox_mode=\"read-only\"".into()]),
+            _ => a.extend(["-c".into(), "sandbox_mode=\"workspace-write\"".into()]),
+        }
+        if !self.model.is_empty() {
+            a.extend(["-m".into(), self.model.clone()]);
+        }
+        // `--` so a task starting with `-` is never read as a flag.
+        a.push("--".into());
+        if let Some(sid) = &self.resume_session_id {
+            a.push(sid.clone());
+        }
+        a.push(self.task.clone());
+        a
+    }
+
+    /// `opencode run --format json ...` with the task on stdin: opencode quotes
+    /// argv words that contain spaces before sending them to the model.
+    fn opencode_args(&self) -> Vec<String> {
+        let mut a: Vec<String> = vec!["run".into(), "--format".into(), "json".into()];
+        if !self.model.is_empty() {
+            a.extend(["--model".into(), self.model.clone()]);
+        }
+        if let Some(sid) = &self.resume_session_id {
+            a.extend(["--session".into(), sid.clone()]);
+        }
+        match self.permission_mode.as_str() {
+            "plan" => a.extend(["--agent".into(), "plan".into()]),
+            // `--auto` is newer (1.18); this alias works from 1.4.
+            "bypassPermissions" => a.push("--dangerously-skip-permissions".into()),
+            _ => {}
+        }
+        a
+    }
+
+    /// Environment for the agent process, on top of the worker's own.
+    pub fn env(&self) -> Vec<(&'static str, String)> {
+        match self.agent {
+            Agent::Opencode => {
+                // Merged into opencode's permission config. Its default allows
+                // everything, so "Read & edit files" denies the shell like Claude
+                // Code's acceptEdits, and "Read only" denies everything that writes.
+                let perms = match self.permission_mode.as_str() {
+                    "plan" => Some(r#"{"edit":"deny","bash":"deny","webfetch":"deny"}"#),
+                    "acceptEdits" => Some(r#"{"bash":"deny"}"#),
+                    _ => None,
+                };
+                let mut env = vec![("OPENCODE_DISABLE_AUTOUPDATE", "1".to_string())];
+                if let Some(p) = perms {
+                    env.push(("OPENCODE_PERMISSION", p.to_string()));
+                }
+                env
+            }
+            Agent::Claude | Agent::Codex => vec![],
+        }
+    }
+
+    /// Text written to the agent's stdin (then closed); None means no stdin.
+    pub fn stdin(&self) -> Option<&str> {
+        matches!(self.agent, Agent::Opencode).then_some(self.task.as_str())
+    }
+
     /// Redacted command line for the `started` event and logs (task omitted).
     pub fn display_command(&self) -> String {
         let shown: Vec<String> = self
@@ -86,7 +170,8 @@ impl AgentSpec {
             .iter()
             .map(|a| if a == &self.task { "<task>".to_string() } else { a.clone() })
             .collect();
-        redact(&format!("{} {}", self.bin, shown.join(" ")))
+        let stdin = if self.stdin().is_some() { " < <task>" } else { "" };
+        redact(&format!("{} {}{stdin}", self.bin, shown.join(" ")))
     }
 }
 
@@ -112,8 +197,9 @@ pub async fn execute(
 
     let mut cmd = Command::new(&spec.bin);
     cmd.args(spec.args())
+        .envs(spec.env())
         .current_dir(&spec.cwd)
-        .stdin(Stdio::null())
+        .stdin(if spec.stdin().is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0) // new process group so we can kill children too
@@ -132,6 +218,13 @@ pub async fn execute(
     };
     let pid = child.id().unwrap_or(0) as i32;
     track(pid);
+    if let (Some(text), Some(mut stdin)) = (spec.stdin().map(str::to_string), child.stdin.take()) {
+        // Written from a task so a large task cannot block reading stdout; dropping closes it.
+        tokio::spawn(async move {
+            let _ = stdin.write_all(text.as_bytes()).await;
+        });
+    }
+    let mut stream = AgentStream::new(spec.agent, &spec.model, &spec.cwd.to_string_lossy());
     send(NewEvent {
         kind: "started".into(),
         payload: json!({"command": spec.display_command(), "cwd": spec.cwd.to_string_lossy(), "pid": pid}),
@@ -160,7 +253,7 @@ pub async fn execute(
             }
             line = out_lines.next_line(), if !stdout_done => {
                 match line {
-                    Ok(Some(line)) => match map_stream_line(&line) {
+                    Ok(Some(line)) => match stream.map_line(&line) {
                         MappedLine::Events(evs) => {
                             for ev in evs {
                                 if ev.kind == "result" {
@@ -195,6 +288,14 @@ pub async fn execute(
     };
 
     untrack(pid);
+    // Agents without a final result line (opencode) get one from what they printed.
+    if !stopped {
+        let ok = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
+        for ev in stream.finish(ok) {
+            final_result = Some(ev.payload.clone());
+            send(ev).await;
+        }
+    }
     if stopped {
         return Outcome {
             status: RunStatus::Stopped,

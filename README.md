@@ -31,13 +31,13 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   several tasks on one repo run side by side without touching your checkout. Choose "In place"
   when a task needs installed dependencies or local config.
 - **Live, and a conversation**: events stream over SSE within milliseconds, survive reloads and
-  dropped connections, and replies resume the same Claude Code session like a chat.
+  dropped connections, and replies resume the same agent session like a chat.
 - **Permission modes**: read and edit files (default), full access for unattended commands, or
   read only for questions.
-- **Zero-config workers**: `connect` checks Claude Code and its sign-in, finds your git checkouts
-  (repos match by their git remote, whatever the folder is called), and installs a launchd or
-  systemd service that survives reboots. Or click "Copy prompt" and let Claude Code on the other
-  machine connect itself.
+- **Zero-config workers**: `connect` checks which agents are installed and signed in, finds your
+  git checkouts (repos match by their git remote, whatever the folder is called), and installs a
+  launchd or systemd service that survives reboots. Or click "Copy prompt" and let Claude Code or
+  Codex on the other machine connect itself.
 - **Secrets stay put**: anything that looks like a credential is redacted on the worker and again
   on the control plane; tokens are stored as SHA-256 digests and never logged.
 

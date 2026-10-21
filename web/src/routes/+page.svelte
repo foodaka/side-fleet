@@ -3,6 +3,7 @@
 	import * as Select from '#lib/components/ui/select';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
+	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
@@ -27,6 +28,8 @@
 	let perm = $state(PERMISSIONS.some((p) => p.id === load('sidefleet_perm')) ? load('sidefleet_perm') : 'acceptEdits');
 	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
 	let repo = $state(load('sidefleet_repo'));
+	// Off by default and not remembered: it pushes the task's branch to origin.
+	let failover = $state(false);
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
 
@@ -100,7 +103,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id })
+				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover })
 			});
 			task = '';
 			void fleet.refresh();
@@ -268,6 +271,18 @@
 						</Select.Content>
 					</Select.Root>
 
+					{#if iso === 'worktree'}
+						<button
+							type="button"
+							aria-pressed={failover}
+							onclick={() => (failover = !failover)}
+							title="Move to another machine if this one drops. Pushes checkpoints of the task's branch to origin while it runs."
+							class="inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[13px] {failover ? 'bg-primary/10 text-foreground ring-1 ring-primary/25' : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'}"
+						>
+							<ArrowRightLeft class="size-3.5" />Move if it drops
+						</button>
+					{/if}
+
 					</div>
 					<span class="flex shrink-0 items-center gap-2">
 						{#if task.length > 2000}<span class="tnum text-xs text-faint">{task.length.toLocaleString()} characters</span>{/if}
@@ -289,6 +304,7 @@
 					{:else}
 						Runs with {agentName(agent)} on <span class="text-foreground">{target.display_name}</span>{#if warning}, <span class="text-err-ink">{warning}</span>{/if}
 					{/if}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
+					{#if iso === 'worktree' && failover}<br />If that machine drops, the task moves to another one; its branch is pushed to origin as it goes.{/if}
 				{/if}
 			</p>
 		</form>

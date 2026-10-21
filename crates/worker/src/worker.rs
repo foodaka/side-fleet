@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 use uuid::Uuid;
 
 use crate::agent::{self, AgentSpec};
+use crate::checkpoint::{self, ChangeTracker};
 use crate::client::{Backoff, ClientError, ControlClient};
 use crate::detect::{self, DetectOptions};
 
@@ -268,12 +269,14 @@ fn log_caps(caps: &Capabilities) {
 /// A per-task git worktree: `<worktrees_dir>/<repo-slug>/<root run id>` on branch
 /// `sidefleet/<first 8 of root id>`. Follow-ups reuse the root's worktree so the
 /// agent's session (Claude Code keys sessions by cwd) resumes in the same place.
+/// A run moved here from a machine that dropped starts from `resume_from`, the
+/// task branch that machine pushed to `origin`.
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
 }
 
-pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path) -> Result<Worktree> {
+pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>) -> Result<Worktree> {
     let slug: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let path = worktrees_dir.join(slug).join(root_id.to_string());
     let branch = format!("sidefleet/{}", &root_id.simple().to_string()[..8]);
@@ -281,9 +284,14 @@ pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, workt
         return Ok(Worktree { path, branch });
     }
     std::fs::create_dir_all(path.parent().unwrap()).context("creating worktrees dir")?;
+    let p = path.to_string_lossy().to_string();
+    if let Some(from) = resume_from {
+        let start = crate::checkpoint::fetch_branch(repo, from).await?;
+        git(repo, &["worktree", "add", "-B", &branch, &p, &start]).await?;
+        return Ok(Worktree { path, branch });
+    }
     // Create the branch at HEAD, or reuse it when it already exists (worker restarted).
     let branch_exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
-    let p = path.to_string_lossy().to_string();
     if branch_exists {
         git(repo, &["worktree", "add", &p, &branch]).await?;
     } else {
@@ -321,14 +329,29 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
 
     // Where the agent works: its own worktree and branch, or the checkout itself.
     let mut pre_events: Vec<NewEvent> = Vec::new();
+    // The worktree and branch to checkpoint, for a run that may move if this machine drops.
+    let mut checkpoints: Option<(PathBuf, String)> = None;
     let cwd = if run.isolation == "worktree" {
         let root_id = run.parent_id.unwrap_or(run.id);
-        match prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir).await {
+        let mut resume_from = run.resume_from_branch.as_deref();
+        let mut prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, resume_from).await;
+        if let (Err(e), Some(from)) = (&prepared, resume_from) {
+            pre_events.push(NewEvent {
+                kind: "error".into(),
+                payload: json!({"message": format!("could not continue from {from} on origin ({e:#}); starting from this machine's HEAD")}),
+            });
+            resume_from = None;
+            prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, None).await;
+        }
+        match prepared {
             Ok(wt) => {
                 pre_events.push(NewEvent {
                     kind: "workspace".into(),
-                    payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy()}),
+                    payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy(), "resumed_from": resume_from}),
                 });
+                if run.failover {
+                    checkpoints = Some((wt.path.clone(), wt.branch.clone()));
+                }
                 wt.path
             }
             Err(e) => {
@@ -369,12 +392,21 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
 
     let exec = tokio::spawn(agent::execute(spec, event_tx, stop_rx));
 
+    // Failover runs push a checkpoint of their branch after file changes. Never
+    // for other runs: pushing is outward-facing and opt-in.
+    let change_tx = checkpoints.map(|(path, branch)| {
+        let (tx, rx) = mpsc::unbounded_channel::<()>();
+        tokio::spawn(checkpoint::run(client.clone(), run_id, path, branch, rx, stop_tx.subscribe(), checkpoint::MIN_INTERVAL));
+        tx
+    });
+
     // Forwarder: sends each event immediately; also polls control every second
     // while idle so a stop is noticed even if the agent is silent.
     let forwarder = {
         let client = client.clone();
         let stop_tx = stop_tx.clone();
         tokio::spawn(async move {
+            let mut changes = ChangeTracker::default();
             let mut poll = tokio::time::interval(Duration::from_secs(1));
             poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut backoff = Backoff::new(Duration::from_secs(10));
@@ -394,6 +426,17 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                                     backoff.reset();
                                     if ctl.stop_requested || ctl.status != RunStatus::Running {
                                         let _ = stop_tx.send(true);
+                                    }
+                                    // After the post, so a run moved elsewhere is already stopped here.
+                                    if let Some(tx) = &change_tx {
+                                        // Every event must be observed (tool_use records what a later result closes).
+                                        let mut changed = false;
+                                        for e in &batch {
+                                            changed |= changes.observe(e);
+                                        }
+                                        if changed {
+                                            let _ = tx.send(());
+                                        }
                                     }
                                     break;
                                 }

@@ -82,6 +82,16 @@ pub struct Run {
     /// `worktree` (own checkout and branch, default) or `checkout` (in place, one at a time per repo).
     #[serde(default = "default_isolation")]
     pub isolation: String,
+    /// Move to another machine if this one drops: the worker pushes checkpoints of
+    /// the worktree branch to `origin`, and a lost run is queued again elsewhere.
+    #[serde(default)]
+    pub failover: bool,
+    /// Set on a run queued to replace one whose machine dropped: that lost run.
+    #[serde(default)]
+    pub moved_from: Option<Uuid>,
+    /// Create the worktree from this branch on `origin` (fetched first) instead of HEAD.
+    #[serde(default)]
+    pub resume_from_branch: Option<String>,
 }
 
 pub fn default_agent() -> Agent {
@@ -333,6 +343,10 @@ pub struct CreateRunRequest {
     /// Run on this machine only; any machine with the repo when absent.
     #[serde(default)]
     pub worker_id: Option<String>,
+    /// Move to another machine if this one drops (off by default). Pushes
+    /// checkpoints of the task's `sidefleet/...` branch to the repo's `origin`.
+    #[serde(default)]
+    pub failover: bool,
 }
 
 /// Continue a thread: a new run that resumes the previous session with the same agent.

@@ -18,7 +18,22 @@
    renders it within milliseconds. Reloading replays from sequence 0; a dropped connection resumes
    with `Last-Event-ID`.
 4. Stop sends `SIGTERM` to the agent's process group, then `SIGKILL` after 1.5 s, and marks the
-   run `stopped`. A worker that stops heart-beating for 90 s has its running run marked `failed`.
+   run `stopped`. A worker that stops heart-beating for 90 s (or restarts mid-run) has its running
+   run marked `failed`, unless the run was created with `failover: true`:
+   - While it runs in its worktree, the worker commits everything to the run's `sidefleet/<id>`
+     branch ("sidefleet checkpoint", hooks skipped) and pushes that branch, and only that one, to
+     `origin` after a `tool_result` of `Edit`, `Write` or `Bash`, at most once a minute. Each push
+     is reported as a `checkpoint` event `{branch, sha}` (or `{branch, error}`).
+   - When the machine is lost, the run is marked `failed` with reason `worker lost, moved` (its
+     status event carries `moved_to`) and a new run is queued in the same thread with
+     `moved_from` set, unpinned, with the same agent, model, repo and permission mode. Its task is
+     the original message, a digest of the thread (messages, assistant text, tool calls; at most
+     8 KB) and "Continue from branch `sidefleet/<id>` at `<sha>`". It carries
+     `resume_from_branch`, so the worker that claims it fetches that branch from `origin` and
+     creates its worktree from it instead of `HEAD`.
+   - The machine that lost the run cannot claim the new one for 10 minutes; after that it may (so a
+     single laptop that slept picks its task back up). A moved run does not move again; a stop
+     that was pending wins over moving.
 
 ## Which machine runs a task
 
@@ -49,7 +64,7 @@ Bearer `SIDEFLEET_DEV_KEY`:
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted) |
+| `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it) |
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |

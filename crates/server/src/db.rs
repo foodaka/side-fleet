@@ -28,6 +28,9 @@ fn row_to_run(r: &PgRow) -> Run {
         pinned_worker_id: r.get("pinned_worker_id"),
         permission_mode: r.get("permission_mode"),
         isolation: r.get("isolation"),
+        failover: r.get("failover"),
+        moved_from: r.get("moved_from"),
+        resume_from_branch: r.get("resume_from_branch"),
     }
 }
 
@@ -66,7 +69,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation";
+    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -110,15 +113,16 @@ pub struct NewRun<'a> {
     pub permission_mode: Option<&'a str>,
     pub isolation: &'a str,
     pub pinned_worker_id: Option<&'a str>,
+    pub failover: bool,
 }
 
 pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
-    let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id } = new;
+    let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id, failover } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -128,6 +132,7 @@ pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, Ru
     .bind(isolation)
     .bind(pinned_worker_id)
     .bind(agent.as_str())
+    .bind(failover)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -174,8 +179,8 @@ pub async fn create_follow_up(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -187,6 +192,7 @@ pub async fn create_follow_up(
     .bind(permission_mode.or(latest.permission_mode.as_deref()))
     .bind(&latest.isolation)
     .bind(latest.agent.as_str())
+    .bind(latest.failover)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -368,10 +374,11 @@ pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(R
 }
 
 /// SQL condition: worker `w` could run queued run `r` now. It is online, has
-/// the repo (by identity or path name) and the agent, and has not hit that
-/// agent's usage limit. Workers from before multi-agent support report no
+/// the repo (by identity or path name) and the agent, has not hit that agent's
+/// usage limit, and is not the machine that lost the run (failover). Workers from before multi-agent support report no
 /// agents and run Claude Code.
 const CAN_RUN: &str = "w.last_heartbeat_at > now() - interval '45 seconds'
+      AND NOT (w.id = ANY(r.excluded_worker_ids))
       AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(w.capabilities->'repos', '[]'::jsonb)) AS info(repo)
                   WHERE info.repo->>'name' = r.repo OR info.repo->>'id' = r.repo)
       AND (w.capabilities->'agents' ? r.agent
@@ -413,6 +420,7 @@ pub async fn claim_run(
             SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.repo = ANY($2)
               AND NOT (r.repo = ANY($3))
               AND (r.pinned_worker_id IS NULL OR r.pinned_worker_id = $1)
+              AND (NOT ($1 = ANY(r.excluded_worker_ids)) OR r.created_at < now() - make_interval(secs => $7))
               AND r.agent = ANY($4)
               AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
               AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
@@ -429,6 +437,7 @@ pub async fn claim_run(
     .bind(agents)
     .bind(free)
     .bind(LEAST_BUSY_GRACE_SECS as f64)
+    .bind(EXCLUSION_GRACE_SECS as f64)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -554,7 +563,7 @@ pub async fn finish_run(
 /// Runs assigned to `worker_id` that are `running` but not in `active`: the
 /// worker lost them (restart, crash). Mark them finished so stops and replies
 /// are not left waiting forever. A run that had a stop pending becomes
-/// `stopped`, otherwise `failed`.
+/// `stopped`; a failover run is moved to another machine; otherwise `failed`.
 pub async fn reconcile_worker_runs(pool: &PgPool, worker_id: &str, active: &[Uuid]) -> sqlx::Result<Vec<RunEvent>> {
     let rows = sqlx::query("SELECT id FROM runs WHERE status = 'running' AND worker_id = $1 AND NOT (id = ANY($2))")
         .bind(worker_id)
@@ -569,8 +578,13 @@ pub async fn reconcile_worker_runs(pool: &PgPool, worker_id: &str, active: &[Uui
         if run.status != RunStatus::Running || active.contains(&id) {
             continue;
         }
-        let status = if run.stop_requested { RunStatus::Stopped } else { RunStatus::Failed };
         let reason = format!("the worker {worker_id} restarted while this run was in progress");
+        if let Some(evs) = move_lost_run(&mut tx, &run, worker_id, &reason).await? {
+            tx.commit().await?;
+            out.extend(evs);
+            continue;
+        }
+        let status = if run.stop_requested { RunStatus::Stopped } else { RunStatus::Failed };
         sqlx::query("UPDATE runs SET status = $2, finished_at = now(), result = $3 WHERE id = $1")
             .bind(id)
             .bind(status.as_str())
@@ -584,7 +598,8 @@ pub async fn reconcile_worker_runs(pool: &PgPool, worker_id: &str, active: &[Uui
     Ok(out)
 }
 
-/// Fail running runs whose worker has not heart-beaten for `stale_secs`.
+/// Fail running runs whose worker has not heart-beaten for `stale_secs`; a
+/// failover run is moved to another machine instead.
 pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<Vec<RunEvent>> {
     let rows = sqlx::query(
         "SELECT r.id FROM runs r JOIN workers w ON w.id = r.worker_id
@@ -601,11 +616,18 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
         if run.status != RunStatus::Running {
             continue;
         }
+        let reason = "worker stopped heart-beating while the run was in progress";
+        let worker = run.worker_id.clone().unwrap_or_default();
+        if let Some(evs) = move_lost_run(&mut tx, &run, &worker, reason).await? {
+            tx.commit().await?;
+            out.extend(evs);
+            continue;
+        }
         sqlx::query(
             "UPDATE runs SET status = 'failed', finished_at = now(), result = $2 WHERE id = $1",
         )
         .bind(id)
-        .bind(json!({"error": "worker stopped heart-beating while the run was in progress"}))
+        .bind(json!({"error": reason}))
         .execute(&mut *tx)
         .await?;
         let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "failed", "reason": "worker lost"})).await?;
@@ -613,6 +635,161 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
         out.push(ev);
     }
     Ok(out)
+}
+
+/// How long the machine that lost a run is kept from claiming its replacement.
+/// After this, with no other machine having taken it, the original may continue
+/// it (a single laptop that slept should not leave the task queued forever).
+pub const EXCLUSION_GRACE_SECS: i64 = 600;
+
+/// Size cap of the thread digest written into a moved run's task.
+const DIGEST_MAX_BYTES: usize = 8 * 1024;
+
+/// Move a lost failover run (row locked by the caller): mark it failed with
+/// reason "worker lost, moved" and queue a replacement in the same thread that
+/// any other machine may claim, continuing from the last pushed checkpoint.
+/// Returns None (nothing done) unless the run opted in, was not itself a move,
+/// and had no stop pending. Returns the events to broadcast.
+async fn move_lost_run(
+    tx: &mut Transaction<'_, Postgres>,
+    run: &Run,
+    lost_worker: &str,
+    why: &str,
+) -> sqlx::Result<Option<Vec<RunEvent>>> {
+    if !run.failover || run.moved_from.is_some() || run.stop_requested {
+        return Ok(None);
+    }
+    let root_id = run.parent_id.unwrap_or(run.id);
+    // The latest pushed checkpoint anywhere in the thread (they share one branch).
+    let checkpoint: Option<Value> = sqlx::query(
+        "SELECT e.payload FROM run_events e JOIN runs r ON r.id = e.run_id
+         WHERE (r.id = $1 OR r.parent_id = $1) AND e.kind = 'checkpoint' AND e.payload ? 'sha' AND e.payload ? 'branch'
+         ORDER BY e.at DESC, e.seq DESC LIMIT 1",
+    )
+    .bind(root_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|r| r.get("payload"));
+    let branch = checkpoint.as_ref().and_then(|c| c["branch"].as_str()).map(str::to_string);
+    let sha = checkpoint.as_ref().and_then(|c| c["sha"].as_str()).unwrap_or("").to_string();
+
+    let digest = thread_digest(tx, root_id, run.id).await?;
+    let mut task = format!(
+        "{}\n\n---\nSidefleet moved this task to this machine: the machine running it ({lost_worker}) stopped responding.",
+        run.task
+    );
+    if !digest.is_empty() {
+        task.push_str(&format!(" What happened so far:\n\n{digest}\n"));
+    }
+    match &branch {
+        Some(b) => task.push_str(&format!("\nContinue from branch {b} at {sha}; it has your work so far.")),
+        None => task.push_str("\nNo work was pushed before the machine dropped; start from the repository as it is."),
+    }
+
+    let new_id = Uuid::new_v4();
+    let row = sqlx::query(&format!(
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, permission_mode, isolation, agent,
+                           failover, moved_from, resume_from_branch, excluded_worker_ids)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, true, $9, $10, ARRAY[$11]) RETURNING {RUN_COLS}"
+    ))
+    .bind(new_id)
+    .bind(&task)
+    .bind(&run.model)
+    .bind(&run.repo)
+    .bind(root_id)
+    .bind(&run.permission_mode)
+    .bind(&run.isolation)
+    .bind(run.agent.as_str())
+    .bind(run.id)
+    .bind(branch.as_ref().filter(|_| run.isolation == "worktree"))
+    .bind(lost_worker)
+    .fetch_one(&mut **tx)
+    .await?;
+    let moved = row_to_run(&row);
+
+    sqlx::query("UPDATE runs SET status = 'failed', finished_at = now(), result = $2 WHERE id = $1")
+        .bind(run.id)
+        .bind(json!({"error": format!("{why}; moved to another machine"), "moved_to": new_id}))
+        .execute(&mut **tx)
+        .await?;
+    let lost_ev = append_event_locked(
+        tx,
+        run.id,
+        "status",
+        &json!({"status": "failed", "reason": "worker lost, moved", "moved_to": new_id, "lost_worker": lost_worker}),
+    )
+    .await?;
+    let queued_ev = append_event_locked(
+        tx,
+        new_id,
+        "status",
+        &json!({"status": "queued", "moved_from": run.id, "lost_worker": lost_worker, "branch": branch, "sha": sha}),
+    )
+    .await?;
+    tracing::info!(lost = %run.id, moved = %moved.id, worker = lost_worker, branch = ?moved.resume_from_branch, "moved a lost run");
+    Ok(Some(vec![lost_ev, queued_ev]))
+}
+
+/// A short plain-text account of a thread for a run that continues it without
+/// the agent's session: each message, what the agent said and the tools it
+/// used. The lost run's own message is left out (it heads the new task). Keeps
+/// the most recent part when over the cap.
+async fn thread_digest(tx: &mut Transaction<'_, Postgres>, root_id: Uuid, lost_id: Uuid) -> sqlx::Result<String> {
+    let runs = sqlx::query("SELECT id, task FROM runs WHERE id = $1 OR parent_id = $1 ORDER BY created_at")
+        .bind(root_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    let mut lines: Vec<String> = Vec::new();
+    for r in &runs {
+        let id: Uuid = r.get("id");
+        if id != lost_id {
+            lines.push(format!("User: {}", clip(r.get::<&str, _>("task"), 600)));
+        }
+        let evs = sqlx::query(
+            "SELECT kind, payload FROM run_events WHERE run_id = $1 AND kind IN ('assistant_text', 'tool_use') ORDER BY seq",
+        )
+        .bind(id)
+        .fetch_all(&mut **tx)
+        .await?;
+        for e in evs {
+            let p: Value = e.get("payload");
+            match e.get::<&str, _>("kind") {
+                "assistant_text" => lines.push(format!("Assistant: {}", clip(p["text"].as_str().unwrap_or(""), 600))),
+                _ => lines.push(format!(
+                    "- {} {}",
+                    p["name"].as_str().unwrap_or("tool"),
+                    clip(p["summary"].as_str().unwrap_or(""), 200)
+                )),
+            }
+        }
+    }
+    // Newest lines first until the budget runs out.
+    let marker = "(earlier steps omitted)";
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for l in lines.iter().rev() {
+        if used + l.len() + 1 > DIGEST_MAX_BYTES - marker.len() - 1 {
+            kept.push(marker);
+            break;
+        }
+        used += l.len() + 1;
+        kept.push(l);
+    }
+    kept.reverse();
+    Ok(kept.join("\n"))
+}
+
+/// At most `max` bytes on a char boundary, on one line, with an ellipsis when cut.
+fn clip(s: &str, max: usize) -> String {
+    let s = s.trim().replace('\n', " ");
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 // ---- workers ----

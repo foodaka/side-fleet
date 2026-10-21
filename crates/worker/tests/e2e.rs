@@ -415,3 +415,148 @@ async fn tasks_go_to_machines_with_their_agent_and_codex_threads_resume() {
     assert_eq!(h.wait_status(oc, RunStatus::Queued, Duration::from_secs(1)).await.status, RunStatus::Queued);
     h.teardown().await;
 }
+
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn machine(env: &TestEnv, id: &str, root: &std::path::Path, heartbeat: Duration) -> WorkerConfig {
+    WorkerConfig {
+        control_url: env.base_url.clone(),
+        token: WORKER_TOKEN.into(),
+        worker_id: id.into(),
+        display_name: id.into(),
+        repos_root: root.to_path_buf(),
+        claude_bin: fake_bin(),
+        codex_bin: "/nonexistent/codex".into(),
+        opencode_bin: "/nonexistent/opencode".into(),
+        permission_mode: "acceptEdits".into(),
+        max_turns: None,
+        extra_args: vec![],
+        poll_interval: Duration::from_millis(200),
+        heartbeat_interval: heartbeat,
+        check_sign_in: false,
+        scan_depth: 2,
+        max_runs: None,
+        parallel: 1,
+        worktrees_dir: root.join(".worktrees"),
+        version: "test-build".into(),
+        allow_remote_update: false,
+    }
+}
+
+#[tokio::test]
+async fn a_failover_run_pushes_checkpoints_and_continues_on_another_machine_when_its_machine_drops() {
+    let env = TestEnv::start().await;
+    let http = Client::new();
+    let tmp = tempfile::tempdir().unwrap();
+    // One project on a shared remote, cloned on two machines.
+    let seed = tmp.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    git_init(&seed);
+    let origin = tmp.path().join("origin.git");
+    git_out(tmp.path(), &["clone", "-q", "--bare", seed.to_str().unwrap(), origin.to_str().unwrap()]);
+    let (laptop, desktop) = (tmp.path().join("laptop"), tmp.path().join("desktop"));
+    for m in [&laptop, &desktop] {
+        std::fs::create_dir_all(m).unwrap();
+        git_out(m, &["clone", "-q", origin.to_str().unwrap(), "demo"]);
+    }
+
+    // The laptop takes the task; its heartbeat is long so the test decides when it "drops".
+    let a = tokio::spawn(run_worker(machine(&env, "laptop", &laptop, Duration::from_secs(3600))));
+    // A run without failover changes files too but never pushes (checked on origin below).
+    let r = http
+        .post(format!("{}/v1/runs", env.base_url))
+        .bearer_auth(DEV_KEY)
+        .json(&json!({"task": "write", "model": "claude-haiku-5-5", "repo": "demo"}))
+        .send()
+        .await
+        .unwrap();
+    let plain: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    for _ in 0..100 {
+        let run: Run = http.get(format!("{}/v1/runs/{plain}", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if run.status.is_terminal() {
+            assert_eq!(run.status, RunStatus::Succeeded);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM run_events WHERE run_id = $1 AND kind = 'checkpoint'").bind(plain).fetch_one(&env.pool).await.unwrap();
+    assert_eq!(n, 0);
+    let r = http
+        .post(format!("{}/v1/runs", env.base_url))
+        .bearer_auth(DEV_KEY)
+        .json(&json!({"task": "write slow", "model": "claude-haiku-5-5", "repo": "demo", "failover": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let id: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+
+    // After the Bash call that wrote a file, the worker pushes a checkpoint of the task branch.
+    let branch = format!("sidefleet/{}", &id.simple().to_string()[..8]);
+    let mut checkpoint = None;
+    for _ in 0..100 {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'checkpoint'").bind(id).fetch_optional(&env.pool).await.unwrap();
+        if let Some((p,)) = row {
+            checkpoint = Some(p);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let checkpoint = checkpoint.expect("a checkpoint event");
+    assert_eq!(checkpoint["branch"], branch.as_str(), "{checkpoint}");
+    let sha = checkpoint["sha"].as_str().unwrap().to_string();
+    assert_eq!(git_out(&origin, &["rev-parse", &format!("refs/heads/{branch}")]), sha);
+    assert_eq!(git_out(&origin, &["show", &format!("{sha}:failover.txt")]), "half done");
+    // Nothing but the task branch was pushed.
+    assert_eq!(git_out(&origin, &["for-each-ref", "--format=%(refname)", "refs/heads"]), format!("refs/heads/main\nrefs/heads/{branch}"));
+
+    // The laptop drops: its worker stops and it misses heartbeats; the reaper moves the run.
+    a.abort();
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '2 minutes' WHERE id = 'laptop'").execute(&env.pool).await.unwrap();
+    sidefleet_server::db::reap_orphaned_runs(&env.pool, 90).await.unwrap();
+    let thread: Vec<Run> = http
+        .get(format!("{}/v1/runs/{id}/thread", env.base_url))
+        .bearer_auth(DEV_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(thread.len(), 2);
+    assert_eq!(thread[0].status, RunStatus::Failed);
+    let moved = thread[1].clone();
+    assert_eq!(moved.resume_from_branch.as_deref(), Some(branch.as_str()));
+
+    // The desktop picks it up and starts from the pushed branch.
+    let b = tokio::spawn(run_worker(machine(&env, "desktop", &desktop, Duration::from_secs(15))));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let run = loop {
+        let run: Run = http.get(format!("{}/v1/runs/{}", env.base_url, moved.id)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if run.status.is_terminal() {
+            break run;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "moved run is still {:?}", run.status);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(run.status, RunStatus::Succeeded);
+    assert_eq!(run.worker_id.as_deref(), Some("desktop"));
+    let (ws,): (serde_json::Value,) = sqlx::query_as("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'workspace'")
+        .bind(moved.id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(ws["resumed_from"], branch.as_str(), "{ws}");
+    let wt = std::path::PathBuf::from(ws["path"].as_str().unwrap());
+    assert!(wt.starts_with(&desktop));
+    assert_eq!(std::fs::read_to_string(wt.join("failover.txt")).unwrap(), "half done\n");
+    git_out(&wt, &["merge-base", "--is-ancestor", &sha, "HEAD"]);
+
+    b.abort();
+    env.teardown().await;
+}

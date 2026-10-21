@@ -27,6 +27,10 @@ export interface Turn {
 	machine: string | null;
 	branch: string | null;
 	workspaceNote: string | null;
+	/** Latest checkpoint pushed to origin (failover runs). */
+	checkpoint: string | null;
+	/** For a moved run: the machine that dropped it. */
+	movedFrom: string | null;
 	command: string | null;
 	sessionModel: string | null;
 	/** What the agent is doing right now, while it runs. */
@@ -52,6 +56,8 @@ function newTurn(run: Run): Turn {
 		machine: run.worker_id,
 		branch: null,
 		workspaceNote: null,
+		checkpoint: null,
+		movedFrom: null,
 		command: null,
 		sessionModel: null,
 		activity: run.status === 'queued' ? 'queued' : null,
@@ -111,6 +117,15 @@ export class Thread {
 		this.#abort.abort();
 	}
 
+	async #adopt(id: string) {
+		if (this.runs.some((r) => r.id === id)) return;
+		const run = await api<Run>(`/v1/runs/${id}`);
+		if (this.#abort.signal.aborted || this.runs.some((r) => r.id === id)) return;
+		this.runs.push(run);
+		this.turns.push(newTurn(run));
+		void this.#follow(this.runs.length - 1);
+	}
+
 	#follow(i: number) {
 		const turn = this.turns[i];
 		const live = this.runs[i].status === 'queued' || this.runs[i].status === 'running';
@@ -119,6 +134,8 @@ export class Thread {
 			(ev) => {
 				turn.reconnecting = false;
 				apply(turn, this.runs[i], ev);
+				// The machine dropped and the run was queued again elsewhere: follow the new run too.
+				if (ev.kind === 'status' && ev.payload?.moved_to) void this.#adopt(ev.payload.moved_to);
 			},
 			this.#abort.signal,
 			() => (turn.reconnecting = true)
@@ -142,7 +159,16 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 	switch (ev.kind) {
 		case 'status': {
 			run.status = p.status;
-			if (p.status === 'queued') t.activity = 'queued';
+			if (p.moved_to) {
+				run.finished_at ??= ev.at;
+				t.activity = null;
+				t.items.push({ kind: 'note', key, at: ev.at, tone: 'muted', text: `${p.lost_worker ?? t.machine ?? 'The machine'} stopped responding. Moving the task to another machine.` });
+				break;
+			}
+			if (p.status === 'queued') {
+				t.activity = 'queued';
+				if (p.moved_from) t.movedFrom = p.lost_worker ?? null;
+			}
 			else if (p.status === 'running') {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
@@ -160,6 +186,10 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			}
 			break;
 		}
+		case 'checkpoint':
+			if (p.sha) t.checkpoint = p.sha;
+			else if (p.error) t.items.push({ kind: 'note', key, tone: 'err', text: `Could not push a checkpoint: ${p.error}`, at: ev.at });
+			break;
 		case 'workspace':
 			if (p.mode === 'worktree') t.branch = p.branch;
 			else t.workspaceNote = p.note ?? 'in the checkout';

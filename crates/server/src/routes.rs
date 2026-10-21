@@ -172,7 +172,7 @@ async fn create_run(
         Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
-    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker };
+    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover };
     let (run, ev) = db::create_run(&state.pool, new).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");

@@ -893,3 +893,141 @@ async fn a_usage_limit_moves_the_run_to_another_machine_once() {
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn a_failover_run_whose_machine_drops_moves_to_another_machine() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("laptop", &["r"]).await;
+    api.register("desktop", &["r"]).await;
+
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "fix the flaky test", "model": "claude-sonnet-5-5", "repo": "r", "failover": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let lost: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert!(api.get_run(lost).await.failover);
+    let claimed = api.claim("laptop", &["r"]).await.unwrap();
+    assert_eq!(claimed.id, lost);
+    let (s, _) = api
+        .post_events(
+            "laptop",
+            lost,
+            json!([
+                {"kind": "assistant_text", "payload": {"text": "The test races on the clock."}},
+                {"kind": "tool_use", "payload": {"id": "t1", "name": "Edit", "summary": "src/clock.rs"}},
+                {"kind": "tool_result", "payload": {"tool_use_id": "t1", "content": "ok"}},
+                {"kind": "checkpoint", "payload": {"branch": "sidefleet/abcd1234", "sha": "0123456789abcdef"}}
+            ]),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // A run without failover on the same machine is only failed.
+    let (_, body) = api.create_run("plain", "r").await;
+    let plain: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.claim("laptop", &["r"]).await.unwrap().id, plain);
+
+    // The laptop sleeps: no heartbeats for two minutes, then the reaper runs.
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '2 minutes' WHERE id = 'laptop'")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    sidefleet_server::db::reap_orphaned_runs(&env.pool, 90).await.unwrap();
+
+    let run = api.get_run(lost).await;
+    assert_eq!(run.status, RunStatus::Failed);
+    let p = api.get_run(plain).await;
+    assert_eq!(p.status, RunStatus::Failed);
+
+    let thread: Vec<Run> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{lost}/thread")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(thread.len(), 2);
+    let moved = &thread[1];
+    assert_eq!(moved.status, RunStatus::Queued);
+    assert_eq!(moved.parent_id, Some(lost));
+    assert_eq!(moved.moved_from, Some(lost));
+    assert_eq!(moved.pinned_worker_id, None);
+    assert_eq!(moved.resume_session_id, None);
+    assert_eq!(moved.resume_from_branch.as_deref(), Some("sidefleet/abcd1234"));
+    assert_eq!((moved.agent, moved.model.as_str(), moved.repo.as_str()), (run.agent, "claude-sonnet-5-5", "r"));
+    assert!(moved.task.starts_with("fix the flaky test"));
+    assert!(moved.task.contains("The test races on the clock."));
+    assert!(moved.task.contains("- Edit src/clock.rs"));
+    assert!(moved.task.contains("Continue from branch sidefleet/abcd1234 at 0123456789abcdef"));
+    assert_eq!(run.result.unwrap()["moved_to"].as_str(), Some(moved.id.to_string().as_str()));
+
+    // The page learns of the move from the lost run's stream.
+    let mut sse = Sse::open(&api, lost, None).await;
+    let mut saw_move = false;
+    while let Some(ev) = sse.next_event(Duration::from_secs(1)).await {
+        if ev.kind == "status" && ev.payload["status"] == "failed" {
+            assert_eq!(ev.payload["reason"], "worker lost, moved");
+            assert_eq!(ev.payload["moved_to"].as_str(), Some(moved.id.to_string().as_str()));
+            saw_move = true;
+            break;
+        }
+    }
+    assert!(saw_move);
+
+    // The laptop wakes up and cannot take it back; the desktop can.
+    api.register("laptop", &["r"]).await;
+    assert!(api.claim("laptop", &["r"]).await.is_none());
+    let taken = api.claim("desktop", &["r"]).await.unwrap();
+    assert_eq!(taken.id, moved.id);
+    assert_eq!(taken.resume_from_branch.as_deref(), Some("sidefleet/abcd1234"));
+
+    // A moved run does not move again: losing the desktop too just fails it.
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '2 minutes' WHERE id = 'desktop'")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    sidefleet_server::db::reap_orphaned_runs(&env.pool, 90).await.unwrap();
+    assert_eq!(api.get_run(moved.id).await.status, RunStatus::Failed);
+    let thread: Vec<Run> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{lost}/thread")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(thread.len(), 2);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn a_failover_run_lost_to_a_worker_restart_moves_unless_a_stop_was_pending() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let create = |task: &'static str| {
+        api.dev(reqwest::Method::POST, "/v1/runs")
+            .json(&json!({"task": task, "model": "claude-sonnet-5-5", "repo": "r", "failover": true}))
+            .send()
+    };
+    let moving: Uuid = create("keep going").await.unwrap().json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let stopping: Uuid = create("stop me").await.unwrap().json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.stop(stopping).await;
+    api.register("w", &["r"]).await; // restarted with nothing running
+
+    assert_eq!(api.get_run(stopping).await.status, RunStatus::Stopped);
+    let thread: Vec<Run> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{stopping}/thread")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(thread.len(), 1);
+
+    assert_eq!(api.get_run(moving).await.status, RunStatus::Failed);
+    let thread: Vec<Run> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{moving}/thread")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(thread.len(), 2);
+    assert_eq!(thread[1].moved_from, Some(moving));
+    // Nothing was pushed: the replacement starts from the repository, not a branch.
+    assert_eq!(thread[1].resume_from_branch, None);
+    assert!(thread[1].task.contains("No work was pushed"));
+    assert!(api.claim("w", &["r"]).await.is_none());
+    // After the grace period the machine that lost it may continue it after all.
+    sqlx::query("UPDATE runs SET created_at = now() - interval '11 minutes' WHERE id = $1")
+        .bind(thread[1].id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(api.claim("w", &["r"]).await.unwrap().id, thread[1].id);
+
+    env.teardown().await;
+}

@@ -4,6 +4,7 @@
 	import { Shimmer } from '#lib/components/ai-elements/shimmer';
 	import * as Collapsible from '#lib/components/ui/collapsible';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
+	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
 	import ToolRow from './ToolRow.svelte';
 	import type { Turn } from '../thread.svelte';
@@ -28,7 +29,14 @@
 </script>
 
 <div class="flex flex-col gap-4">
-	{#if !first}
+	{#if run.moved_from}
+		<p class="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+			<ArrowRightLeft class="size-3.5 shrink-0" />
+			<span>
+				Moved{turn.movedFrom ? ` from ${turn.movedFrom}` : ''} to {turn.machine ?? 'another machine'}{#if run.resume_from_branch}, continuing from <span class="font-mono text-[12px]">{run.resume_from_branch}</span>{:else}, starting over (no work had been pushed){/if}
+			</span>
+		</p>
+	{:else if !first}
 		<Message from="user">
 			<MessageContent class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap text-primary-foreground group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground">{run.task}</MessageContent>
 			<span class="self-end text-[11px] text-faint">{meta.join(', ')}</span>
@@ -40,10 +48,11 @@
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
-						Waiting for {run.pinned_worker_id ?? `a machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}…
+						Waiting for {run.pinned_worker_id ?? `${run.moved_from ? 'another' : 'a'} machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}…
 					{:else}
-						{run.resume_session_id ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
+						{run.resume_session_id || run.moved_from ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
 						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}
+						{#if turn.checkpoint}<span title="Last checkpoint pushed to origin">pushed <span class="font-mono">{turn.checkpoint.slice(0, 7)}</span></span>{/if}
 						<span>with {agentModel(run.agent, run.model)}</span>
 					{/if}
 				</Collapsible.Trigger>

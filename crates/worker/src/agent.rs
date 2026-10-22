@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use sidefleet_core::{redact, Agent, AgentStream, MappedLine, NewEvent, RunStatus};
+use sidefleet_core::{redact, result_usage_limit, Agent, AgentStream, MappedLine, NewEvent, RunStatus, UsageLimit};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use serde_json::{json, Value};
@@ -179,6 +179,14 @@ impl AgentSpec {
 pub struct Outcome {
     pub status: RunStatus,
     pub result: Value,
+    /// The run failed on the account's usage limit (reported to the control plane).
+    pub usage_limit: Option<UsageLimit>,
+}
+
+impl Outcome {
+    pub fn new(status: RunStatus, result: Value) -> Self {
+        Outcome { status, result, usage_limit: None }
+    }
 }
 
 /// Run the agent to completion (or until `stop` becomes true). Events are
@@ -213,7 +221,7 @@ pub async fn execute(
         Err(e) => {
             let msg = format!("failed to start {}: {e}", spec.bin);
             send(NewEvent { kind: "error".into(), payload: json!({"message": msg}) }).await;
-            return Outcome { status: RunStatus::Failed, result: json!({"error": msg}) };
+            return Outcome::new(RunStatus::Failed, json!({"error": msg}));
         }
     };
     let pid = child.id().unwrap_or(0) as i32;
@@ -297,31 +305,46 @@ pub async fn execute(
         }
     }
     if stopped {
-        return Outcome {
-            status: RunStatus::Stopped,
-            result: json!({"reason": "stopped by request", "partial_result": final_result}),
-        };
+        return Outcome::new(RunStatus::Stopped, json!({"reason": "stopped by request", "partial_result": final_result}));
     }
+    let usage_limit = final_result.as_ref().and_then(result_usage_limit);
+    if let Some(l) = &usage_limit {
+        tracing::warn!(agent = %spec.agent, resets_at = ?l.resets_at, "the agent hit this machine's usage limit");
+    }
+    let mut outcome = outcome_of(exit_status, final_result, &stderr_tail, &send).await;
+    if outcome.status == RunStatus::Failed {
+        outcome.usage_limit = usage_limit;
+    }
+    outcome
+}
+
+async fn outcome_of<F, Fut>(
+    exit_status: std::io::Result<std::process::ExitStatus>,
+    final_result: Option<Value>,
+    stderr_tail: &[String],
+    send: &F,
+) -> Outcome
+where
+    F: Fn(NewEvent) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     match (exit_status, final_result) {
         (Ok(st), Some(res)) if st.success() => {
             let is_error = res.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             if is_error {
-                Outcome { status: RunStatus::Failed, result: json!({"error": "agent reported an error", "result": res}) }
+                Outcome::new(RunStatus::Failed, json!({"error": "agent reported an error", "result": res}))
             } else {
-                Outcome { status: RunStatus::Succeeded, result: res }
+                Outcome::new(RunStatus::Succeeded, res)
             }
         }
         (Ok(st), res) => {
             let msg = format!("agent exited with {st}");
             send(NewEvent { kind: "error".into(), payload: json!({"message": msg}) }).await;
-            Outcome {
-                status: RunStatus::Failed,
-                result: json!({"error": msg, "stderr": stderr_tail.join("\n"), "result": res}),
-            }
+            Outcome::new(RunStatus::Failed, json!({"error": msg, "stderr": stderr_tail.join("\n"), "result": res}))
         }
         (Err(e), _) => {
             let msg = format!("could not wait for agent: {e}");
-            Outcome { status: RunStatus::Failed, result: json!({"error": msg}) }
+            Outcome::new(RunStatus::Failed, json!({"error": msg}))
         }
     }
 }

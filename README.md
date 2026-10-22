@@ -26,10 +26,17 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   CLI with its own sign-in, and its output is mapped to the same live view. Tasks only go to
   machines that have the chosen agent.
 - **Your machines, one page**: every connected machine with its repos, agents, CPU and running
-  tasks on a live fleet map; tasks go to any machine that has the repo, or pin one to a machine.
+  tasks on a live fleet map. Tasks go to the least busy machine that has the repo and agent, or
+  pin one to a machine. Machines can be signed in to different accounts: when one hits its usage
+  limit, its task moves to another machine and the page shows "usage limit until 14:00".
 - **Isolated by default**: each task gets its own git worktree and branch (`sidefleet/<id>`), so
   several tasks on one repo run side by side without touching your checkout. Choose "In place"
   when a task needs installed dependencies or local config.
+- **Survives a machine dropping** (opt-in per task): with "Move if it drops", the worker commits
+  and pushes the task's branch to the repo's `origin` at most once a minute while the agent edits.
+  If the machine stops responding (a laptop going to sleep), the task moves to another machine with
+  the repo and continues from the last pushed commit, with a digest of the thread so far. Off by
+  default, because it pushes; only the task's own `sidefleet/...` branch is ever pushed.
 - **Live, and a conversation**: events stream over SSE within milliseconds, survive reloads and
   dropped connections, and replies resume the same agent session like a chat.
 - **Permission modes**: read and edit files (default), full access for unattended commands, or

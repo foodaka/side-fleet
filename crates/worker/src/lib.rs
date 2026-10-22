@@ -3,6 +3,7 @@
 //! and executes them with the local Claude Code CLI, streaming narration back.
 
 pub mod agent;
+pub mod checkpoint;
 pub mod client;
 pub mod detect;
 pub mod diff;

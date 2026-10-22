@@ -24,6 +24,12 @@ export interface Run {
 	pinned_worker_id: string | null;
 	permission_mode: string | null;
 	isolation: 'worktree' | 'checkout';
+	/** Move to another machine if this one drops. */
+	failover: boolean;
+	/** On a run queued to replace one whose machine dropped: that run. */
+	moved_from: string | null;
+	/** The pushed branch a moved run continues from. */
+	resume_from_branch: string | null;
 }
 
 export interface RunSummary extends Run {
@@ -76,6 +82,8 @@ export interface Worker {
 	online: boolean;
 	update_requested: boolean;
 	outdated: boolean;
+	/** Agents whose usage limit this machine's account hit, with when it resets; it takes none of their tasks until then. */
+	limited_until?: Partial<Record<'claude' | 'codex' | 'opencode', string>>;
 }
 
 export interface Setup {

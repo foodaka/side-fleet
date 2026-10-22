@@ -172,7 +172,7 @@ async fn create_run(
         Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
-    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker };
+    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover };
     let (run, ev) = db::create_run(&state.pool, new).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
@@ -280,11 +280,14 @@ async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_
 
 async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     let workers = db::list_workers(&state.pool).await?;
+    let mut limits = db::active_limits(&state.pool).await?;
     let mut out = Vec::with_capacity(workers.len());
     for w in workers {
         let online = db::is_online(w.last_heartbeat_at);
         let mut v = serde_json::to_value(&w).unwrap_or(json!({}));
         v["online"] = json!(online);
+        // Agents whose usage limit this machine hit: agent -> when it resets.
+        v["limited_until"] = json!(limits.remove(&w.id).unwrap_or_default());
         v["update_requested"] = json!(db::update_requested(&state.pool, &w.id).await?);
         v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
         out.push(v);
@@ -518,7 +521,7 @@ async fn claim_run(
     }
     // Workers from before multi-agent support only run Claude Code.
     let agents = if req.agents.is_empty() { vec![Agent::Claude.as_str().to_string()] } else { req.agents.clone() };
-    match db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents).await? {
+    match db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref()).await? {
         Some((run, ev)) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, worker = %req.worker_id, "run claimed");
@@ -577,10 +580,22 @@ async fn finish_run(
     if !req.status.is_terminal() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "finish status must be terminal".into()));
     }
-    match db::finish_run(&state.pool, id, &q.worker_id, req.status, req.result).await? {
-        FinishOutcome::Finished(run, ev) => {
-            state.events.publish(ev);
+    match db::finish_run(&state.pool, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
+        FinishOutcome::Finished(run, evs) => {
+            for ev in evs {
+                state.events.publish(ev);
+            }
+            if req.usage_limit.is_some() {
+                tracing::warn!(run_id = %id, worker = %q.worker_id, agent = %run.agent, "usage limit hit; no other machine can take the run now");
+            }
             tracing::info!(run_id = %id, status = run.status.as_str(), "run finished");
+            Ok(Json(run))
+        }
+        FinishOutcome::Requeued(run, evs) => {
+            for ev in evs {
+                state.events.publish(ev);
+            }
+            tracing::warn!(run_id = %id, worker = %q.worker_id, agent = %run.agent, "usage limit hit; run re-queued for another machine");
             Ok(Json(run))
         }
         FinishOutcome::NotFound => Err(not_found()),

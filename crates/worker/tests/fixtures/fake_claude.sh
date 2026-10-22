@@ -1,8 +1,10 @@
 #!/bin/sh
 # Fake Claude Code CLI for tests. Prints stream-json lines slowly.
 # Understands: --version, -p <task> (task containing "slow" sleeps a long time
-# before the result; "fail" exits non-zero; "error-result" reports is_error;
-# "edit" changes README.md and adds notes.txt; "rename" moves notes.txt).
+# before the result, unless it was moved from another machine; "fail" exits
+# non-zero; "error-result" reports is_error; "write" creates failover.txt during
+# the Bash tool call when it is not there yet; "edit" changes README.md and adds
+# notes.txt; "rename" moves notes.txt).
 if [ "$1" = "--version" ]; then printf '%s\n' "9.9.9 (Claude Code fake)"; exit 0; fi
 task=""
 model="unknown"
@@ -23,10 +25,14 @@ printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"ty
 sleep 0.2
 printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456 && git status --short"}}]}}'
 sleep 0.2
+case "$task" in
+  *write*) [ -f failover.txt ] || printf 'half done\n' > failover.txt;;
+esac
 printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"## main\n?? notes.txt\nAPI_KEY=supersecretvalue99","is_error":false}]}}'
 sleep 0.2
 printf '%s\n' "fake stderr line with token=abcdefghijklmnop" >&2
 case "$task" in
+  *"Sidefleet moved this task"*) ;;
   *slow*) sleep 60;;
 esac
 case "$task" in

@@ -3,14 +3,18 @@
 use std::process::Command;
 
 fn main() {
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short=9", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
-    let dirty = Command::new("git")
+    // Container builds have no .git; they pass the commit in (see Dockerfile).
+    let given = std::env::var("SIDEFLEET_GIT_SHA").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let sha = given.clone().or_else(|| {
+        Command::new("git")
+            .args(["rev-parse", "--short=9", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    })
+    .unwrap_or_else(|| "unknown".into());
+    let dirty = given.is_none() && Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=no"])
         .output()
         .ok()
@@ -20,6 +24,7 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     println!("cargo:rustc-env=SIDEFLEET_BUILD={} {}{}", date, sha, if dirty { "+" } else { "" });
+    println!("cargo:rerun-if-env-changed=SIDEFLEET_GIT_SHA");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
 }

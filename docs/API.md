@@ -77,7 +77,9 @@ again on the control plane before it is stored.
 
 ## Developer endpoints
 
-Bearer `SIDEFLEET_DEV_KEY`:
+Bearer `SIDEFLEET_DEV_KEY`, acting in the default org; or the `sf_session` cookie from GitHub
+sign-in, acting in the org named by `X-Sidefleet-Org`, else the user's personal org. Every route
+is scoped to that org: another org's runs, images and machines read as 404.
 
 | Method | Path | |
 |---|---|---|
@@ -92,14 +94,30 @@ Bearer `SIDEFLEET_DEV_KEY`:
 | `GET` | `/v1/images/:id` | an image from a tool result or attached to a message (PNG, JPEG, GIF or WebP); `tool_result` events and runs refer to them as `images: [{id, media_type, bytes}]` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
-| `GET` | `/v1/setup` | control URL and the first worker token, for the page's connect command |
+| `DELETE` | `/v1/workers/:id` | forget a machine (frees a plan slot); `409` while it runs a task |
+| `GET` | `/v1/setup` | control URL and, in the default org, the first static worker token, for the page's connect command |
+| `POST` | `/v1/orgs` `{name}` | create a team org (signed-in users) |
+| `GET` `POST` | `/v1/orgs/:org/tokens` `{name}` | per-org worker tokens; the value is only in the `201` response; owners only |
+| `DELETE` | `/v1/orgs/:org/tokens/:id` | revoke; workers using it get `401` from then on |
+| `GET` `POST` | `/v1/orgs/:org/members` `{login, role?}` | members; adding needs an owner and a user who signed in once |
+| `GET` | `/v1/enrollments` | machines waiting for approval in this org |
+| `POST` | `/v1/enrollments/lookup` `{code}` | find a waiting machine by the code it printed |
+| `POST` | `/v1/enrollments/:id/approve` `{code?}`, `/deny` | approve (mints a per-machine token) or deny; `402` over the plan's machine limit |
 
-Public: `GET /` (the page), `GET /connect.md` (instructions for an agent), `GET /healthz`.
+Plan limits answer `402` (machines; runs queued or running at once, for new tasks, messages,
+restores and forks); owner-only actions answer `403` for members.
+
+Public: `GET /` (the page), `GET /connect.md` (instructions for an agent), `GET /healthz` (checks
+the database), `GET /v1/auth` (which sign-in methods are on), `GET /v1/me` (the signed-in user and
+their orgs; `401` when signed out), `GET /auth/github/login` and `/auth/github/callback`,
+`POST /auth/logout`, `POST /v1/enroll` and `GET /v1/enroll/:id` (a machine asking to join, and
+polling with its secret).
 
 ## Worker endpoints
 
 Bearer one of `SIDEFLEET_WORKER_TOKENS` (comma-separated, one per machine if you want to revoke
-individually; compared as SHA-256 digests in constant time and never logged):
+individually; compared as SHA-256 digests in constant time and never logged), acting in the
+default org, or a per-org token, acting in its org:
 `POST /v1/worker/register`, `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (sends the
 agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
 only get `claude` runs, workers that send no slots are not load balanced, and workers that send

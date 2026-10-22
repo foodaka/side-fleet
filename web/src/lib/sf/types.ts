@@ -104,4 +104,55 @@ export interface Setup {
 	build?: string;
 	/** Worker id of the machine hosting the control plane, if it also runs tasks. */
 	host_worker?: string | null;
+	/** Multi-tenant (GitHub sign-in); machines join with org tokens or approval on the page. */
+	hosted?: boolean;
+}
+
+export interface AuthMethods {
+	github: boolean;
+	dev_key: boolean;
+	hosted: boolean;
+}
+
+export interface Limits {
+	machines: number;
+	parallel_runs: number;
+}
+
+export interface Org {
+	id: string;
+	name: string;
+	slug: string;
+	plan: 'free' | 'pro';
+	role: 'owner' | 'member';
+	/** Null for the default org of a self-hosted control plane. */
+	limits: Limits | null;
+}
+
+export interface Me {
+	/** Null when signed in with the developer key. */
+	user: { id: string; login: string; email: string | null } | null;
+	orgs: Org[];
+}
+
+export interface WorkerToken {
+	id: string;
+	name: string;
+	prefix: string;
+	created_at: string;
+	revoked_at: string | null;
+	last_used_at: string | null;
+	/** Only in the response that created it. */
+	token?: string;
+}
+
+export interface Enrollment {
+	id: string;
+	code: string;
+	machine_name: string;
+	worker_id: string;
+	capabilities: { hostname?: string; os?: string; version?: string; repo_count?: number; agents?: Capabilities['agents'] };
+	status: 'pending' | 'approved' | 'denied' | 'collected';
+	created_at: string;
+	expires_at: string;
 }

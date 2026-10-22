@@ -125,6 +125,15 @@ Across networks, put the control plane on [Tailscale](https://tailscale.com) and
 IP: no port forwarding, no public exposure. Running it on a VPS or a spare machine is covered in
 [HOSTING.md](HOSTING.md).
 
+**No token at hand?** `sidefleet connect --control <url>` without `--token` asks the control plane
+to let the machine in: it prints a link and a short code, and the machine joins once someone
+approves it under Pending machines on the Machines page (the request expires after ten minutes).
+
+**Hosted, multi-tenant mode.** Setting `SIDEFLEET_GITHUB_CLIENT_ID`,
+`SIDEFLEET_GITHUB_CLIENT_SECRET` and `SIDEFLEET_PUBLIC_URL` turns on GitHub sign-in, orgs, per-org
+worker tokens and plan limits. What it stores and how to deploy or try it locally:
+[HOSTED.md](HOSTED.md).
+
 ## Agents
 
 | Agent | Set it up on the machine | Models |
@@ -152,6 +161,7 @@ sidefleet serve                       # control plane on :7373, plus a local wor
 sidefleet serve --no-worker           # control plane only
 sidefleet serve --install-service     # run serve as a background service
 sidefleet connect --control <url> --token <t>   # register this machine, install the service
+sidefleet connect --control <url>     # no token: wait for approval on the Machines page
 sidefleet connect … --name "Mac mini" --parallel 3 --permission-mode bypassPermissions
 sidefleet status                      # saved settings, service and process state, log path
 sidefleet disconnect                  # remove the service (settings kept)
@@ -193,8 +203,11 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
   uses). Usage counts against those accounts' plans or bills. Check the terms that apply to your
   subscriptions for automated or unattended use, and never share or resell access to an account
   through it.
-- One shared developer key, no users or roles, no built-in TLS. Keep the control plane on a private
-  network (LAN or Tailscale), or put TLS in front of it.
+- Self-hosted, there is a single shared developer key and no TLS of its own. Keep that control
+  plane on a private network (LAN or Tailscale), or run the hosted mode behind TLS
+  ([HOSTED.md](HOSTED.md)).
+- The control plane runs as one process: live events fan out in memory, so it does not scale out
+  to several instances yet.
 - A thread keeps the agent it started with; to switch, fork it. A fork's agent gets a transcript
   of the messages, replies and tool calls (the newest 32 KB), not the original session, so it
   doesn't see tool output or the agent's thinking.

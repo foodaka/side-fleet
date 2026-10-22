@@ -1,0 +1,51 @@
+# Fly.io deployment of the hosted control plane (app.sidefleet.io). See HOSTED.md.
+#
+# One-time setup:
+#   fly apps create sidefleet
+#   fly mpg create --name sidefleet-db --region iad       # managed Postgres
+#   fly mpg attach sidefleet-db --app sidefleet           # sets DATABASE_URL
+#   fly secrets set SIDEFLEET_GITHUB_CLIENT_ID=... SIDEFLEET_GITHUB_CLIENT_SECRET=...
+#   fly certs add app.sidefleet.io                        # TLS, then point DNS at the app
+# Deploy:
+#   fly deploy --build-arg SIDEFLEET_GIT_SHA=$(git rev-parse --short=9 HEAD)
+
+app = "sidefleet"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SIDEFLEET_PUBLIC_URL = "https://app.sidefleet.io"
+  SIDEFLEET_BIND = "0.0.0.0:8080"
+  RUST_LOG = "sidefleet=info,sidefleet_server=info,tower_http=warn"
+
+[deploy]
+  # Migrations run on start; one machine at a time keeps them from racing.
+  strategy = "rolling"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Workers poll and pages hold SSE streams open, so keep a machine running.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 800
+    hard_limit = 1000
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

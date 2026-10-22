@@ -1,95 +1,144 @@
 <script lang="ts">
 	import './layout.css';
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
-	import { ModeWatcher, setMode, userPrefersMode } from 'mode-watcher';
+	import { onMount, untrack } from 'svelte';
+	import { Dialog as DialogPrimitive } from 'bits-ui';
+	import { ModeWatcher } from 'mode-watcher';
 	import { Toaster } from '#lib/components/ui/sonner';
 	import * as Tooltip from '#lib/components/ui/tooltip';
-	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
-	import Plus from '@lucide/svelte/icons/plus';
-	import ListTree from '@lucide/svelte/icons/list';
-	import Server from '@lucide/svelte/icons/server';
-	import Settings from '@lucide/svelte/icons/settings-2';
+	import { Kbd } from '#lib/components/ui/kbd';
+	import Menu from '@lucide/svelte/icons/menu';
+	import { LayoutGrid, PanelLeftOpen, Plus, ServerCog } from '#lib/components/movingicons';
 	import Logo from '#lib/sf/ui/Logo.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
+	import Sidebar from '#lib/sf/ui/Sidebar.svelte';
 	import KeyGate from '#lib/sf/ui/KeyGate.svelte';
 	import RepoPicker from '#lib/sf/ui/RepoPicker.svelte';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { parseBuild } from '#lib/sf/format';
+	import { seen } from '#lib/sf/seen.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
 	onMount(() => fleet.start());
 
 	const path = $derived(page.url.hash.replace(/^#/, '') || '/');
-	const nav = [
-		{ href: '#/', label: 'New task', icon: Plus, on: (p: string) => p === '/' },
-		{ href: '#/runs', label: 'Runs', icon: ListTree, on: (p: string) => p.startsWith('/runs') },
-		{ href: '#/machines', label: 'Machines', icon: Server, on: (p: string) => p.startsWith('/machines') }
-	];
 	const running = $derived(fleet.runs.filter((r) => r.thread_status === 'running').length);
-	const build = $derived(parseBuild(fleet.setup?.build));
-	const connLabel = $derived(
-		fleet.conn === 'unreachable' ? 'Control plane unreachable'
-		: !fleet.loaded ? 'Connecting…'
-		: `${fleet.online.length} of ${fleet.workers.length} machine${fleet.workers.length === 1 ? '' : 's'} online`
-	);
+
+	// Opening a run marks it seen, and keeps it seen as new replies land while it's open.
+	$effect(() => {
+		if (fleet.loaded) untrack(() => seen.init(fleet.runs));
+	});
+	$effect(() => {
+		const id = /^\/runs\/([^/?#]+)/.exec(path)?.[1];
+		const r = id && fleet.runs.find((r) => r.id === id);
+		if (r) untrack(() => seen.mark(r));
+	});
+
+	// Desktop: the sidebar can be tucked away to a slim rail; the choice sticks.
+	const SIDEBAR = 'sidefleet_sidebar';
+	let collapsed = $state(false);
+	try { collapsed = localStorage.getItem(SIDEBAR) === 'collapsed'; } catch { /* storage blocked */ }
+	function toggle() {
+		collapsed = !collapsed;
+		try { localStorage.setItem(SIDEBAR, collapsed ? 'collapsed' : 'open'); } catch { /* storage blocked */ }
+	}
+	const rail = [
+		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
+		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
+	];
+	const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+	const toggleKeys = isMac ? '⌘B' : 'Ctrl B';
+	function onkeydown(e: KeyboardEvent) {
+		if ((isMac ? e.metaKey : e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
+			e.preventDefault();
+			toggle();
+		}
+	}
+
+	// Phones: the sidebar is a drawer, closed again once you pick somewhere to go.
+	let drawer = $state(false);
+	$effect(() => {
+		void path;
+		untrack(() => (drawer = false));
+	});
 </script>
 
+<svelte:window {onkeydown} />
 <ModeWatcher defaultMode="system" />
 <Toaster position="bottom-right" />
 
 <Tooltip.Provider delayDuration={300}>
 	<div class="flex min-h-dvh flex-col md:flex-row">
-		<aside class="flex shrink-0 items-center gap-1 border-b border-sidebar-border bg-sidebar px-3 py-2 md:sticky md:top-0 md:h-dvh md:w-56 md:flex-col md:items-stretch md:gap-0.5 md:border-r md:border-b-0 md:px-3 md:py-4">
-			<a href="#/" class="mr-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-[15px] font-semibold tracking-tight md:mr-0 md:mb-4">
-				<Logo />Sidefleet
-			</a>
-			<nav class="flex gap-0.5 md:flex-col" aria-label="Main">
-				{#each nav as item (item.href)}
-					<a
-						href={item.href}
-						aria-current={item.on(path) ? 'page' : undefined}
-						class="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] transition-colors {item.on(path)
-							? 'bg-sidebar-accent font-medium text-foreground'
-							: 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground'}"
-					>
-						<item.icon class="size-4" />
-						<span class="hidden sm:inline">{item.label}</span>
-						{#if item.href === '#/runs' && running}
-							<span class="tnum ml-auto hidden rounded-full bg-run-soft px-1.5 text-[11px] font-medium text-run-ink md:inline">{running}</span>
-						{/if}
-					</a>
-				{/each}
-			</nav>
+		<!-- Desktop -->
+		{#if collapsed}
+			<aside class="sticky top-0 hidden h-dvh w-13 shrink-0 flex-col items-center gap-1 border-r border-sidebar-border bg-sidebar py-3 md:flex">
+				<Tooltip.Root>
+					<Tooltip.Trigger class="mi-hover grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="Show sidebar" onclick={toggle}>
+						<PanelLeftOpen size={14} />
+					</Tooltip.Trigger>
+					<Tooltip.Content side="right">Show sidebar<Kbd class="ml-1.5">{toggleKeys}</Kbd></Tooltip.Content>
+				</Tooltip.Root>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						{#snippet child({ props })}
+							<a {...props} href="#/" class="mi-hover mt-1 grid size-8 place-items-center rounded-lg border bg-card shadow-xs hover:bg-accent/60" aria-label="New task"><Plus size={14} /></a>
+						{/snippet}
+					</Tooltip.Trigger>
+					<Tooltip.Content side="right">New task</Tooltip.Content>
+				</Tooltip.Root>
+				{#if running}
+					<button type="button" onclick={toggle} class="tnum mt-2 flex items-center gap-1 rounded-full bg-run-soft px-1.5 py-0.5 text-[11px] font-medium text-run-ink" title="{running} running">
+						<StatusDot status="running" />{running}
+					</button>
+				{/if}
+				<nav class="mt-auto flex flex-col items-center gap-1" aria-label="Main">
+					{#each rail as n (n.href)}
+						<Tooltip.Root>
+							<Tooltip.Trigger>
+								{#snippet child({ props })}
+									<a
+										{...props}
+										href={n.href}
+										aria-label={n.label}
+										aria-current={n.on(path) ? 'page' : undefined}
+										class="mi-hover relative grid size-8 place-items-center rounded-md {n.on(path) ? 'bg-sidebar-accent text-foreground' : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground'}"
+									>
+										<n.icon size={14} />
+										{#if n.href === '#/machines'}
+											<StatusDot status={fleet.conn === 'unreachable' ? 'failed' : fleet.online.length ? 'online' : 'offline'} class="absolute top-1.5 right-1.5" />
+										{/if}
+									</a>
+								{/snippet}
+							</Tooltip.Trigger>
+							<Tooltip.Content side="right">{n.label}</Tooltip.Content>
+						</Tooltip.Root>
+					{/each}
+				</nav>
+			</aside>
+		{:else}
+			<aside class="sticky top-0 hidden h-dvh w-76 shrink-0 border-r border-sidebar-border bg-sidebar md:block">
+				<Sidebar {path} onClose={toggle} closeKeys={toggleKeys} />
+			</aside>
+		{/if}
 
-			<div class="ml-auto flex items-center gap-1 md:mt-auto md:ml-0 md:border-t md:border-sidebar-border md:pt-3">
-				<a href="#/machines" class="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground">
-					<StatusDot status={fleet.conn === 'unreachable' ? 'failed' : fleet.online.length ? 'online' : 'offline'} />
-					<span class="hidden truncate md:inline">{connLabel}</span>
-				</a>
-				<DropdownMenu.Root>
-					<DropdownMenu.Trigger class="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="Settings">
-						<Settings class="size-4" />
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Content align="end" side="top" class="w-56">
-						<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Appearance</DropdownMenu.Label>
-						<DropdownMenu.RadioGroup value={userPrefersMode.current} onValueChange={(v) => setMode(v as 'light' | 'dark' | 'system')}>
-							<DropdownMenu.RadioItem value="system">Match system</DropdownMenu.RadioItem>
-							<DropdownMenu.RadioItem value="light">Light</DropdownMenu.RadioItem>
-							<DropdownMenu.RadioItem value="dark">Dark</DropdownMenu.RadioItem>
-						</DropdownMenu.RadioGroup>
-						<DropdownMenu.Separator />
-						<DropdownMenu.Item onclick={() => (fleet.pickerOpen = true)}>Choose repos…</DropdownMenu.Item>
-						<DropdownMenu.Item onclick={() => fleet.signOut()}>Change developer key…</DropdownMenu.Item>
-						{#if build.sha}
-							<DropdownMenu.Separator />
-							<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Control plane {build.version}, build <span class="font-mono">{build.sha}</span> from {build.date}</DropdownMenu.Label>
-						{/if}
-					</DropdownMenu.Content>
-				</DropdownMenu.Root>
-			</div>
-		</aside>
+		<!-- Phones -->
+		<header class="sticky top-0 z-30 flex h-13 shrink-0 items-center gap-1 border-b border-sidebar-border bg-sidebar/90 px-2 backdrop-blur md:hidden">
+			<button type="button" class="relative grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="Open menu" onclick={() => (drawer = true)}>
+				<Menu class="size-5" />
+				{#if running}<StatusDot status="running" class="absolute top-2 right-1.5" />{/if}
+			</button>
+			<a href="#/" class="flex items-center gap-2 text-[15px] font-semibold tracking-tight"><Logo />Sidefleet</a>
+			<a href="#/" class="mi-hover ml-auto grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="New task"><Plus size={18} /></a>
+		</header>
+		<DialogPrimitive.Root bind:open={drawer}>
+			<DialogPrimitive.Portal>
+				<DialogPrimitive.Overlay class="fixed inset-0 z-50 bg-black/25 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 md:hidden" />
+				<DialogPrimitive.Content class="fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r border-sidebar-border bg-sidebar shadow-xl outline-none duration-200 data-open:animate-in data-open:slide-in-from-left data-closed:animate-out data-closed:slide-out-to-left md:hidden">
+					<DialogPrimitive.Title class="sr-only">Navigation</DialogPrimitive.Title>
+					<Sidebar {path} onClose={() => (drawer = false)} drawer />
+				</DialogPrimitive.Content>
+			</DialogPrimitive.Portal>
+		</DialogPrimitive.Root>
 
 		<main class="min-w-0 flex-1">
 			{#if fleet.conn === 'unreachable' && fleet.loaded}

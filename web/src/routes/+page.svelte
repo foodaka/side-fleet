@@ -310,10 +310,11 @@
 		</form>
 
 		{#if recent.length}
-			<div class="flex flex-col">
+			<!-- On wider screens the sidebar lists these. -->
+			<div class="flex flex-col md:hidden">
 				<div class="flex items-baseline justify-between px-1 pb-2">
 					<h2 class="text-[13px] font-medium text-muted-foreground">Recent</h2>
-					<a href="#/runs" class="text-xs text-muted-foreground hover:text-foreground">All runs</a>
+					<a href="#/runs" class="text-xs text-muted-foreground hover:text-foreground">Overview</a>
 				</div>
 				<ul class="flex flex-col">
 					{#each recent as r (r.id)}

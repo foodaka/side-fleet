@@ -31,15 +31,14 @@
 	const workerOnline = (id: string | null) => !!fleet.workers.find((w) => w.id === id)?.online;
 </script>
 
-<svelte:head><title>Runs · Sidefleet</title></svelte:head>
+<svelte:head><title>Overview · Sidefleet</title></svelte:head>
 
 <section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-8 md:px-8">
 	<header class="flex flex-wrap items-end justify-between gap-4">
 		<div>
-			<h1 class="text-[22px] font-semibold tracking-tight">Runs</h1>
-			<p class="mt-1 text-[13px] text-muted-foreground">Every task and its replies, newest activity first.</p>
+			<h1 class="text-[22px] font-semibold tracking-tight">Overview</h1>
+			<p class="mt-1 text-[13px] text-muted-foreground">What the fleet is doing, and every task it has run, newest activity first.</p>
 		</div>
-		<a href="#/" class="inline-flex h-8 items-center rounded-full bg-primary px-3.5 text-[13px] font-medium text-primary-foreground">New task</a>
 	</header>
 
 	<dl class="grid grid-cols-2 overflow-hidden rounded-xl border bg-card sm:grid-cols-4">

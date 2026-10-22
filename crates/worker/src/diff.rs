@@ -3,6 +3,10 @@
 //! using a throwaway index so the user's own index is never touched. The diff
 //! between the two is the turn's changes; the diff from the tree recorded when
 //! the thread started is everything the task has changed so far.
+//!
+//! When a task catches up with the main branch (a merge or rebase), the
+//! commits it brings in are not the task's work: both diffs then count from
+//! where the task's branch now meets the main branch, as a pull request would.
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +40,20 @@ pub async fn snapshot(cwd: &Path) -> Result<String> {
     res
 }
 
+/// A working tree and the commit checked out when it was taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Point {
+    pub tree: String,
+    pub commit: Option<String>,
+}
+
+/// The working tree as it is now, with the commit it sits on.
+pub async fn point(cwd: &Path) -> Result<Point> {
+    let tree = snapshot(cwd).await?;
+    let commit = git(cwd, &["rev-parse", "--verify", "-q", "HEAD"], &[]).await.ok();
+    Ok(Point { tree, commit })
+}
+
 /// Where the tree a thread started from is kept: one file per root run in the
 /// repo's git dir. Nothing references the tree, so git may prune it after
 /// a couple of weeks; a thread that old just shows per-turn changes.
@@ -44,31 +62,115 @@ async fn base_file(cwd: &Path, root_id: Uuid) -> Result<PathBuf> {
     Ok(PathBuf::from(common).join("sidefleet").join("bases").join(root_id.to_string()))
 }
 
-/// The tree the thread started from, recording `before` as that tree on the first turn.
-pub async fn thread_base(cwd: &Path, root_id: Uuid, before: &str) -> Option<String> {
+/// Where the thread started, recording `before` as that point on the first turn.
+/// Bases written before commits were recorded hold only the tree.
+pub async fn thread_base(cwd: &Path, root_id: Uuid, before: &Point) -> Option<Point> {
     let path = base_file(cwd, root_id).await.ok()?;
     if let Ok(s) = std::fs::read_to_string(&path) {
-        let tree = s.trim().to_string();
-        if git(cwd, &["cat-file", "-e", &format!("{tree}^{{tree}}")], &[]).await.is_ok() {
-            return Some(tree);
+        let mut parts = s.split_whitespace();
+        if let Some(tree) = parts.next() {
+            if git(cwd, &["cat-file", "-e", &format!("{tree}^{{tree}}")], &[]).await.is_ok() {
+                return Some(Point { tree: tree.to_string(), commit: parts.next().map(str::to_string) });
+            }
         }
     }
     std::fs::create_dir_all(path.parent()?).ok()?;
-    std::fs::write(&path, format!("{before}\n")).ok()?;
-    Some(before.to_string())
+    let line = match &before.commit {
+        Some(c) => format!("{} {c}\n", before.tree),
+        None => format!("{}\n", before.tree),
+    };
+    std::fs::write(&path, line).ok()?;
+    Some(before.clone())
+}
+
+/// The tree to diff from, starting at `p`: `p`'s own tree, or, when the task
+/// has since caught up with the main branch, that branch where the task now
+/// meets it, with how many commits came in and from where.
+/// The task's work in `p` is carried over with a three-way merge; if that
+/// conflicts, `p` stays where it was.
+async fn caught_up(cwd: &Path, p: &Point) -> (String, Option<Value>) {
+    let unchanged = (p.tree.clone(), None);
+    let Some(start) = &p.commit else { return unchanged };
+    let Some(up) = upstream(cwd).await else { return unchanged };
+    let (Ok(old), Ok(new)) = (
+        git(cwd, &["merge-base", start, &up], &[]).await,
+        git(cwd, &["merge-base", "HEAD", &up], &[]).await,
+    ) else {
+        return unchanged;
+    };
+    if old == new || git(cwd, &["merge-base", "--is-ancestor", &old, &new], &[]).await.is_err() {
+        return unchanged;
+    }
+    let (Ok(tree), Ok(n)) = (
+        moved_tree(cwd, &old, &p.tree, &new).await,
+        git(cwd, &["rev-list", "--count", &format!("{old}..{new}")], &[]).await,
+    ) else {
+        return unchanged;
+    };
+    let commits: u64 = n.parse().unwrap_or(0);
+    (tree, Some(json!({ "commits": commits, "upstream": up })))
+}
+
+/// `tree`, which differs from `from` by the task's work so far (committed or
+/// not), with that work replayed onto `to`.
+async fn moved_tree(cwd: &Path, from: &str, tree: &str, to: &str) -> Result<String> {
+    if git(cwd, &["rev-parse", &format!("{from}^{{tree}}")], &[]).await? == tree {
+        return git(cwd, &["rev-parse", &format!("{to}^{{tree}}")], &[]).await;
+    }
+    // merge-tree wants commits; this one is never referenced and git prunes it.
+    let who = [
+        ("GIT_AUTHOR_NAME", "sidefleet".to_string()), ("GIT_AUTHOR_EMAIL", "sidefleet@localhost".to_string()),
+        ("GIT_COMMITTER_NAME", "sidefleet".to_string()), ("GIT_COMMITTER_EMAIL", "sidefleet@localhost".to_string()),
+    ];
+    let wip = git(cwd, &["commit-tree", tree, "-p", from, "-m", "sidefleet snapshot"], &who).await?;
+    // Exits non-zero on conflicts, which the helper turns into an error.
+    let out = git(cwd, &["merge-tree", "--write-tree", "--merge-base", from, &wip, to], &[]).await?;
+    Ok(out.lines().next().unwrap_or_default().to_string())
+}
+
+/// The repo's main branch: what `origin/HEAD` points at, else the usual names.
+/// None when the task is on that branch itself, where catching up and the
+/// task's own commits cannot be told apart.
+async fn upstream(cwd: &Path) -> Option<String> {
+    let mut found = None;
+    if let Ok(r) = git(cwd, &["rev-parse", "--abbrev-ref", "origin/HEAD"], &[]).await {
+        if r != "origin/HEAD" {
+            found = Some(r);
+        }
+    }
+    if found.is_none() {
+        for r in ["origin/main", "origin/master", "main", "master"] {
+            if git(cwd, &["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")], &[]).await.is_ok() {
+                found = Some(r.to_string());
+                break;
+            }
+        }
+    }
+    let up = found?;
+    let branch = git(cwd, &["symbolic-ref", "-q", "--short", "HEAD"], &[]).await.unwrap_or_default();
+    let short = up.strip_prefix("origin/").unwrap_or(&up);
+    (branch != short).then_some(up)
 }
 
 /// The `diff` event payload, or None when nothing changed in this turn.
 /// `turn` is this turn's changes; `total` is everything since the thread
-/// started, left out when it is the same as `turn`.
-pub async fn diff_event(cwd: &Path, base: Option<&str>, before: &str, after: &str) -> Option<Value> {
-    if before == after {
+/// started, left out when it is the same as `turn`. A turn that caught up
+/// with the main branch carries `caught_up` (`commits`, `upstream`).
+pub async fn diff_event(cwd: &Path, base: Option<&Point>, before: &Point, after: &str) -> Option<Value> {
+    if before.tree == after {
         return None;
     }
-    let turn = diff(cwd, before, after).await.ok()?;
+    let (from, caught) = caught_up(cwd, before).await;
+    let mut turn = diff(cwd, &from, after).await.ok()?;
+    if let Some(c) = caught {
+        turn["caught_up"] = c;
+    }
     let total = match base {
-        Some(b) if b != before => diff(cwd, b, after).await.ok(),
-        _ => None,
+        Some(b) => {
+            let (b, _) = caught_up(cwd, b).await;
+            if b != from { diff(cwd, &b, after).await.ok() } else { None }
+        }
+        None => None,
     };
     Some(json!({ "turn": turn, "total": total }))
 }
@@ -348,17 +450,17 @@ index 7777777..8888888 100644
         sh(d, &["add", "."]);
         sh(d, &["commit", "-q", "-m", "init"]);
 
-        let before = snapshot(d).await.unwrap();
+        let before = point(d).await.unwrap();
         let root = Uuid::new_v4();
-        assert_eq!(thread_base(d, root, &before).await.as_deref(), Some(before.as_str()));
+        assert_eq!(thread_base(d, root, &before).await, Some(before.clone()));
         assert!(diff_event(d, Some(&before), &before, &snapshot(d).await.unwrap()).await.is_none(), "no change, no event");
 
         std::fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(d.join("b.txt"), "new\n").unwrap();
         std::fs::create_dir_all(d.join("target")).unwrap();
         std::fs::write(d.join("target/out"), "ignored\n").unwrap();
-        let mid = snapshot(d).await.unwrap();
-        let ev = diff_event(d, Some(&before), &before, &mid).await.unwrap();
+        let mid = point(d).await.unwrap();
+        let ev = diff_event(d, Some(&before), &before, &mid.tree).await.unwrap();
         let paths: Vec<&str> = ev["turn"]["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
         assert_eq!(paths, vec!["a.txt", "b.txt"]);
         assert!(ev["total"].is_null(), "first turn: total is the turn");
@@ -377,5 +479,83 @@ index 7777777..8888888 100644
         let status = std::process::Command::new("git").arg("-C").arg(d).args(["status", "--porcelain"]).output().unwrap();
         let status = String::from_utf8_lossy(&status.stdout);
         assert!(status.contains(" M a.txt") && status.contains("?? c.txt"), "real index untouched: {status}");
+    }
+
+    fn files(set: &Value) -> Vec<&str> {
+        set["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn catching_up_with_main_is_not_counted_as_the_task_s_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, other, d) = (dir.path().join("origin.git"), dir.path().join("other"), dir.path().join("task"));
+        sh(dir.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        sh(dir.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]);
+        std::fs::write(other.join("a.txt"), "one\n").unwrap();
+        sh(&other, &["add", "."]);
+        sh(&other, &["commit", "-q", "-m", "init"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        sh(dir.path(), &["clone", "-q", origin.to_str().unwrap(), d.to_str().unwrap()]);
+        sh(&d, &["checkout", "-q", "-b", "sidefleet/task"]);
+        let land = |name: &str| {
+            std::fs::write(other.join(name), "upstream\n").unwrap();
+            sh(&other, &["add", "."]);
+            sh(&other, &["commit", "-q", "-m", name]);
+            sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        };
+        let root = Uuid::new_v4();
+
+        // Turn 1 commits its work.
+        let p1 = point(&d).await.unwrap();
+        let base = thread_base(&d, root, &p1).await.unwrap();
+        std::fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
+        sh(&d, &["commit", "-q", "-am", "agent"]);
+        let p2 = point(&d).await.unwrap();
+        let ev = diff_event(&d, Some(&base), &p1, &p2.tree).await.unwrap();
+        assert_eq!(files(&ev["turn"]), vec!["a.txt"]);
+
+        // Turn 2 merges two new commits from main, then edits c.txt.
+        land("up1.txt");
+        land("up2.txt");
+        sh(&d, &["pull", "-q", "--no-rebase", "--no-edit", "origin", "main"]);
+        std::fs::write(d.join("c.txt"), "c\n").unwrap();
+        let p3 = point(&d).await.unwrap();
+        let ev = diff_event(&d, Some(&base), &p2, &p3.tree).await.unwrap();
+        assert_eq!(files(&ev["turn"]), vec!["c.txt"]);
+        assert_eq!(ev["turn"]["caught_up"], json!({"commits": 2, "upstream": "origin/main"}));
+        assert_eq!(files(&ev["total"]), vec!["a.txt", "c.txt"]);
+
+        // Turn 3 starts with c.txt uncommitted, merges again, and adds d.txt.
+        land("up3.txt");
+        sh(&d, &["pull", "-q", "--no-rebase", "--no-edit", "origin", "main"]);
+        std::fs::write(d.join("d.txt"), "d\n").unwrap();
+        let p4 = point(&d).await.unwrap();
+        let ev = diff_event(&d, Some(&base), &p3, &p4.tree).await.unwrap();
+        assert_eq!(files(&ev["turn"]), vec!["d.txt"]);
+        assert_eq!(ev["turn"]["caught_up"]["commits"], 1);
+        assert_eq!(files(&ev["total"]), vec!["a.txt", "c.txt", "d.txt"]);
+
+        // A later turn that does not catch up is diffed as before.
+        std::fs::write(d.join("d.txt"), "d\ne\n").unwrap();
+        let p5 = point(&d).await.unwrap();
+        let ev = diff_event(&d, Some(&base), &p4, &p5.tree).await.unwrap();
+        assert_eq!(files(&ev["turn"]), vec!["d.txt"]);
+        assert!(ev["turn"].get("caught_up").is_none());
+    }
+
+    #[tokio::test]
+    async fn work_on_the_main_branch_itself_is_never_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        sh(d, &["init", "-q", "-b", "main"]);
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-q", "-m", "init"]);
+        let p1 = point(d).await.unwrap();
+        std::fs::write(d.join("a.txt"), "two\n").unwrap();
+        sh(d, &["commit", "-q", "-am", "agent"]);
+        let ev = diff_event(d, Some(&p1), &p1, &snapshot(d).await.unwrap()).await.unwrap();
+        assert_eq!(files(&ev["turn"]), vec!["a.txt"]);
+        assert!(ev["turn"].get("caught_up").is_none());
     }
 }

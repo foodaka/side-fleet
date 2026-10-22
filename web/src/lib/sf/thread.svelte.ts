@@ -3,6 +3,7 @@ import { followRun } from './sse';
 import { fleet } from './state.svelte';
 import type { Run, RunEvent } from './types';
 import { agentName } from './format';
+import type { DiffSet } from './diff/parse';
 
 export type Item =
 	| { kind: 'text'; key: string; text: string; at: string }
@@ -47,6 +48,8 @@ export interface Turn {
 	} | null;
 	lastText: string;
 	reconnecting: boolean;
+	/** What this turn changed, and everything the thread has changed so far (null: same as `turn`). */
+	diff: { turn: DiffSet; total: DiffSet | null } | null;
 }
 
 function newTurn(run: Run): Turn {
@@ -63,7 +66,8 @@ function newTurn(run: Run): Turn {
 		activity: run.status === 'queued' ? 'queued' : null,
 		result: null,
 		lastText: '',
-		reconnecting: false
+		reconnecting: false,
+		diff: null
 	};
 }
 
@@ -80,6 +84,11 @@ export class Thread {
 	branch = $derived(this.turns.find((t) => t.branch)?.branch ?? null);
 	machine = $derived(this.turns.findLast((t) => t.machine)?.machine ?? null);
 	hasSession = $derived(this.runs.some((r) => !!r.session_id));
+	/** Everything the thread has changed: the latest turn that changed anything knows the total. */
+	changes = $derived.by(() => {
+		const d = this.turns.findLast((t) => t.diff)?.diff;
+		return d ? (d.total ?? d.turn) : null;
+	});
 
 	async load(id: string) {
 		try {
@@ -240,6 +249,9 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				tokens: tokenCount(p.usage)
 			};
 			t.activity = null;
+			break;
+		case 'diff':
+			if (p.turn) t.diff = { turn: p.turn, total: p.total ?? null };
 			break;
 		case 'stop_requested':
 			t.activity = 'Stopping';

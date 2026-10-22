@@ -416,6 +416,37 @@ async fn tasks_go_to_machines_with_their_agent_and_codex_threads_resume() {
     h.teardown().await;
 }
 
+#[tokio::test]
+async fn each_turn_reports_its_changes_and_the_thread_total() {
+    let h = Harness::start(2).await;
+    let id = h.create("edit the readme", "demo").await;
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let events = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).filter(|k| *k != "stderr").collect();
+    // The diff lands before the run's final status.
+    assert_eq!(&kinds[kinds.len() - 3..], ["result", "diff", "status"], "{kinds:?}");
+    let d = &events.iter().find(|e| e.kind == "diff").unwrap().payload;
+    let files: Vec<(&str, &str)> = d["turn"]["files"].as_array().unwrap().iter().map(|f| (f["path"].as_str().unwrap(), f["status"].as_str().unwrap())).collect();
+    assert_eq!(files, vec![("README.md", "modified"), ("notes.txt", "added")]);
+    assert_eq!(d["turn"]["additions"], 3);
+    assert_eq!(d["turn"]["deletions"], 0);
+    assert!(d["turn"]["files"][0]["patch"].as_str().unwrap().contains("+edited by the agent"));
+    assert!(d["total"].is_null(), "the first turn is the total");
+
+    // A follow-up reports only its own change, and the thread's total so far.
+    let r = h.http.post(format!("{}/v1/runs/{id}/messages", h.env.base_url)).bearer_auth(DEV_KEY).json(&json!({"task": "rename the notes"})).send().await.unwrap();
+    let follow: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    h.wait_status(follow, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let events = sidefleet_server::db::events_since(&h.env.pool, follow, 0).await.unwrap();
+    let d = &events.iter().find(|e| e.kind == "diff").unwrap().payload;
+    let turn: Vec<(&str, &str)> = d["turn"]["files"].as_array().unwrap().iter().map(|f| (f["path"].as_str().unwrap(), f["status"].as_str().unwrap())).collect();
+    assert_eq!(turn, vec![("docs-notes.txt", "renamed")]);
+    assert_eq!(d["turn"]["files"][0]["old_path"], "notes.txt");
+    let total: Vec<&str> = d["total"]["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(total, vec!["README.md", "docs-notes.txt"]);
+    h.teardown().await;
+}
+
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));

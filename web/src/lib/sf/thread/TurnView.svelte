@@ -7,9 +7,15 @@
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
 	import ToolRow from './ToolRow.svelte';
+	import ChangesCard from '../diff/ChangesCard.svelte';
 	import type { Turn } from '../thread.svelte';
 
-	let { turn, first, live }: { turn: Turn; first: boolean; live: boolean } = $props();
+	let {
+		turn,
+		first,
+		live,
+		onopendiff
+	}: { turn: Turn; first: boolean; live: boolean; onopendiff?: (runId: string, path: string | null) => void } = $props();
 	const run = $derived(turn.run);
 	// Consecutive stderr lines are grouped so they don't break up the narration.
 	const groups = $derived.by(() => {
@@ -89,10 +95,15 @@
 			</div>
 		{/if}
 
+		{#if turn.result?.text}
+			<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.result.text} /></div>
+		{/if}
+
+		{#if turn.diff && onopendiff}
+			<ChangesCard set={turn.diff.turn} onopen={(path) => onopendiff(run.id, path)} />
+		{/if}
+
 		{#if turn.result}
-			{#if turn.result.text}
-				<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.result.text} /></div>
-			{/if}
 			<p class="tnum flex flex-wrap gap-x-3 pt-1 text-xs text-muted-foreground">
 				{#if !turn.result.ok}<span class="text-err-ink">{agentName(run.agent)} reported an error{turn.result.subtype && turn.result.subtype !== 'error' ? ` (${turn.result.subtype})` : ''}</span>{/if}
 				{#if turn.result.durationMs != null}<span>{(turn.result.durationMs / 1000).toFixed(1)}s</span>{/if}

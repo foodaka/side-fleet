@@ -10,7 +10,7 @@ use sidefleet_core::{
     RunStatus, RunSummary, ISOLATION_MODES, PERMISSION_MODES,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{
@@ -39,6 +39,8 @@ struct WebApp;
 const CONNECT_MD: &str = include_str!("../static/connect.md");
 /// Tasks and replies up to this many bytes; well under what an agent CLI accepts as an argument.
 pub const MAX_TASK_BYTES: usize = 100_000;
+/// One batch of worker events, images included.
+pub const MAX_EVENTS_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
     let dev = Router::new()
@@ -48,6 +50,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/messages", post(follow_up))
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
+        .route("/v1/images/{id}", get(get_image))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}/update", post(request_update))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
@@ -59,7 +62,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/heartbeat", post(heartbeat))
         .route("/v1/worker/update-ack", post(update_ack))
         .route("/v1/worker/claim", post(claim_run))
-        .route("/v1/worker/runs/{id}/events", post(post_events))
+        // Events can carry screenshots (base64), well past axum's 2 MB default.
+        .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/worker/runs/{id}/control", get(run_control))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_worker));
@@ -216,6 +220,7 @@ async fn get_thread(
 }
 
 /// Continue the conversation: queue a run that resumes the thread's session, with the same agent.
+/// While an earlier message runs, the new one waits behind it (stop that one to send this now).
 async fn follow_up(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -240,7 +245,7 @@ async fn follow_up(
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
         }
         FollowUpOutcome::NotFound => Err(not_found()),
-        FollowUpOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the previous message is still running; wait for it to finish or stop it".into())),
+        FollowUpOutcome::QueueFull => Err(ApiError(StatusCode::CONFLICT, format!("{} messages are already waiting; wait for them or stop some", db::MAX_QUEUED_MESSAGES))),
         FollowUpOutcome::NoSession(_) => Err(ApiError(StatusCode::CONFLICT, "this thread has no agent session to resume; start a new task instead".into())),
     }
 }
@@ -250,6 +255,20 @@ async fn get_run(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Run>, ApiError> {
     db::get_run(&state.pool, id).await?.map(Json).ok_or_else(not_found)
+}
+
+/// An image from a tool result. Fetched by the page with its key, never embedded by URL.
+async fn get_image(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    let (media_type, data) = db::get_image(&state.pool, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "image not found".into()))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, media_type),
+            (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_string()),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        data,
+    )
+        .into_response())
 }
 
 async fn stop_run(
@@ -521,7 +540,12 @@ async fn claim_run(
     }
     // Workers from before multi-agent support only run Claude Code.
     let agents = if req.agents.is_empty() { vec![Agent::Claude.as_str().to_string()] } else { req.agents.clone() };
-    match db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref()).await? {
+    let claimed = db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref()).await?;
+    for ev in claimed.failed {
+        tracing::warn!(run_id = %ev.run_id, "queued message had no session to continue; failed");
+        state.events.publish(ev);
+    }
+    match claimed.run {
         Some((run, ev)) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, worker = %req.worker_id, "run claimed");

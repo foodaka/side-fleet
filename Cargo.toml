@@ -12,6 +12,7 @@ sidefleet-core = { path = "crates/core" }
 sidefleet-server = { path = "crates/server" }
 sidefleet-worker = { path = "crates/worker" }
 anyhow = "1"
+base64 = "0.22"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["json", "macros"] }
 chrono = { version = "0.4", features = ["serde"] }

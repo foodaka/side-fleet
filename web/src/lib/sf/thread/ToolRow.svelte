@@ -11,6 +11,7 @@
 	import ListChecks from '@lucide/svelte/icons/list-checks';
 	import { Loader } from '#lib/components/ai-elements/loader';
 	import { toolVerb, type Item } from '../thread.svelte';
+	import ToolImages from './ToolImages.svelte';
 
 	let { item, live }: { item: Extract<Item, { kind: 'tool' }>; live: boolean } = $props();
 	const icon = $derived(
@@ -52,3 +53,4 @@
 	</Collapsible.Content>
 </Collapsible.Root>
 {#if !open && item.isError && firstLine}<p class="ml-7.5 truncate text-xs text-err-ink">{firstLine}</p>{/if}
+{#if item.images.length}<ToolImages images={item.images} />{/if}

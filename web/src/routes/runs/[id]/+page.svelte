@@ -37,7 +37,7 @@
 	});
 
 	const root = $derived(thread?.root);
-	const latest = $derived(thread?.latest);
+	const latest = $derived(thread?.current);
 	const live = $derived(!!thread?.live);
 	const machineOnline = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.online);
 
@@ -74,7 +74,7 @@
 
 	async function send(e?: Event) {
 		e?.preventDefault();
-		if (!thread || !reply.trim() || live || sending) return;
+		if (!thread || !reply.trim() || sending) return;
 		sending = true;
 		try {
 			await thread.reply(reply.trim(), perm || undefined);
@@ -84,6 +84,12 @@
 			toast.error('Could not send', { description: (err as Error).message });
 		}
 		sending = false;
+	}
+	async function sendNow() {
+		try { await thread?.interrupt(); } catch (err) { toast.error('Could not interrupt', { description: (err as Error).message }); }
+	}
+	async function cancel(id: string) {
+		try { await thread?.cancel(id); } catch (err) { toast.error('Could not cancel', { description: (err as Error).message }); }
 	}
 	async function stop() {
 		stopping = true;
@@ -97,7 +103,7 @@
 	}
 	$effect(() => { void reply; grow(); });
 	const hint = $derived(
-		live ? 'You can reply once this finishes, or stop it.'
+		live ? 'Your message waits until this one finishes; Send now interrupts it.'
 		: !thread?.hasSession ? 'There is no session to continue; start a new task instead.'
 		: `Continues the same session on ${thread?.machine ?? 'that machine'}${thread?.branch ? `, on ${thread.branch}` : ''}.`
 	);
@@ -159,7 +165,15 @@
 			<ConversationContent class="mx-auto w-full max-w-3xl gap-10 px-4 py-6">
 				{#if thread}
 					{#each thread.turns as turn, i (turn.run.id)}
-						<TurnView {turn} first={i === 0} live={live && i === thread.turns.length - 1} onopendiff={openDiff} />
+						<TurnView
+							{turn}
+							first={i === 0}
+							live={turn.run.id === thread.current?.id && live}
+							waiting={thread.waiting(turn.run.id)}
+							onsendnow={sendNow}
+							oncancel={() => cancel(turn.run.id)}
+							onopendiff={openDiff}
+						/>
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}
 						<p class="rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground">
@@ -187,7 +201,7 @@
 						bind:value={reply}
 						rows="1"
 						disabled={!thread?.hasSession && !live}
-						placeholder={live ? 'Write your next message…' : 'Reply to continue on the same machine…'}
+						placeholder={live ? 'Queue your next message…' : 'Reply to continue on the same machine…'}
 						onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) send(e); }}
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
@@ -202,7 +216,7 @@
 							</Select.Content>
 						</Select.Root>
 						<span class="hidden min-w-0 truncate text-xs text-faint sm:inline">{hint}</span>
-						<button type="submit" aria-label="Send" disabled={!reply.trim() || live || sending} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
+						<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />
 						</button>
 					</div>

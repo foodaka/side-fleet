@@ -477,11 +477,6 @@ async fn follow_ups_resume_the_session_on_the_same_worker() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST, "unknown permission mode rejected");
 
-    // No session yet: a follow-up is refused while the root is queued (busy), and after a
-    // finish without any session id (no session).
-    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{root}/messages")).json(&json!({"task": "again"})).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::CONFLICT);
-
     let claimed = api.claim("w1", &["r"]).await.unwrap();
     assert_eq!(claimed.id, root);
     api.post_events("w1", root, json!([
@@ -508,9 +503,6 @@ async fn follow_ups_resume_the_session_on_the_same_worker() {
     let c = api.claim("w1", &["r"]).await.expect("pinned worker claims the follow-up");
     assert_eq!(c.id, f1);
 
-    // While it runs, a further message is refused as busy.
-    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{root}/messages")).json(&json!({"task": "more"})).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::CONFLICT);
     api.post_events("w1", f1, json!([{"kind": "result", "payload": {"subtype": "success", "is_error": false, "result": "ok", "session_id": "sess-abc"}}])).await;
     api.finish("w1", f1, "succeeded", json!({"result": "ok"})).await;
 
@@ -1029,5 +1021,151 @@ async fn a_failover_run_lost_to_a_worker_restart_moves_unless_a_stop_was_pending
         .unwrap();
     assert_eq!(api.claim("w", &["r"]).await.unwrap().id, thread[1].id);
 
+    env.teardown().await;
+}
+
+
+async fn send_message(api: &Api, run: Uuid, task: &str) -> Uuid {
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{run}/messages")).json(&json!({"task": task})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED, "{}", r.text().await.unwrap());
+    r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn messages_queue_behind_a_running_one_and_resume_its_session() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    api.register("w2", &["r"]).await;
+
+    let (_, v) = api.create_run("first", "r").await;
+    let root: Uuid = v["id"].as_str().unwrap().parse().unwrap();
+    // Queued while the root has not even started: no session or machine yet.
+    let m1 = send_message(&api, root, "second").await;
+    let m1run = api.get_run(m1).await;
+    assert_eq!(m1run.status, RunStatus::Queued);
+    assert_eq!(m1run.resume_session_id, None);
+    assert_eq!(m1run.pinned_worker_id, None);
+
+    assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, root);
+    assert!(api.claim("w1", &["r"]).await.is_none(), "a message must wait for the one before it");
+    api.post_events("w1", root, json!([{"kind": "agent_init", "payload": {"session_id": "s1"}}])).await;
+    let m2 = send_message(&api, root, "third").await;
+
+    let list: Vec<RunSummary> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    assert_eq!(list.iter().find(|s| s.run.id == root).unwrap().thread_status, RunStatus::Running, "the running message wins over queued ones");
+
+    // Send now: stop the running message; the next one continues its session on the same machine.
+    api.stop(root).await;
+    api.finish("w1", root, "stopped", json!({})).await;
+    assert!(api.claim("w2", &["r"]).await.is_none(), "the queued message must stay on the machine with the session");
+    let c = api.claim("w1", &["r"]).await.expect("next message claimable once the previous finished");
+    assert_eq!(c.id, m1);
+    assert_eq!(c.resume_session_id.as_deref(), Some("s1"));
+    assert_eq!(api.get_run(m1).await.pinned_worker_id.as_deref(), Some("w1"));
+    assert!(api.claim("w1", &["r"]).await.is_none());
+    api.post_events("w1", m1, json!([{"kind": "result", "payload": {"session_id": "s2", "result": "ok"}}])).await;
+    api.finish("w1", m1, "succeeded", json!({})).await;
+    let c = api.claim("w1", &["r"]).await.unwrap();
+    assert_eq!(c.id, m2);
+    assert_eq!(c.resume_session_id.as_deref(), Some("s2"), "resumes the latest session, settled at claim time");
+    api.finish("w1", m2, "succeeded", json!({})).await;
+
+    // A queued message behind a run that never started a session fails instead of starting fresh.
+    let (_, v) = api.create_run("other", "r").await;
+    let root2: Uuid = v["id"].as_str().unwrap().parse().unwrap();
+    let n1 = send_message(&api, root2, "follow").await;
+    assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, root2);
+    api.finish("w1", root2, "failed", json!({"error": "boom"})).await;
+    assert!(api.claim("w1", &["r"]).await.is_none());
+    let n1run = api.get_run(n1).await;
+    assert_eq!(n1run.status, RunStatus::Failed);
+    assert!(n1run.result.unwrap()["error"].as_str().unwrap().contains("nothing to continue"));
+
+    // A finished thread without any session still refuses replies.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{root2}/messages")).json(&json!({"task": "x"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn tool_result_images_are_stored_apart_and_served_to_the_page() {
+    use base64::Engine;
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let (_, v) = api.create_run("screenshot please", "r").await;
+    let id: Uuid = v["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w1", &["r"]).await.unwrap();
+
+    // 3 MB: past axum's default body limit, which the events route raises.
+    let png: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let (status, _) = api.post_events("w1", id, json!([
+        {"kind": "tool_use", "payload": {"id": "t1", "name": "Read", "summary": "shot.png"}},
+        {"kind": "tool_result", "payload": {"tool_use_id": "t1", "content": "[image]", "images": [
+            {"media_type": "image/png", "data": b64},
+            {"media_type": "image/svg+xml", "data": "PHN2Zz4="},
+        ]}},
+    ])).await;
+    assert_eq!(status, StatusCode::OK);
+    api.finish("w1", id, "succeeded", json!({})).await;
+
+    let mut sse = Sse::open(&api, id, None).await;
+    let mut refs = Vec::new();
+    while let Some(ev) = sse.next_event(Duration::from_secs(5)).await {
+        if ev.kind == "tool_result" {
+            refs = ev.payload["images"].as_array().cloned().unwrap_or_default();
+        }
+    }
+    assert_eq!(refs.len(), 1, "the SVG is dropped: {refs:?}");
+    assert!(refs[0].get("data").is_none(), "image data must not be stored in the event");
+    assert_eq!(refs[0]["media_type"], "image/png");
+    assert_eq!(refs[0]["bytes"], 3_000_000);
+
+    let img = refs[0]["id"].as_str().unwrap();
+    let r = api.dev(reqwest::Method::GET, &format!("/v1/images/{img}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "image/png");
+    assert_eq!(r.bytes().await.unwrap().as_ref(), png.as_slice());
+    let r = Client::new().get(format!("{}/v1/images/{img}", env.base_url)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = api.dev(reqwest::Method::GET, &format!("/v1/images/{}", Uuid::new_v4())).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn a_queued_message_follows_a_failover_run_to_its_new_machine() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("laptop", &["r"]).await;
+    api.register("desktop", &["r"]).await;
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "fix it", "model": "claude-sonnet-5-5", "repo": "r", "failover": true}))
+        .send()
+        .await
+        .unwrap();
+    let root: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.claim("laptop", &["r"]).await.unwrap().id, root);
+    api.post_events("laptop", root, json!([{"kind": "agent_init", "payload": {"session_id": "on-laptop"}}])).await;
+    let queued = send_message(&api, root, "and add a test").await;
+
+    // The laptop drops; the run moves. The queued message waits for the moved run, not the dead machine.
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '2 minutes' WHERE id = 'laptop'").execute(&env.pool).await.unwrap();
+    sidefleet_server::db::reap_orphaned_runs(&env.pool, 90).await.unwrap();
+    let moved = api.claim("desktop", &["r"]).await.expect("desktop takes the moved run");
+    assert_ne!(moved.id, queued);
+    assert!(moved.moved_from.is_some());
+    assert!(api.claim("desktop", &["r"]).await.is_none(), "the message waits for the moved run");
+    api.post_events("desktop", moved.id, json!([{"kind": "agent_init", "payload": {"session_id": "on-desktop"}}])).await;
+    api.finish("desktop", moved.id, "succeeded", json!({})).await;
+
+    let c = api.claim("desktop", &["r"]).await.expect("then the message runs where the thread now lives");
+    assert_eq!(c.id, queued);
+    assert_eq!(c.resume_session_id.as_deref(), Some("on-desktop"));
     env.teardown().await;
 }

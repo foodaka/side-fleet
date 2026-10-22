@@ -235,6 +235,7 @@
 						<TurnView
 							{turn}
 							first={i === 0}
+							prev={thread.turns.slice(0, i).findLast((t) => t.run.kind !== 'restore')}
 							live={turn.run.id === thread.current?.id && live}
 							waiting={thread.waiting(turn.run.id)}
 							onsendnow={sendNow}

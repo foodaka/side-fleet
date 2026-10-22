@@ -107,9 +107,9 @@ sidefleet serve
 ```
 Sidefleet control plane is running.
 
-  Open the page:        http://192.168.1.20:7373/
+  Open the page:        http://<this-machine>:7373/
   Developer key:        3f9c…
-  Connect a machine:    sidefleet connect --control http://192.168.1.20:7373 --token 7b2e…
+  Connect a machine:    sidefleet connect --control http://<this-machine>:7373 --token 7b2e…
 ```
 
 Keys are saved to `~/.sidefleet/server.env`. If the machine has a coding agent installed, `serve`

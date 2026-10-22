@@ -171,19 +171,42 @@ pub enum FollowUpOutcome {
     QueueFull,
     /// The previous run never reported a session id (it failed before starting, or was stopped early).
     NoSession(Run),
+    /// The model isn't one the agent takes.
+    BadModel(String),
+    /// The thread's machine doesn't have the agent asked to switch to.
+    AgentMissing(String),
 }
 
 /// Messages that may wait behind a running one in a thread.
 pub const MAX_QUEUED_MESSAGES: usize = 10;
 
+/// The session `agent` can continue in a thread: the latest one since the
+/// thread last switched to that agent (optionally only one held by `worker`).
+/// None when another agent spoke more recently than any session of this one:
+/// that session is missing the turns since, so the agent gets a transcript instead.
+pub fn session_for(thread: &[Run], agent: Agent, worker: Option<&str>) -> Option<String> {
+    thread
+        .iter()
+        .rev()
+        .take_while(|r| r.agent == agent)
+        .filter(|r| worker.is_none() || r.worker_id.as_deref() == worker)
+        .find_map(|r| r.session_id.clone())
+}
+
 /// Continue a thread with a new message. The new run resumes the latest
 /// session in the thread and is pinned to the worker that holds it. While an
 /// earlier message is still queued or running, the new one waits behind it:
 /// its session and machine are settled when it is claimed (`claim_run`).
+///
+/// With another `agent` than the thread's latest message, the thread switches
+/// agents: the new one starts a session of its own in the same worktree, with
+/// a transcript of the thread so far (written at claim time, once the messages
+/// before it have finished).
 pub async fn create_follow_up(
     pool: &PgPool,
     run_id: Uuid,
     task: &str,
+    agent: Option<Agent>,
     model: Option<&str>,
     permission_mode: Option<&str>,
     images: &[ImageUpload],
@@ -196,18 +219,36 @@ pub async fn create_follow_up(
     let Some(latest) = thread.last().cloned() else {
         return Ok(FollowUpOutcome::NotFound);
     };
+    let agent = agent.unwrap_or(latest.agent);
+    // Without a model: the one this agent last used in the thread, else its default.
+    let model = match model {
+        Some(m) => m.to_string(),
+        None => thread.iter().rev().find(|r| r.agent == agent).map(|r| r.model.clone()).unwrap_or_else(|| default_model(agent).into()),
+    };
+    if let Err(e) = agent.check_model(&model) {
+        return Ok(FollowUpOutcome::BadModel(e));
+    }
     let busy = !latest.status.is_terminal();
     if busy && thread.iter().filter(|r| r.status == RunStatus::Queued).count() >= MAX_QUEUED_MESSAGES {
         return Ok(FollowUpOutcome::QueueFull);
     }
-    // The most recent session id anywhere in the thread (a stopped follow-up may lack one).
-    let session = thread.iter().rev().find_map(|r| r.session_id.clone());
-    if !busy && session.is_none() {
+    let session = session_for(&thread, agent, None);
+    // Another agent has spoken since this one's last session (or it never had one): hand over a transcript.
+    let handoff = session.is_none() && thread.iter().any(|r| r.agent != agent);
+    if !busy && session.is_none() && !handoff {
         return Ok(FollowUpOutcome::NoSession(latest));
+    }
+    let machine = thread.iter().rev().find_map(|r| r.worker_id.clone());
+    if agent != latest.agent {
+        if let Some(w) = &machine {
+            if !worker_has_agent(pool, w, agent).await? {
+                return Ok(FollowUpOutcome::AgentMissing(w.clone()));
+            }
+        }
     }
     // Behind a busy run the session and machine may still change (or not exist yet): settle them at claim time.
     let session = if busy { None } else { session };
-    let worker = if busy { None } else { thread.iter().rev().find_map(|r| r.worker_id.clone()) };
+    let worker = if busy { None } else { machine };
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
@@ -216,14 +257,14 @@ pub async fn create_follow_up(
     ))
     .bind(id)
     .bind(task)
-    .bind(model.unwrap_or(&latest.model))
+    .bind(&model)
     .bind(&latest.repo)
     .bind(root_id)
     .bind(&session)
     .bind(&worker)
     .bind(permission_mode.or(latest.permission_mode.as_deref()))
     .bind(&latest.isolation)
-    .bind(latest.agent.as_str())
+    .bind(agent.as_str())
     .bind(latest.failover)
     .bind(json!([]))
     .fetch_one(&mut *tx)
@@ -234,11 +275,32 @@ pub async fn create_follow_up(
     if busy {
         payload["after"] = json!(latest.id);
     }
+    if agent != latest.agent {
+        payload["switched_from"] = json!(latest.agent);
+    }
     let ev = append_event_locked(&mut tx, id, "status", &payload).await?;
     // Writing in an archived thread brings it back.
     sqlx::query("UPDATE runs SET archived_at = NULL WHERE id = $1").bind(root_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(FollowUpOutcome::Created(run, ev))
+}
+
+/// The model a switch to `agent` uses when none is given (the web's default too).
+fn default_model(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "claude-sonnet-5-5",
+        Agent::Codex | Agent::Opencode => "",
+    }
+}
+
+/// Whether a machine can run `agent`. Workers from before multi-agent support report no agents and run Claude Code.
+async fn worker_has_agent(pool: &PgPool, worker: &str, agent: Agent) -> sqlx::Result<bool> {
+    let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1").bind(worker).fetch_optional(pool).await?;
+    let caps: Option<Capabilities> = caps.and_then(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).ok());
+    Ok(caps.is_some_and(|c| {
+        let a = c.agents.runnable();
+        a.contains(&agent) || (a.is_empty() && agent == Agent::Claude)
+    }))
 }
 
 pub enum RestoreOutcome {
@@ -274,7 +336,7 @@ pub async fn create_restore(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Restore
     let (Some(before), Some(worker)) = (before, target.worker_id.clone()) else {
         return Ok(RestoreOutcome::NoCheckpoint);
     };
-    let session = thread.iter().rev().find_map(|r| r.session_id.clone());
+    let session = session_for(&thread, latest.agent, None);
     let quoted: String = target.task.chars().take(80).collect();
     let task = format!("Restore the files to before “{quoted}{}”", if target.task.chars().count() > 80 { "…" } else { "" });
     let id = Uuid::new_v4();
@@ -359,14 +421,7 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
     let files_on = target.worker_id.as_deref().filter(|_| fork_commit.is_some());
     let pinned = match new.worker_id.or(files_on) {
         Some(w) => {
-            let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1").bind(w).fetch_optional(pool).await?;
-            let caps: Option<Capabilities> = caps.and_then(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).ok());
-            // Workers from before multi-agent support report no agents and run Claude Code.
-            let has = caps.map(|c| {
-                let a = c.agents.runnable();
-                a.contains(&new.agent) || (a.is_empty() && new.agent == Agent::Claude)
-            });
-            if has != Some(true) {
+            if !worker_has_agent(pool, w, new.agent).await? {
                 return Ok(ForkOutcome::AgentMissing(w.to_string()));
             }
             Some(w.to_string())
@@ -747,20 +802,18 @@ pub async fn claim_run(
         let mut run = row_to_run(&row);
         // (A restore carries the thread's session itself and starts no agent.)
         if let (Some(root), None, None, "agent") = (run.parent_id, &run.resume_session_id, &run.moved_from, run.kind.as_str()) {
-            // A message that waited behind another: continue the thread's latest session on this machine.
-            let session: Option<String> = sqlx::query(
-                "SELECT session_id FROM runs WHERE (id = $1 OR parent_id = $1) AND id <> $2 AND worker_id = $3
-                   AND session_id IS NOT NULL
-                 ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(root)
-            .bind(run.id)
-            .bind(worker_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .map(|r| r.get("session_id"));
-            match session {
-                Some(sid) => {
+            // A message that waited behind another, or one that switches agents: continue this agent's
+            // latest session on this machine, or hand it a transcript when another agent spoke since.
+            // (A run moved to another machine is created after the messages waiting behind it.)
+            let earlier: Vec<Run> = thread_runs(pool, root)
+                .await?
+                .into_iter()
+                .filter(|r| r.id != run.id && (r.created_at < run.created_at || r.moved_from.is_some()))
+                .collect();
+            let session = session_for(&earlier, run.agent, Some(worker_id));
+            let handoff = session.is_none() && earlier.iter().any(|r| r.agent != run.agent);
+            let fail = match (session, handoff) {
+                (Some(sid), _) => {
                     sqlx::query("UPDATE runs SET resume_session_id = $2, pinned_worker_id = $3 WHERE id = $1")
                         .bind(run.id)
                         .bind(&sid)
@@ -769,19 +822,41 @@ pub async fn claim_run(
                         .await?;
                     run.resume_session_id = Some(sid);
                     run.pinned_worker_id = Some(worker_id.to_string());
+                    None
                 }
-                None => {
-                    let reason = "the earlier message ended before the agent started a session, so there is nothing to continue";
-                    sqlx::query("UPDATE runs SET status = 'failed', worker_id = NULL, started_at = NULL, finished_at = now(), result = $2 WHERE id = $1")
+                // Workers before forks don't pass `context` to the agent.
+                (None, true) if !kinds.iter().any(|k| k == "fork") => {
+                    Some("this machine's sidefleet is too old to switch agents in a thread; update it and send the message again")
+                }
+                (None, true) => {
+                    let mut history = Vec::with_capacity(earlier.len());
+                    for r in earlier {
+                        let events = events_since(pool, r.id, 0).await?;
+                        history.push((r, events));
+                    }
+                    let context = crate::fork::transcript(&history, crate::fork::budget(&run.task));
+                    sqlx::query("UPDATE runs SET context = $2, pinned_worker_id = $3 WHERE id = $1")
                         .bind(run.id)
-                        .bind(json!({"error": reason}))
+                        .bind(&context)
+                        .bind(worker_id)
                         .execute(&mut *tx)
                         .await?;
-                    let ev = append_event_locked(&mut tx, run.id, "status", &json!({"status": "failed", "reason": reason})).await?;
-                    tx.commit().await?;
-                    failed.push(ev);
-                    continue;
+                    run.context = Some(context);
+                    run.pinned_worker_id = Some(worker_id.to_string());
+                    None
                 }
+                (None, false) => Some("the earlier message ended before the agent started a session, so there is nothing to continue"),
+            };
+            if let Some(reason) = fail {
+                sqlx::query("UPDATE runs SET status = 'failed', worker_id = NULL, started_at = NULL, finished_at = now(), result = $2 WHERE id = $1")
+                    .bind(run.id)
+                    .bind(json!({"error": reason}))
+                    .execute(&mut *tx)
+                    .await?;
+                let ev = append_event_locked(&mut tx, run.id, "status", &json!({"status": "failed", "reason": reason})).await?;
+                tx.commit().await?;
+                failed.push(ev);
+                continue;
             }
         }
         // One slot fewer free here until the next heartbeat or claim says otherwise.

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use sidefleet_server::test_support::{TestEnv, DEV_KEY, WORKER_TOKEN};
-use sidefleet_core::{Capabilities, RepoInfo, Run, RunControl, RunEvent, RunStatus, RunSummary};
+use sidefleet_core::{Agent, Capabilities, RepoInfo, Run, RunControl, RunEvent, RunStatus, RunSummary};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
@@ -1402,6 +1402,114 @@ async fn forks_start_a_thread_with_any_agent_where_the_files_are() {
     let f2: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
     let f2run = api.get_run(f2).await;
     assert_eq!((f2run.pinned_worker_id, f2run.fork_commit), (None, None));
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn a_thread_can_switch_agents_and_the_new_one_gets_the_conversation() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    // `w` has Claude Code and Codex; `solo` only Claude Code.
+    for (id, agents) in [("w", json!({"claude": {"version": "1", "signed_in": true}, "codex": {"version": "1"}})), ("solo", json!({"claude": {"version": "1", "signed_in": true}}))] {
+        let r = api
+            .worker(reqwest::Method::POST, "/v1/worker/register")
+            .json(&json!({"id": id, "display_name": id, "capabilities": {"repos": [{"name": id, "path": "/tmp/r"}], "agents": agents}, "active_runs": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+    let api = &api;
+    let send = |id: Uuid, body: Value| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/messages")).json(&body).send();
+    let claim = |worker: &'static str, kinds: Value| async move {
+        let r = api
+            .worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": worker, "repos": [worker], "busy_repos": [], "agents": ["claude", "codex"], "kinds": kinds}))
+            .send()
+            .await
+            .unwrap();
+        if r.status() == StatusCode::NO_CONTENT { None } else { Some(r.json::<Run>().await.unwrap()) }
+    };
+    let id_of = |v: Value| -> Uuid { v["id"].as_str().unwrap().parse().unwrap() };
+    let all = json!(["agent", "restore", "fork"]);
+
+    let (_, body) = api.create_run("plan the parser", "w").await;
+    let root = id_of(body);
+    assert_eq!(claim("w", all.clone()).await.unwrap().id, root);
+    api.post_events("w", root, json!([
+        {"kind": "agent_init", "payload": {"session_id": "sess-claude"}},
+        {"kind": "assistant_text", "payload": {"text": "Plan: a recursive descent parser."}},
+    ])).await;
+    api.finish("w", root, "succeeded", json!({})).await;
+
+    // Validation: unknown agent, a model the agent doesn't take.
+    assert_eq!(send(root, json!({"task": "x", "agent": "gemini"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(send(root, json!({"task": "x", "agent": "claude", "model": "gpt-fake"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    // Switch to Codex: no session to resume; same machine; its default model.
+    let r = send(root, json!({"task": "build it", "agent": "codex"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let c1 = id_of(r.json().await.unwrap());
+    let run = api.get_run(c1).await;
+    assert_eq!((run.agent, run.model.as_str(), run.parent_id), (Agent::Codex, "", Some(root)));
+    assert_eq!((run.resume_session_id, run.pinned_worker_id.as_deref()), (None, Some("w")));
+    // Claimed, it carries the conversation so far.
+    let c = claim("w", all.clone()).await.unwrap();
+    assert_eq!((c.id, c.resume_session_id), (c1, None));
+    let ctx = c.context.unwrap();
+    assert!(ctx.contains("## User\nplan the parser") && ctx.contains("recursive descent"), "{ctx}");
+    api.post_events("w", c1, json!([
+        {"kind": "agent_init", "payload": {"session_id": "sess-codex"}},
+        {"kind": "assistant_text", "payload": {"text": "Built parser.rs."}},
+    ])).await;
+    api.finish("w", c1, "succeeded", json!({})).await;
+
+    // Without an agent the thread carries on with Codex and its session.
+    let c2 = send_message(api, root, "add tests").await;
+    let run = api.get_run(c2).await;
+    assert_eq!((run.agent, run.resume_session_id.as_deref()), (Agent::Codex, Some("sess-codex")));
+    assert!(claim("w", all.clone()).await.unwrap().context.is_none());
+    api.finish("w", c2, "succeeded", json!({})).await;
+
+    // Back to Claude: its old session misses Codex's turns, so it gets a transcript instead,
+    // and the model it used before. Queued behind a running message, the transcript is written
+    // when it is claimed, so it includes that message too.
+    let busy = send_message(api, root, "one more thing").await;
+    assert_eq!(claim("w", all.clone()).await.unwrap().id, busy);
+    let r = send(root, json!({"task": "review it", "agent": "claude"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let back = id_of(r.json().await.unwrap());
+    let run = api.get_run(back).await;
+    assert_eq!((run.agent, run.model.as_str(), run.resume_session_id), (Agent::Claude, "claude-sonnet-5-5", None));
+    api.post_events("w", busy, json!([{"kind": "assistant_text", "payload": {"text": "Did the thing."}}])).await;
+    api.finish("w", busy, "succeeded", json!({})).await;
+    // A worker from before forks can't pass the transcript on: the message fails with a reason.
+    let c = claim("w", json!(["agent"])).await;
+    assert!(c.is_none());
+    assert_eq!(api.get_run(back).await.status, RunStatus::Failed);
+    let r = send(root, json!({"task": "review it", "agent": "claude"})).await.unwrap();
+    let back = id_of(r.json().await.unwrap());
+    let c = claim("w", all.clone()).await.unwrap();
+    assert_eq!((c.id, c.agent, c.resume_session_id), (back, Agent::Claude, None));
+    let ctx = c.context.unwrap();
+    assert!(ctx.contains("(with Claude Code, then Codex)") && ctx.contains("## Codex\nBuilt parser.rs.") && ctx.contains("Did the thing."), "{ctx}");
+    assert_eq!(ctx.matches("## User\nreview it").count(), 1, "the failed try, not the message itself");
+    api.post_events("w", back, json!([{"kind": "agent_init", "payload": {"session_id": "sess-claude-2"}}])).await;
+    api.finish("w", back, "succeeded", json!({})).await;
+    // And Claude carries on with its new session.
+    let next = send_message(api, root, "thanks").await;
+    assert_eq!(api.get_run(next).await.resume_session_id.as_deref(), Some("sess-claude-2"));
+    api.stop(next).await;
+
+    // A machine without the agent can't switch to it: the thread's files are there.
+    let (_, body) = api.create_run("hello", "solo").await;
+    let solo = id_of(body);
+    claim("solo", all.clone()).await.unwrap();
+    api.post_events("solo", solo, json!([{"kind": "agent_init", "payload": {"session_id": "s"}}])).await;
+    api.finish("solo", solo, "succeeded", json!({})).await;
+    let r = send(solo, json!({"task": "x", "agent": "codex"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(r.text().await.unwrap().contains("solo doesn't have codex"));
     env.teardown().await;
 }
 

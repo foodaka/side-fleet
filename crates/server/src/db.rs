@@ -37,6 +37,7 @@ fn row_to_run(r: &PgRow) -> Run {
         forked_from: r.get("forked_from"),
         fork_commit: r.get("fork_commit"),
         context: r.get("context"),
+        archived_at: r.get("archived_at"),
     }
 }
 
@@ -75,7 +76,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context";
+    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -150,6 +151,19 @@ pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, Ru
     Ok((run, ev))
 }
 
+/// Archive or unarchive the thread `run_id` belongs to. Returns its root, or None if there is no such run.
+pub async fn set_archived(pool: &PgPool, run_id: Uuid, archived: bool) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!(
+        "UPDATE runs SET archived_at = CASE WHEN $2 THEN COALESCE(archived_at, now()) END
+         WHERE id = (SELECT COALESCE(parent_id, id) FROM runs WHERE id = $1) RETURNING {RUN_COLS}"
+    ))
+    .bind(run_id)
+    .bind(archived)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_run))
+}
+
 pub enum FollowUpOutcome {
     Created(Run, RunEvent),
     NotFound,
@@ -221,6 +235,8 @@ pub async fn create_follow_up(
         payload["after"] = json!(latest.id);
     }
     let ev = append_event_locked(&mut tx, id, "status", &payload).await?;
+    // Writing in an archived thread brings it back.
+    sqlx::query("UPDATE runs SET archived_at = NULL WHERE id = $1").bind(root_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(FollowUpOutcome::Created(run, ev))
 }
@@ -304,6 +320,8 @@ pub struct NewFork<'a> {
     pub agent: Agent,
     pub model: &'a str,
     pub permission_mode: Option<&'a str>,
+    /// The machine chosen to run it (validated by the route), if any.
+    pub worker_id: Option<&'a str>,
     /// Bytes of transcript the task leaves room for.
     pub context_budget: usize,
 }
@@ -313,7 +331,7 @@ pub enum ForkOutcome {
     NotFound,
     /// The message is still queued or running.
     NotFinished(Run),
-    /// The files are on this machine, which doesn't have the chosen agent (or is gone).
+    /// The fork would run on this machine (the chosen one, or the one with the files), which doesn't have the agent.
     AgentMissing(String),
 }
 
@@ -337,8 +355,10 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
     let context = crate::fork::transcript(&history, new.context_budget);
 
     let fork_commit = snapshot_commit(pool, run_id, "after").await?;
-    let pinned = match (&fork_commit, &target.worker_id) {
-        (Some(_), Some(w)) => {
+    // The files come along only on the machine that has them; another chosen machine starts from its HEAD.
+    let files_on = target.worker_id.as_deref().filter(|_| fork_commit.is_some());
+    let pinned = match new.worker_id.or(files_on) {
+        Some(w) => {
             let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1").bind(w).fetch_optional(pool).await?;
             let caps: Option<Capabilities> = caps.and_then(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).ok());
             // Workers from before multi-agent support report no agents and run Claude Code.
@@ -347,13 +367,13 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
                 a.contains(&new.agent) || (a.is_empty() && new.agent == Agent::Claude)
             });
             if has != Some(true) {
-                return Ok(ForkOutcome::AgentMissing(w.clone()));
+                return Ok(ForkOutcome::AgentMissing(w.to_string()));
             }
-            Some(w.clone())
+            Some(w.to_string())
         }
-        _ => None,
+        None => None,
     };
-    let fork_commit = pinned.as_ref().and(fork_commit);
+    let fork_commit = fork_commit.filter(|_| pinned.is_some() && pinned.as_deref() == files_on);
 
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
@@ -400,16 +420,17 @@ pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
 
 /// Root runs (threads), newest activity first, with thread status (the running
 /// message if any, else the latest) and follow-up count.
-pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<RunSummary>> {
+pub async fn list_runs(pool: &PgPool, limit: i64, archived: bool) -> sqlx::Result<Vec<RunSummary>> {
     let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
     let rows = sqlx::query(&format!(
         "SELECT {cols},
                 (SELECT count(*) FROM runs f WHERE f.parent_id = r.id) AS follow_ups,
                 (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1) AS thread_status,
                 (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at
-         FROM runs r WHERE r.parent_id IS NULL ORDER BY last_activity_at DESC LIMIT $1"
+         FROM runs r WHERE r.parent_id IS NULL AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
     ))
     .bind(limit)
+    .bind(archived)
     .fetch_all(pool)
     .await?;
     Ok(rows

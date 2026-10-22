@@ -111,6 +111,9 @@ pub struct Run {
     /// For a fork: the earlier conversation, given to the agent ahead of the task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// On a root run: when its thread was archived (hidden from the list).
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 pub fn default_kind() -> String {
@@ -417,6 +420,16 @@ pub struct ForkRequest {
     pub model: String,
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Run on this machine. Absent: on the machine with the message's files, or any machine
+    /// when there is no snapshot. Another machine starts from its own HEAD, without the files.
+    #[serde(default)]
+    pub worker_id: Option<String>,
+}
+
+/// Archive or unarchive a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveRequest {
+    pub archived: bool,
 }
 
 pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "bypassPermissions", "plan", "default", "dontAsk"];

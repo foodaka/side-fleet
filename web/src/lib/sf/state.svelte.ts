@@ -1,6 +1,7 @@
 import { api, getKey, keyWorks, setKey, Unauthorized } from './api';
 import type { RunSummary, Setup, Worker } from './types';
 import { telemetry } from './telemetry.svelte';
+import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
 
 type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
@@ -18,6 +19,10 @@ class Fleet {
 	now = $state(Date.now());
 	pickerOpen = $state(false);
 	addMachineOpen = $state(false);
+	/** Archived threads; null until the sidebar's archived list is first opened. */
+	archived = $state<RunSummary[] | null>(null);
+	/** A thread whose page should open the fork dialog for its latest message (asked from the sidebar). */
+	forkThread = $state<string | null>(null);
 
 	online = $derived(this.workers.filter((w) => w.online));
 	needsKey = $derived(this.conn === 'unauthorized');
@@ -58,6 +63,31 @@ class Fleet {
 		} catch (e) {
 			this.conn = e instanceof Unauthorized ? 'unauthorized' : 'unreachable';
 		}
+	}
+
+	async loadArchived() {
+		try {
+			this.archived = await api<RunSummary[]>('/v1/runs?archived=true&limit=100');
+		} catch (e) {
+			toast.error('Could not load archived tasks', { description: (e as Error).message });
+		}
+	}
+
+	/** Archive a thread (or bring it back), moving it between the lists at once; archiving offers an undo. */
+	async setArchived(r: RunSummary, archived: boolean) {
+		const moved = { ...r, archived_at: archived ? new Date().toISOString() : null };
+		const [from, to] = archived ? ['runs', 'archived'] as const : ['archived', 'runs'] as const;
+		const before = { runs: this.runs, archived: this.archived };
+		if (this[from]) this[from] = this[from]!.filter((x) => x.id !== r.id);
+		if (this[to]) this[to] = [moved, ...this[to]!].sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at));
+		try {
+			await api(`/v1/runs/${r.id}/archive`, { method: 'POST', body: JSON.stringify({ archived }) });
+			if (archived) toast('Archived', { description: r.task.slice(0, 80), action: { label: 'Undo', onClick: () => void this.setArchived(moved, false) } });
+		} catch (e) {
+			Object.assign(this, before);
+			toast.error(archived ? 'Could not archive' : 'Could not unarchive', { description: (e as Error).message });
+		}
+		void this.refresh();
 	}
 
 	async signIn(key: string): Promise<boolean> {

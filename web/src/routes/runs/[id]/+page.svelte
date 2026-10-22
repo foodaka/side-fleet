@@ -22,23 +22,38 @@
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
+	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 	import FileDiffIcon from '@lucide/svelte/icons/file-diff';
 
 	let thread = $state<Thread | null>(null);
+	let loaded = $state(false);
 	const id = $derived(page.params.id);
 
 	$effect(() => {
 		const runId = id;
 		if (!runId) return;
 		const t = new Thread();
-		untrack(() => (thread = t));
+		untrack(() => { thread = t; loaded = false; });
 		t.load(runId).then(() => {
 			// Links to a follow-up land on its thread; keep the URL on the root.
 			if (t.root && t.root.id !== runId) void goto('#/runs/' + t.root.id, { replaceState: true });
+			if (thread === t) loaded = true;
 		});
 		return () => t.dispose();
+	});
+
+	// Fork asked for from the sidebar: from the latest finished message, once the thread has loaded.
+	let forkOpen = $state(false);
+	const forkTurn = $derived(thread?.turns.findLast((t) => ['succeeded', 'failed', 'stopped'].includes(t.run.status)));
+	$effect(() => {
+		if (!loaded || !fleet.forkThread || fleet.forkThread !== thread?.root?.id) return;
+		untrack(() => {
+			fleet.forkThread = null;
+			if (forkTurn) forkOpen = true;
+			else toast('Nothing to fork yet', { description: 'Fork once the first message has finished.' });
+		});
 	});
 
 	const root = $derived(thread?.root);
@@ -191,6 +206,8 @@
 			{/if}
 		</div>
 	</header>
+
+	{#if forkTurn}<ForkDialog bind:open={forkOpen} run={forkTurn.run} hasFiles={!!forkTurn.snapshot} />{/if}
 
 	<Conversation class="min-h-0 flex-1">
 		<div class="min-h-0 flex-1 overflow-y-auto" data-scroller>

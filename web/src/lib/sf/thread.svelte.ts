@@ -5,6 +5,13 @@ import type { Run, RunEvent } from './types';
 import { agentName } from './format';
 import type { DiffSet } from './diff/parse';
 
+/** An image from a tool result, stored on the control plane (`GET /v1/images/:id`). */
+export interface ImageRef {
+	id: string;
+	media_type: string;
+	bytes: number;
+}
+
 export type Item =
 	| { kind: 'text'; key: string; text: string; at: string }
 	| {
@@ -16,6 +23,7 @@ export type Item =
 			output: string | null;
 			isError: boolean;
 			truncated: boolean;
+			images: ImageRef[];
 			at: string;
 	  }
 	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string }
@@ -81,6 +89,8 @@ export class Thread {
 	root = $derived(this.runs[0] ?? null);
 	latest = $derived(this.runs[this.runs.length - 1] ?? null);
 	live = $derived(!!this.latest && (this.latest.status === 'queued' || this.latest.status === 'running'));
+	/** The message being worked on: the running one, else the latest (messages can wait behind it). */
+	current = $derived(this.runs.findLast((r) => r.status === 'running') ?? this.latest);
 	branch = $derived(this.turns.find((t) => t.branch)?.branch ?? null);
 	machine = $derived(this.turns.findLast((t) => t.machine)?.machine ?? null);
 	hasSession = $derived(this.runs.some((r) => !!r.session_id));
@@ -98,14 +108,14 @@ export class Thread {
 			return;
 		}
 		this.turns = this.runs.map(newTurn);
-		// Replay every turn in order; only the last can still be live.
+		// Replay finished turns in order; live ones (running, or queued behind it) stream side by side.
 		for (let i = 0; i < this.runs.length; i++) {
 			const p = this.#follow(i);
-			if (i < this.runs.length - 1) await p;
+			if (isTerminal(this.runs[i])) await p;
 		}
 	}
 
-	/** Queue a follow-up message on the same session. */
+	/** Send a follow-up on the same session. While a message runs, it waits behind it. */
 	async reply(text: string, permission?: string) {
 		const root = this.root!;
 		const body: Record<string, string> = { task: text };
@@ -117,9 +127,27 @@ export class Thread {
 		void this.#follow(this.runs.length - 1);
 	}
 
+	/** Stop everything: drop the waiting messages first so none starts once the running one ends. */
 	async stop() {
-		const l = this.latest;
-		if (l) await api(`/v1/runs/${l.id}/stop`, { method: 'POST' });
+		const pending = this.runs.filter((r) => !isTerminal(r)).reverse();
+		for (const r of pending) await api(`/v1/runs/${r.id}/stop`, { method: 'POST' });
+	}
+
+	/** Send now: stop the running message so the waiting ones go next, in the same session. */
+	async interrupt() {
+		for (const r of this.runs.filter((r) => r.status === 'running'))
+			await api(`/v1/runs/${r.id}/stop`, { method: 'POST' });
+	}
+
+	/** Drop one waiting message. */
+	async cancel(id: string) {
+		await api(`/v1/runs/${id}/stop`, { method: 'POST' });
+	}
+
+	/** Whether this run is a message waiting for an earlier one to finish. */
+	waiting(id: string) {
+		const i = this.runs.findIndex((r) => r.id === id);
+		return i > 0 && this.runs[i].status === 'queued' && this.runs.slice(0, i).some((r) => !isTerminal(r));
 	}
 
 	dispose() {
@@ -137,7 +165,7 @@ export class Thread {
 
 	#follow(i: number) {
 		const turn = this.turns[i];
-		const live = this.runs[i].status === 'queued' || this.runs[i].status === 'running';
+		const live = !isTerminal(this.runs[i]);
 		return followRun(
 			this.runs[i].id,
 			(ev) => {
@@ -154,6 +182,8 @@ export class Thread {
 		});
 	}
 }
+
+const isTerminal = (r: Run) => r.status !== 'queued' && r.status !== 'running';
 
 const verbs: Record<string, string> = {
 	Bash: 'Ran', Read: 'Read', Grep: 'Searched', Glob: 'Listed', Edit: 'Edited', Write: 'Wrote',
@@ -223,7 +253,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 		case 'tool_use':
 			t.items.push({
 				kind: 'tool', key, id: p.id, name: p.name, summary: p.summary ?? '',
-				output: null, isError: false, truncated: false, at: ev.at
+				output: null, isError: false, truncated: false, images: [], at: ev.at
 			});
 			t.activity = (verbs[p.name] ?? 'Using ' + p.name).replace(/ for$/, '') + '…';
 			break;
@@ -233,6 +263,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				tool.output = p.content ?? '';
 				tool.isError = !!p.is_error;
 				tool.truncated = !!p.truncated;
+				tool.images = p.images ?? [];
 			}
 			t.activity = 'Thinking';
 			break;

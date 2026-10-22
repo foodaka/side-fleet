@@ -40,6 +40,11 @@ pub fn kill_all_agents() -> usize {
     pids.len()
 }
 
+/// Tells Claude Code how its output reaches the person: images it reads show on the page.
+pub const CLAUDE_PAGE_HINT: &str = "The user follows this session on Sidefleet, a web page (often on their phone) that shows your messages, \
+your tool calls and any image a tool returns. When the user asks to see something visual, such as a screenshot, save it as a \
+PNG or JPEG file and open it with the Read tool: that is how it appears on their page.";
+
 #[derive(Debug, Clone)]
 pub struct AgentSpec {
     pub agent: Agent,
@@ -87,6 +92,10 @@ impl AgentSpec {
         if let Some(n) = self.max_turns {
             a.push("--max-turns".into());
             a.push(n.to_string());
+        }
+        if !self.extra_args.iter().any(|x| x.starts_with("--append-system-prompt")) {
+            a.push("--append-system-prompt".into());
+            a.push(CLAUDE_PAGE_HINT.into());
         }
         a.extend(self.extra_args.iter().cloned());
         a

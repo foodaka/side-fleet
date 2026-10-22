@@ -13,7 +13,8 @@
    Each agent's output is mapped to the same events: `agent_init` (session id), `assistant_text`,
    `assistant_thinking`, `tool_use` (a Claude Code tool name such as `Bash` or `Edit`, plus a
    redacted one-line summary of the input), `tool_result` (truncated to 2 KB), `result` (final
-   text, duration, turns, cost when the agent reports one, token `usage`).
+   text, duration, turns, cost when the agent reports one, token `usage`). Images in a Claude Code
+   tool result (a screenshot it read) travel with the event and are stored apart, up to 10 MB each.
 3. Every event gets a per-run sequence number and is pushed to open SSE subscribers; the page
    renders it within milliseconds. Reloading replays from sequence 0; a dropped connection resumes
    with `Last-Event-ID`.
@@ -68,8 +69,9 @@ Bearer `SIDEFLEET_DEV_KEY`:
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
-| `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine; `409` while the previous message runs |
+| `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine. While an earlier message is queued or running, it waits behind it and resumes the latest session once claimed (stop the running one to send it now); `409` when the thread has no session to continue or 10 messages are already waiting |
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind; replays then live; ends with `end` |
+| `GET` | `/v1/images/:id` | an image from a tool result (PNG, JPEG, GIF or WebP); `tool_result` events refer to them as `images: [{id, media_type, bytes}]` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `GET` | `/v1/setup` | control URL and the first worker token, for the page's connect command |

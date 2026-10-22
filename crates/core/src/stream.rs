@@ -94,15 +94,17 @@ pub fn map_stream_line(line: &str) -> MappedLine {
                 if block.get("type").and_then(Value::as_str) == Some("tool_result") {
                     let content = tool_result_text(block.get("content"));
                     let truncated = content.len() > TOOL_RESULT_MAX_BYTES;
-                    out.push(NewEvent {
-                        kind: "tool_result".into(),
-                        payload: json!({
-                            "tool_use_id": block.get("tool_use_id").cloned().unwrap_or(Value::Null),
-                            "is_error": block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                            "content": truncate_bytes(&redact(&content), TOOL_RESULT_MAX_BYTES),
-                            "truncated": truncated,
-                        }),
+                    let mut payload = json!({
+                        "tool_use_id": block.get("tool_use_id").cloned().unwrap_or(Value::Null),
+                        "is_error": block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                        "content": truncate_bytes(&redact(&content), TOOL_RESULT_MAX_BYTES),
+                        "truncated": truncated,
                     });
+                    let images = tool_result_images(block.get("content"));
+                    if !images.is_empty() {
+                        payload["images"] = Value::Array(images);
+                    }
+                    out.push(NewEvent { kind: "tool_result".into(), payload });
                 }
             }
         }
@@ -198,6 +200,23 @@ fn tool_result_text(content: Option<&Value>) -> String {
     }
 }
 
+/// Base64 images in a tool result (`{"type":"image","source":{"type":"base64",...}}`),
+/// as `{media_type, data}` for the control plane to store and the page to show.
+fn tool_result_images(content: Option<&Value>) -> Vec<Value> {
+    let Some(Value::Array(blocks)) = content else { return vec![] };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|b| {
+            let src = b.get("source")?;
+            if src.get("type").and_then(Value::as_str) != Some("base64") {
+                return None;
+            }
+            Some(json!({"media_type": src.get("media_type")?.as_str()?, "data": src.get("data")?.as_str()?}))
+        })
+        .collect()
+}
+
 /// Truncate to at most `max` bytes on a char boundary, appending a marker.
 pub fn truncate_bytes(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -268,6 +287,16 @@ mod tests {
         let e = events(&small);
         let c = e[0].payload["content"].as_str().unwrap();
         assert!(!c.contains("hunter2"), "{c}");
+    }
+
+    #[test]
+    fn tool_result_images_are_forwarded_unredacted() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"shot"}]}]}}"#;
+        let e = events(line);
+        assert_eq!(e[0].payload["content"], "[image]\nshot");
+        assert_eq!(e[0].payload["images"], serde_json::json!([{"media_type": "image/png", "data": "iVBORw0KGgo="}]));
+        let plain = events(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}"#);
+        assert!(plain[0].payload.get("images").is_none());
     }
 
     #[test]

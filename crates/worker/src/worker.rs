@@ -428,11 +428,14 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                 tokio::select! {
                     ev = event_rx.recv() => {
                         let Some(ev) = ev else { break };
-                        // Batch whatever else is already waiting.
+                        // Batch whatever else is already waiting; an event with images goes on its own.
+                        let has_images = |e: &NewEvent| e.payload.get("images").is_some();
                         let mut batch = vec![ev];
-                        while let Ok(more) = event_rx.try_recv() {
+                        while !has_images(&batch[0]) {
+                            let Ok(more) = event_rx.try_recv() else { break };
+                            let last = has_images(&more);
                             batch.push(more);
-                            if batch.len() >= 100 { break; }
+                            if last || batch.len() >= 100 { break; }
                         }
                         loop {
                             match client.post_events(run_id, batch.clone()).await {

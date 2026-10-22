@@ -144,14 +144,19 @@ pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, Ru
 pub enum FollowUpOutcome {
     Created(Run, RunEvent),
     NotFound,
-    /// The thread's latest run is still queued or running.
-    Busy(Run),
+    /// Already `MAX_QUEUED_MESSAGES` messages waiting in the thread.
+    QueueFull,
     /// The previous run never reported a session id (it failed before starting, or was stopped early).
     NoSession(Run),
 }
 
+/// Messages that may wait behind a running one in a thread.
+pub const MAX_QUEUED_MESSAGES: usize = 10;
+
 /// Continue a thread with a new message. The new run resumes the latest
-/// session in the thread and is pinned to the worker that holds it.
+/// session in the thread and is pinned to the worker that holds it. While an
+/// earlier message is still queued or running, the new one waits behind it:
+/// its session and machine are settled when it is claimed (`claim_run`).
 pub async fn create_follow_up(
     pool: &PgPool,
     run_id: Uuid,
@@ -167,15 +172,18 @@ pub async fn create_follow_up(
     let Some(latest) = thread.last().cloned() else {
         return Ok(FollowUpOutcome::NotFound);
     };
-    if !latest.status.is_terminal() {
-        return Ok(FollowUpOutcome::Busy(latest));
+    let busy = !latest.status.is_terminal();
+    if busy && thread.iter().filter(|r| r.status == RunStatus::Queued).count() >= MAX_QUEUED_MESSAGES {
+        return Ok(FollowUpOutcome::QueueFull);
     }
     // The most recent session id anywhere in the thread (a stopped follow-up may lack one).
     let session = thread.iter().rev().find_map(|r| r.session_id.clone());
-    let Some(session) = session else {
+    if !busy && session.is_none() {
         return Ok(FollowUpOutcome::NoSession(latest));
-    };
-    let worker = thread.iter().rev().find_map(|r| r.worker_id.clone());
+    }
+    // Behind a busy run the session and machine may still change (or not exist yet): settle them at claim time.
+    let session = if busy { None } else { session };
+    let worker = if busy { None } else { thread.iter().rev().find_map(|r| r.worker_id.clone()) };
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
@@ -196,7 +204,11 @@ pub async fn create_follow_up(
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
-    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task, "resumes": session})).await?;
+    let mut payload = json!({"status": "queued", "task": task, "resumes": session});
+    if busy {
+        payload["after"] = json!(latest.id);
+    }
+    let ev = append_event_locked(&mut tx, id, "status", &payload).await?;
     tx.commit().await?;
     Ok(FollowUpOutcome::Created(run, ev))
 }
@@ -220,13 +232,14 @@ pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
     Ok(row.as_ref().map(row_to_run))
 }
 
-/// Root runs (threads), newest activity first, with thread status and follow-up count.
+/// Root runs (threads), newest activity first, with thread status (the running
+/// message if any, else the latest) and follow-up count.
 pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<RunSummary>> {
     let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
     let rows = sqlx::query(&format!(
         "SELECT {cols},
                 (SELECT count(*) FROM runs f WHERE f.parent_id = r.id) AS follow_ups,
-                (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY l.created_at DESC LIMIT 1) AS thread_status,
+                (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1) AS thread_status,
                 (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at
          FROM runs r WHERE r.parent_id IS NULL ORDER BY last_activity_at DESC LIMIT $1"
     ))
@@ -288,7 +301,21 @@ pub async fn append_events(
     let mut stored = Vec::with_capacity(events.len());
     let mut session: Option<String> = None;
     for e in events {
-        let payload = sidefleet_core::redact::redact_json(&e.payload);
+        // Images skip redaction (it would only mangle base64) and go to their own table.
+        let mut payload = e.payload.clone();
+        let images = payload.as_object_mut().and_then(|o| o.remove("images"));
+        let mut payload = sidefleet_core::redact::redact_json(&payload);
+        if let Some(Value::Array(images)) = images {
+            let mut refs = Vec::new();
+            for img in images.iter().take(MAX_IMAGES_PER_EVENT) {
+                if let Some(r) = store_image(&mut tx, run_id, img).await? {
+                    refs.push(r);
+                }
+            }
+            if !refs.is_empty() {
+                payload["images"] = Value::Array(refs);
+            }
+        }
         if matches!(e.kind.as_str(), "agent_init" | "result") {
             if let Some(sid) = payload.get("session_id").and_then(Value::as_str) {
                 session = Some(sid.to_string());
@@ -305,6 +332,43 @@ pub async fn append_events(
     }
     tx.commit().await?;
     Ok(AppendOutcome::Appended(stored, run))
+}
+
+pub const MAX_IMAGES_PER_EVENT: usize = 8;
+/// Decoded size limit for one image.
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+/// Raster formats only: an SVG served from this origin could run script.
+const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Store one `{media_type, data}` (base64) image and return the reference that
+/// replaces it in the event: `{id, media_type, bytes}`. Unusable images are dropped.
+async fn store_image(tx: &mut Transaction<'_, Postgres>, run_id: Uuid, img: &Value) -> sqlx::Result<Option<Value>> {
+    use base64::Engine;
+    let media_type = img.get("media_type").and_then(Value::as_str).unwrap_or("");
+    let data = img.get("data").and_then(Value::as_str).unwrap_or("");
+    if !IMAGE_TYPES.contains(&media_type) || data.len() > MAX_IMAGE_BYTES / 3 * 4 + 4 {
+        tracing::warn!(%run_id, media_type, len = data.len(), "image dropped: unsupported type or too large");
+        return Ok(None);
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        tracing::warn!(%run_id, "image dropped: not valid base64");
+        return Ok(None);
+    };
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO run_images (id, run_id, media_type, data) VALUES ($1, $2, $3, $4)")
+        .bind(id)
+        .bind(run_id)
+        .bind(media_type)
+        .bind(&bytes)
+        .execute(&mut **tx)
+        .await?;
+    Ok(Some(json!({"id": id, "media_type": media_type, "bytes": bytes.len()})))
+}
+
+/// An image's media type and bytes.
+pub async fn get_image(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<(String, Vec<u8>)>> {
+    let row = sqlx::query("SELECT media_type, data FROM run_images WHERE id = $1").bind(id).fetch_optional(pool).await?;
+    Ok(row.map(|r| (r.get("media_type"), r.get("data"))))
 }
 
 /// Request a stop. A queued run becomes `stopped` immediately; a running run
@@ -389,6 +453,13 @@ const CAN_RUN: &str = "w.last_heartbeat_at > now() - interval '45 seconds'
 /// can run it may take it (that machine may have the repo busy, or be slow to poll).
 const LEAST_BUSY_GRACE_SECS: i64 = 10;
 
+/// What a claim produced: the run to execute, plus queued messages that were
+/// failed on the way because there was no session left to continue.
+pub struct Claimed {
+    pub run: Option<(Run, RunEvent)>,
+    pub failed: Vec<RunEvent>,
+}
+
 /// Atomically claim the oldest queued run for one of `repos`.
 ///
 /// Least busy first: claims are pulled, so the first machine to ask would win.
@@ -396,6 +467,12 @@ const LEAST_BUSY_GRACE_SECS: i64 = 10;
 /// than [`LEAST_BUSY_GRACE_SECS`] is skipped while another machine that can run
 /// it has more free slots. Runs of an agent whose usage limit this machine hit
 /// are skipped until the limit resets.
+///
+/// A message is only claimable once every earlier message of its thread has
+/// finished (and any run moved off a lost machine, which takes the place of the
+/// message it replaces), and only by the machine that ran the thread last (where
+/// the session lives); one queued behind a busy run resumes the latest session
+/// there. A moved run itself is exempt: it starts afresh on another machine.
 pub async fn claim_run(
     pool: &PgPool,
     worker_id: &str,
@@ -403,62 +480,117 @@ pub async fn claim_run(
     busy_repos: &[String],
     agents: &[String],
     slots: Option<&Slots>,
-) -> sqlx::Result<Option<(Run, RunEvent)>> {
-    let mut tx = pool.begin().await?;
+) -> sqlx::Result<Claimed> {
     let free = slots.map(|s| s.parallel.saturating_sub(s.active) as i32);
     if let Some(s) = slots {
         sqlx::query("UPDATE workers SET slots_parallel = $2, slots_active = $3 WHERE id = $1")
             .bind(worker_id)
             .bind(s.parallel as i32)
             .bind(s.active as i32)
-            .execute(&mut *tx)
+            .execute(pool)
             .await?;
     }
-    let row = sqlx::query(&format!(
-        "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
-         WHERE id = (
-            SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.repo = ANY($2)
-              AND NOT (r.repo = ANY($3))
-              AND (r.pinned_worker_id IS NULL OR r.pinned_worker_id = $1)
-              AND (NOT ($1 = ANY(r.excluded_worker_ids)) OR r.created_at < now() - make_interval(secs => $7))
-              AND r.agent = ANY($4)
-              AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
-              AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
-                   OR r.created_at < now() - make_interval(secs => $6)
-                   OR NOT EXISTS (SELECT 1 FROM workers w WHERE w.id <> $1 AND {CAN_RUN}
-                                  AND w.slots_parallel - w.slots_active > $5))
-            ORDER BY r.created_at LIMIT 1 FOR UPDATE SKIP LOCKED
-         )
-         RETURNING {RUN_COLS}"
-    ))
-    .bind(worker_id)
-    .bind(repos)
-    .bind(busy_repos)
-    .bind(agents)
-    .bind(free)
-    .bind(LEAST_BUSY_GRACE_SECS as f64)
-    .bind(EXCLUSION_GRACE_SECS as f64)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(row) = row else {
-        tx.commit().await?;
-        return Ok(None);
-    };
-    let run = row_to_run(&row);
-    // One slot fewer free here until the next heartbeat or claim says otherwise.
-    sqlx::query("UPDATE workers SET slots_active = slots_active + 1 WHERE id = $1 AND slots_active IS NOT NULL")
+    let mut failed = Vec::new();
+    // Each pass either claims a run, finds none, or fails one unresumable message and looks again.
+    for _ in 0..=MAX_QUEUED_MESSAGES {
+        let mut tx = pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
+             WHERE id = (
+                SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.repo = ANY($2)
+                  AND NOT (r.repo = ANY($3))
+                  AND COALESCE(r.pinned_worker_id,
+                        (SELECT p.worker_id FROM runs p
+                          WHERE r.parent_id IS NOT NULL AND r.moved_from IS NULL
+                            AND (p.id = r.parent_id OR p.parent_id = r.parent_id) AND p.worker_id IS NOT NULL
+                          ORDER BY p.created_at DESC LIMIT 1),
+                        $1) = $1
+                  AND NOT EXISTS (
+                        SELECT 1 FROM runs p
+                         WHERE r.parent_id IS NOT NULL AND r.moved_from IS NULL
+                           AND (p.id = r.parent_id OR p.parent_id = r.parent_id)
+                           AND p.id <> r.id AND (p.created_at < r.created_at OR p.moved_from IS NOT NULL)
+                           AND p.status IN ('queued', 'running'))
+                  AND (NOT ($1 = ANY(r.excluded_worker_ids)) OR r.created_at < now() - make_interval(secs => $7))
+                  AND r.agent = ANY($4)
+                  AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
+                  AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
+                       OR (r.parent_id IS NOT NULL AND r.moved_from IS NULL)
+                       OR r.created_at < now() - make_interval(secs => $6)
+                       OR NOT EXISTS (SELECT 1 FROM workers w WHERE w.id <> $1 AND {CAN_RUN}
+                                      AND w.slots_parallel - w.slots_active > $5))
+                ORDER BY r.created_at LIMIT 1 FOR UPDATE OF r SKIP LOCKED
+             )
+             RETURNING {RUN_COLS}"
+        ))
         .bind(worker_id)
-        .execute(&mut *tx)
+        .bind(repos)
+        .bind(busy_repos)
+        .bind(agents)
+        .bind(free)
+        .bind(LEAST_BUSY_GRACE_SECS as f64)
+        .bind(EXCLUSION_GRACE_SECS as f64)
+        .fetch_optional(&mut *tx)
         .await?;
-    let ev = append_event_locked(
-        &mut tx,
-        run.id,
-        "status",
-        &json!({"status": "running", "worker_id": worker_id}),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(Some((run, ev)))
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(Claimed { run: None, failed });
+        };
+        let mut run = row_to_run(&row);
+        if let (Some(root), None, None) = (run.parent_id, &run.resume_session_id, &run.moved_from) {
+            // A message that waited behind another: continue the thread's latest session on this machine.
+            let session: Option<String> = sqlx::query(
+                "SELECT session_id FROM runs WHERE (id = $1 OR parent_id = $1) AND id <> $2 AND worker_id = $3
+                   AND session_id IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(root)
+            .bind(run.id)
+            .bind(worker_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| r.get("session_id"));
+            match session {
+                Some(sid) => {
+                    sqlx::query("UPDATE runs SET resume_session_id = $2, pinned_worker_id = $3 WHERE id = $1")
+                        .bind(run.id)
+                        .bind(&sid)
+                        .bind(worker_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    run.resume_session_id = Some(sid);
+                    run.pinned_worker_id = Some(worker_id.to_string());
+                }
+                None => {
+                    let reason = "the earlier message ended before the agent started a session, so there is nothing to continue";
+                    sqlx::query("UPDATE runs SET status = 'failed', worker_id = NULL, started_at = NULL, finished_at = now(), result = $2 WHERE id = $1")
+                        .bind(run.id)
+                        .bind(json!({"error": reason}))
+                        .execute(&mut *tx)
+                        .await?;
+                    let ev = append_event_locked(&mut tx, run.id, "status", &json!({"status": "failed", "reason": reason})).await?;
+                    tx.commit().await?;
+                    failed.push(ev);
+                    continue;
+                }
+            }
+        }
+        // One slot fewer free here until the next heartbeat or claim says otherwise.
+        sqlx::query("UPDATE workers SET slots_active = slots_active + 1 WHERE id = $1 AND slots_active IS NOT NULL")
+            .bind(worker_id)
+            .execute(&mut *tx)
+            .await?;
+        let ev = append_event_locked(
+            &mut tx,
+            run.id,
+            "status",
+            &json!({"status": "running", "worker_id": worker_id}),
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Claimed { run: Some((run, ev)), failed });
+    }
+    Ok(Claimed { run: None, failed })
 }
 
 pub enum FinishOutcome {

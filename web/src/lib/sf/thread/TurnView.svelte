@@ -6,7 +6,7 @@
 	import GitBranch from '@lucide/svelte/icons/git-branch';
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
-	import ToolRow from './ToolRow.svelte';
+	import ToolGroup from './ToolGroup.svelte';
 	import ChangesCard from '../diff/ChangesCard.svelte';
 	import type { Turn } from '../thread.svelte';
 
@@ -14,17 +14,38 @@
 		turn,
 		first,
 		live,
+		waiting = false,
+		onsendnow,
+		oncancel,
 		onopendiff
-	}: { turn: Turn; first: boolean; live: boolean; onopendiff?: (runId: string, path: string | null) => void } = $props();
+	}: {
+		turn: Turn;
+		first: boolean;
+		live: boolean;
+		/** A message queued behind one that is still running. */
+		waiting?: boolean;
+		onsendnow?: () => void;
+		oncancel?: () => void;
+		onopendiff?: (runId: string, path: string | null) => void;
+	} = $props();
 	const run = $derived(turn.run);
-	// Consecutive stderr lines are grouped so they don't break up the narration.
+	// Consecutive tool calls fold into one line, and consecutive stderr lines into one log,
+	// so neither breaks up the narration.
+	type Tool = Extract<(typeof turn.items)[number], { kind: 'tool' }>;
 	const groups = $derived.by(() => {
-		const out: (typeof turn.items[number] | { kind: 'stderr-group'; key: string; lines: string[] })[] = [];
+		const out: (
+			| (typeof turn.items)[number]
+			| { kind: 'stderr-group'; key: string; lines: string[] }
+			| { kind: 'tool-group'; key: string; tools: Tool[] }
+		)[] = [];
 		for (const it of turn.items) {
 			const last = out[out.length - 1];
 			if (it.kind === 'stderr') {
 				if (last && last.kind === 'stderr-group') last.lines.push(it.text);
 				else out.push({ kind: 'stderr-group', key: it.key, lines: [it.text] });
+			} else if (it.kind === 'tool') {
+				if (last && last.kind === 'tool-group') last.tools.push(it);
+				else out.push({ kind: 'tool-group', key: it.key, tools: [it] });
 			} else out.push(it);
 		}
 		return out;
@@ -45,18 +66,26 @@
 	{:else if !first}
 		<Message from="user">
 			<MessageContent class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap text-primary-foreground group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground">{run.task}</MessageContent>
-			<span class="self-end text-[11px] text-faint">{meta.join(', ')}</span>
+			{#if waiting}
+				<span class="flex items-center gap-2 self-end text-[11px] text-muted-foreground">
+					<span>Queued, sends when the current message finishes</span>
+					<button type="button" class="rounded-full bg-primary px-2.5 whitespace-nowrap py-1 font-medium text-primary-foreground hover:opacity-90" onclick={onsendnow}>Send now</button>
+					<button type="button" class="rounded-full px-2 py-1 whitespace-nowrap hover:bg-accent hover:text-foreground" onclick={oncancel}>Cancel</button>
+				</span>
+			{:else}
+				<span class="self-end text-[11px] text-faint">{meta.join(', ')}</span>
+			{/if}
 		</Message>
 	{/if}
 
 	<div class="flex flex-col gap-1.5">
-		{#if turn.machine || turn.activity === 'queued'}
+		{#if !waiting && (turn.machine || turn.activity === 'queued')}
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
 						Waiting for {run.pinned_worker_id ?? `${run.moved_from ? 'another' : 'a'} machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}…
 					{:else}
-						{run.resume_session_id || run.moved_from ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
+						{run.parent_id ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
 						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}
 						{#if turn.checkpoint}<span title="Last checkpoint pushed to origin">pushed <span class="font-mono">{turn.checkpoint.slice(0, 7)}</span></span>{/if}
 						<span>with {agentModel(run.agent, run.model)}</span>
@@ -74,8 +103,8 @@
 			{#each groups as it (it.key)}
 				{#if it.kind === 'text'}
 					<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={it.text} /></div>
-				{:else if it.kind === 'tool'}
-					<ToolRow item={it} {live} />
+				{:else if it.kind === 'tool-group'}
+					<ToolGroup tools={it.tools} {live} />
 				{:else if it.kind === 'note'}
 					<p class="py-1 text-[13px] {it.tone === 'err' ? 'text-err-ink' : it.tone === 'ok' ? 'text-ok-ink' : 'text-muted-foreground'}">{it.text}</p>
 				{:else if it.kind === 'stderr-group'}

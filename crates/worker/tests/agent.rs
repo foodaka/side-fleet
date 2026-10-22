@@ -31,6 +31,7 @@ fn spec(task: &str) -> AgentSpec {
         max_turns: None,
         extra_args: vec![],
         resume_session_id: None,
+        images: vec![],
     }
 }
 
@@ -137,6 +138,30 @@ fn resume_adds_the_resume_flag() {
     let i = a.iter().position(|x| x == "--resume").expect("--resume present");
     assert_eq!(a[i + 1], "sess-123");
     assert!(s.display_command().contains("--resume sess-123"));
+}
+
+#[test]
+fn attached_images_reach_each_agent() {
+    let img = std::path::PathBuf::from("/tmp/sidefleet-images/r1/image-1.png");
+    let mut s = spec("what is wrong here?");
+    s.images = vec![img.clone()];
+    // Claude Code: told where the image is, and allowed to read that folder.
+    let a = s.args();
+    assert!(a[1].starts_with("what is wrong here?") && a[1].contains("/tmp/sidefleet-images/r1/image-1.png"), "{}", a[1]);
+    assert!(a.contains(&"--add-dir=/tmp/sidefleet-images/r1".to_string()));
+    assert!(s.display_command().contains("-p <task>"), "{}", s.display_command());
+
+    let mut s = agent_spec(Agent::Codex, "what is wrong here?");
+    s.images = vec![img.clone()];
+    let a = s.args();
+    let flag = a.iter().position(|x| x == "--image=/tmp/sidefleet-images/r1/image-1.png").expect("--image");
+    assert!(flag < a.iter().position(|x| x == "--").unwrap());
+    assert_eq!(a.last().unwrap(), "what is wrong here?");
+
+    let mut s = agent_spec(Agent::Opencode, "what is wrong here?");
+    s.images = vec![img];
+    assert!(s.args().contains(&"--file=/tmp/sidefleet-images/r1/image-1.png".to_string()));
+    assert_eq!(s.stdin(), Some("what is wrong here?"));
 }
 
 #[tokio::test]

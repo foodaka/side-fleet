@@ -20,13 +20,14 @@
 </script>
 
 <script lang="ts">
-	// Images a tool returned (a screenshot the agent read), shown under its line in the narration.
+	// Images a tool returned (a screenshot the agent read), shown under its line in the narration,
+	// and images the user attached to a message.
 	import * as Dialog from '#lib/components/ui/dialog';
 	import ImageOff from '@lucide/svelte/icons/image-off';
 	import type { ImageRef } from '../thread.svelte';
 
 	/** `inset` lines the images up under a tool row's text. */
-	let { images, inset = true }: { images: ImageRef[]; inset?: boolean } = $props();
+	let { images, inset = true, alt = 'Returned by the tool' }: { images: ImageRef[]; inset?: boolean; alt?: string } = $props();
 	let open = $state<string | null>(null);
 </script>
 
@@ -36,7 +37,7 @@
 			<div class="h-40 w-56 animate-pulse rounded-lg bg-muted"></div>
 		{:then src}
 			<button type="button" class="overflow-hidden rounded-lg border bg-code transition-opacity hover:opacity-90" onclick={() => (open = src)} aria-label="Open the image full size">
-				<img {src} alt="Returned by the tool" class="block max-h-72 w-auto max-w-full object-contain" />
+				<img {src} {alt} class="block max-h-72 w-auto max-w-full object-contain" />
 			</button>
 		{:catch err}
 			<p class="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><ImageOff class="size-3.5" />{err.message}</p>
@@ -48,7 +49,7 @@
 	<Dialog.Content class="max-h-[95dvh] w-auto max-w-[95vw] overflow-auto p-2 sm:max-w-[95vw]">
 		<Dialog.Title class="sr-only">Image</Dialog.Title>
 		{#if open}
-			<a href={open} target="_blank" rel="noopener"><img src={open} alt="Returned by the tool, full size" class="block h-auto max-w-full" /></a>
+			<a href={open} target="_blank" rel="noopener"><img src={open} alt="{alt}, full size" class="block h-auto max-w-full" /></a>
 		{/if}
 	</Dialog.Content>
 </Dialog.Root>

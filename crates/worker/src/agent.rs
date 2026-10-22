@@ -62,6 +62,8 @@ pub struct AgentSpec {
     pub extra_args: Vec<String>,
     /// Continue an earlier session of the same agent on this machine.
     pub resume_session_id: Option<String>,
+    /// Image files the user attached, for the agent to look at.
+    pub images: Vec<PathBuf>,
 }
 
 impl AgentSpec {
@@ -73,10 +75,21 @@ impl AgentSpec {
         }
     }
 
+    /// The task as the agent gets it. Claude Code has no image flag: it is told
+    /// where the images are and opens them with its Read tool.
+    fn prompt(&self) -> String {
+        if self.agent != Agent::Claude || self.images.is_empty() {
+            return self.task.clone();
+        }
+        let paths: Vec<String> = self.images.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        format!("{}\n\nThe user attached {} for this message; open {} with the Read tool:\n{}", self.task,
+            if paths.len() == 1 { "an image" } else { "images" }, if paths.len() == 1 { "it" } else { "them" }, paths.join("\n"))
+    }
+
     fn claude_args(&self) -> Vec<String> {
         let mut a = vec![
             "-p".to_string(),
-            self.task.clone(),
+            self.prompt(),
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
@@ -92,6 +105,12 @@ impl AgentSpec {
         if let Some(n) = self.max_turns {
             a.push("--max-turns".into());
             a.push(n.to_string());
+        }
+        // The images live outside the workspace; let Claude Code read them.
+        let mut dirs: Vec<&std::path::Path> = self.images.iter().filter_map(|p| p.parent()).collect();
+        dirs.dedup();
+        for d in dirs {
+            a.push(format!("--add-dir={}", d.to_string_lossy()));
         }
         if !self.extra_args.iter().any(|x| x.starts_with("--append-system-prompt")) {
             a.push("--append-system-prompt".into());
@@ -117,6 +136,9 @@ impl AgentSpec {
         if !self.model.is_empty() {
             a.extend(["-m".into(), self.model.clone()]);
         }
+        for img in &self.images {
+            a.push(format!("--image={}", img.to_string_lossy()));
+        }
         // `--` so a task starting with `-` is never read as a flag.
         a.push("--".into());
         if let Some(sid) = &self.resume_session_id {
@@ -141,6 +163,9 @@ impl AgentSpec {
             // `--auto` is newer (1.18); this alias works from 1.4.
             "bypassPermissions" => a.push("--dangerously-skip-permissions".into()),
             _ => {}
+        }
+        for img in &self.images {
+            a.push(format!("--file={}", img.to_string_lossy()));
         }
         a
     }
@@ -177,7 +202,7 @@ impl AgentSpec {
         let shown: Vec<String> = self
             .args()
             .iter()
-            .map(|a| if a == &self.task { "<task>".to_string() } else { a.clone() })
+            .map(|a| if a == &self.task || a == &self.prompt() { "<task>".to_string() } else { a.clone() })
             .collect();
         let stdin = if self.stdin().is_some() { " < <task>" } else { "" };
         redact(&format!("{} {}{stdin}", self.bin, shown.join(" ")))

@@ -7,6 +7,7 @@
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
+	import ToolImages from './ToolImages.svelte';
 	import ChangesCard from '../diff/ChangesCard.svelte';
 	import type { Turn } from '../thread.svelte';
 
@@ -56,6 +57,9 @@
 </script>
 
 <div class="flex flex-col gap-4">
+	{#if first && run.images?.length}
+		<ToolImages images={run.images} inset={false} alt="Attached to the task" />
+	{/if}
 	{#if run.moved_from}
 		<p class="flex items-center gap-1.5 text-[13px] text-muted-foreground">
 			<ArrowRightLeft class="size-3.5 shrink-0" />
@@ -66,6 +70,7 @@
 	{:else if !first}
 		<Message from="user">
 			<MessageContent class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap text-primary-foreground group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground">{run.task}</MessageContent>
+			{#if run.images?.length}<div class="self-end"><ToolImages images={run.images} inset={false} alt="Attached to the message" /></div>{/if}
 			{#if waiting}
 				<span class="flex items-center gap-2 self-end text-[11px] text-muted-foreground">
 					<span>Queued, sends when the current message finishes</span>

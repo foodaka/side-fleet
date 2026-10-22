@@ -30,6 +30,8 @@ export interface Run {
 	moved_from: string | null;
 	/** The pushed branch a moved run continues from. */
 	resume_from_branch: string | null;
+	/** Images the user attached to this message. */
+	images?: { id: string; media_type: string; bytes: number }[];
 }
 
 export interface RunSummary extends Run {

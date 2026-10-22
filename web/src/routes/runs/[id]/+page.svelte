@@ -9,12 +9,15 @@
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
 	import Square from '@lucide/svelte/icons/square';
+	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { duration, PERMISSIONS, permName, repoLabel } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import CopyButton from '#lib/sf/ui/CopyButton.svelte';
+	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
+	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
@@ -70,14 +73,18 @@
 	let sending = $state(false);
 	let stopping = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
+	let picker: HTMLInputElement | undefined = $state();
+	const attachments = new Attachments();
+	const canReply = $derived(!!thread?.hasSession || live);
 
 	async function send(e?: Event) {
 		e?.preventDefault();
 		if (!thread || !reply.trim() || sending) return;
 		sending = true;
 		try {
-			await thread.reply(reply.trim(), perm || undefined);
+			await thread.reply(reply.trim(), perm || undefined, await attachments.payload());
 			reply = '';
+			attachments.clear();
 			void fleet.refresh();
 		} catch (err) {
 			toast.error('Could not send', { description: (err as Error).message });
@@ -109,6 +116,12 @@
 </script>
 
 <svelte:head><title>{root ? root.task.slice(0, 60) : 'Run'} · Sidefleet</title></svelte:head>
+<svelte:window
+	ondragenter={(e) => canReply && attachments.dragenter(e)}
+	ondragleave={(e) => canReply && attachments.dragleave(e)}
+	ondragover={(e) => canReply ? attachments.dragover(e) : e.preventDefault()}
+	ondrop={(e) => canReply ? attachments.drop(e) : e.preventDefault()}
+/>
 
 <div class="flex h-dvh flex-col max-md:h-[calc(100dvh-3.25rem)]">
 	<header class="border-b bg-background/80 backdrop-blur">
@@ -191,18 +204,23 @@
 	{#if root}
 		<div class="border-t bg-background">
 			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4" onsubmit={send}>
-				<div class="rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
+				<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
+					{#if attachments.dragging}
+						<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images to attach them</div>
+					{/if}
 					<label for="reply" class="sr-only">Reply</label>
 					<textarea
 						id="reply"
 						bind:this={box}
 						bind:value={reply}
 						rows="1"
-						disabled={!thread?.hasSession && !live}
+						disabled={!canReply}
+						onpaste={attachments.paste}
 						placeholder={live ? 'Queue your next message…' : 'Reply to continue on the same machine…'}
 						onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) send(e); }}
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
+					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
 					<div class="flex items-center gap-2 px-2.5 pb-2.5">
 						<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
 							<Select.Trigger size="sm" class="h-7 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent" aria-label="Permissions for this reply">
@@ -214,7 +232,11 @@
 							</Select.Content>
 						</Select.Root>
 						<span class="hidden min-w-0 truncate text-xs text-faint sm:inline">{hint}</span>
-						<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
+						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canReply} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
+							<Paperclip class="size-4" />
+						</button>
+						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
+						<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />
 						</button>
 					</div>

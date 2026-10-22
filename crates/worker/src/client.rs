@@ -174,6 +174,19 @@ impl ControlClient {
         Ok(r.json().await?)
     }
 
+    /// An image attached to a task, as stored on the control plane.
+    pub async fn image(&self, id: Uuid) -> Result<Vec<u8>> {
+        let r = self
+            .http
+            .get(self.url(&format!("/v1/worker/images/{id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("image request failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.bytes().await?.to_vec())
+    }
+
     pub async fn finish(&self, run_id: Uuid, status: RunStatus, result: Option<Value>, usage_limit: Option<UsageLimit>) -> Result<Run> {
         let r = self
             .http

@@ -40,7 +40,8 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Live, and a conversation**: events stream over SSE within milliseconds, survive reloads and
   dropped connections, and replies resume the same agent session like a chat. Reply while it works
   and the message waits its turn, or press Send now to interrupt. Screenshots and other images the
-  agent opens show inline, so you can ask for one from your phone.
+  agent opens show inline, so you can ask for one from your phone. Drop, paste or attach images to a
+  task or reply and the agent gets them too.
 - **Permission modes**: read and edit files (default), full access for unattended commands, or
   read only for questions.
 - **Zero-config workers**: `connect` checks which agents are installed and signed in, finds your

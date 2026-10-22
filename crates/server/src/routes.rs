@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use sidefleet_core::{
     Agent, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
-    HeartbeatRequest, HeartbeatResponse, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, ISOLATION_MODES, PERMISSION_MODES,
+    HeartbeatRequest, HeartbeatResponse, ImageUpload, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    RunStatus, RunSummary, ISOLATION_MODES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -44,10 +44,11 @@ pub const MAX_EVENTS_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
     let dev = Router::new()
-        .route("/v1/runs", post(create_run).get(list_runs))
+        // Tasks and replies can carry images (base64).
+        .route("/v1/runs", post(create_run).get(list_runs).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/thread", get(get_thread))
-        .route("/v1/runs/{id}/messages", post(follow_up))
+        .route("/v1/runs/{id}/messages", post(follow_up).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/images/{id}", get(get_image))
@@ -65,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         // Events can carry screenshots (base64), well past axum's 2 MB default.
         .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/worker/runs/{id}/control", get(run_control))
+        .route("/v1/worker/images/{id}", get(get_image))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_worker));
 
@@ -165,6 +167,7 @@ async fn create_run(
     if repo.is_empty() || repo.contains("..") || repo.starts_with('/') {
         return Err(ApiError(StatusCode::BAD_REQUEST, "repo must be a relative repo name".into()));
     }
+    check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     let isolation = match req.isolation.as_deref() {
         None | Some("") => "worktree",
@@ -176,7 +179,7 @@ async fn create_run(
         Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
-    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover };
+    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover, images: &req.images };
     let (run, ev) = db::create_run(&state.pool, new).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
@@ -197,6 +200,26 @@ async fn list_runs(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<RunSummary>>, ApiError> {
     Ok(Json(db::list_runs(&state.pool, q.limit.clamp(1, 500)).await?))
+}
+
+/// Attached images must be raster images the agents can read, and not too many or too large.
+fn check_images(images: &[ImageUpload]) -> Result<(), ApiError> {
+    use base64::Engine;
+    let bad = |m: String| Err(ApiError(StatusCode::BAD_REQUEST, m));
+    if images.len() > MAX_ATTACHED_IMAGES {
+        return bad(format!("at most {MAX_ATTACHED_IMAGES} images per message"));
+    }
+    for img in images {
+        if !db::IMAGE_TYPES.contains(&img.media_type.as_str()) {
+            return bad(format!("images must be PNG, JPEG, GIF or WebP, not {}", img.media_type));
+        }
+        match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+            Ok(b) if b.len() > db::MAX_IMAGE_BYTES => return bad(format!("an image is over {} MB", db::MAX_IMAGE_BYTES / 1024 / 1024)),
+            Ok(_) => {}
+            Err(_) => return bad("an image is not valid base64".into()),
+        }
+    }
+    Ok(())
 }
 
 fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
@@ -237,8 +260,9 @@ async fn follow_up(
         let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
         run.agent.check_model(m.trim()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     }
+    check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    match db::create_follow_up(&state.pool, id, task, req.model.as_deref().map(str::trim), mode).await? {
+    match db::create_follow_up(&state.pool, id, task, req.model.as_deref().map(str::trim), mode, &req.images).await? {
         FollowUpOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");

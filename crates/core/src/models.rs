@@ -51,7 +51,7 @@ impl RunStatus {
 pub struct Run {
     pub id: Uuid,
     pub task: String,
-    /// Which coding agent runs the task; a thread keeps the agent of its first run.
+    /// Which coding agent runs the task. A follow-up keeps the thread's latest agent unless it switches.
     #[serde(default = "default_agent")]
     pub agent: Agent,
     /// Model id for that agent; empty means the machine's default (Codex, opencode).
@@ -400,6 +400,10 @@ pub struct CreateRunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FollowUpRequest {
     pub task: String,
+    /// Switch the thread to another agent (claude, codex or opencode) from this message on.
+    /// It starts its own session in the same worktree with a transcript of the thread so far.
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]

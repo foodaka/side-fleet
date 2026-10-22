@@ -13,7 +13,8 @@
 		unavailable = () => '',
 		onagent,
 		onmodel,
-		id = 'model'
+		id = 'model',
+		size = 'default'
 	}: {
 		agent: AgentId;
 		model: string;
@@ -24,10 +25,14 @@
 		onagent?: (a: AgentId) => void;
 		onmodel?: (m: string) => void;
 		id?: string;
+		/** `sm` to sit with the reply box's smaller controls. */
+		size?: 'default' | 'sm';
 	} = $props();
 
 	const ok = $derived(modelValid(agent, model));
-	const pill = 'h-8 rounded-full border-transparent bg-muted shadow-none hover:bg-accent';
+	const pill = $derived(`${size === 'sm' ? 'h-7' : 'h-8'} rounded-full border-transparent bg-muted shadow-none hover:bg-accent`);
+	const text = $derived(size === 'sm' ? 'text-xs' : 'text-[13px]');
+	const mono = $derived(size === 'sm' ? 'text-[11.5px]' : 'text-[12.5px]');
 
 	function pickAgent(v: string) {
 		agent = v as AgentId;
@@ -40,7 +45,7 @@
 </script>
 
 <Select.Root type="single" value={agent} onValueChange={pickAgent}>
-	<Select.Trigger size="sm" class="{pill} text-[13px]" aria-label="Agent"><AgentIcon {agent} />{agentName(agent)}</Select.Trigger>
+	<Select.Trigger size="sm" class="{pill} {text}" aria-label="Agent"><AgentIcon {agent} />{agentName(agent)}</Select.Trigger>
 	<Select.Content>
 		{#each AGENTS as a (a.id)}
 			{@const why = unavailable(a.id)}
@@ -53,14 +58,14 @@
 
 {#if agent === 'claude'}
 	<Select.Root type="single" value={model} onValueChange={pickModel}>
-		<Select.Trigger size="sm" class="{pill} text-[13px]" aria-label="Model">{modelName(model)}</Select.Trigger>
+		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Model">{modelName(model)}</Select.Trigger>
 		<Select.Content>
 			{#each MODELS as m (m.id)}<Select.Item value={m.id} label={m.name}><span class="flex flex-col"><span>{m.name}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
 		</Select.Content>
 	</Select.Root>
 {:else if agent === 'codex' && (models.length || !model)}
 	<Select.Root type="single" value={model} onValueChange={pickModel}>
-		<Select.Trigger size="sm" class="{pill} font-mono text-[12.5px]" aria-label="Model">{model || 'Default model'}</Select.Trigger>
+		<Select.Trigger size="sm" class="{pill} font-mono {mono}" aria-label="Model">{model || 'Default model'}</Select.Trigger>
 		<Select.Content>
 			<Select.Item value="" label="Default model"><span class="flex flex-col"><span>Default model</span><span class="text-xs text-muted-foreground">Whatever Codex uses on that machine</span></span></Select.Item>
 			{#if models.length}<Select.Separator />{/if}
@@ -80,7 +85,7 @@
 		placeholder="Default model"
 		spellcheck="false"
 		autocomplete="off"
-		class="h-8 w-[15rem] max-w-full rounded-full bg-muted px-3 font-mono text-[12.5px] outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {ok ? '' : 'text-err-ink'}"
+		class="{size === 'sm' ? 'h-7 w-[13rem]' : 'h-8 w-[15rem]'} max-w-full rounded-full bg-muted px-3 font-mono {mono} outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {ok ? '' : 'text-err-ink'}"
 	/>
 	<datalist id="{id}-options">{#each models as m (m)}<option value={m}></option>{/each}</datalist>
 {/if}

@@ -10,6 +10,12 @@ use serde_json::Value;
 /// single argument, and Linux caps one argument at 128 KiB.
 pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
 
+/// Bytes of transcript a message leaves room for: task and transcript go to the
+/// agent together, as one argument for some agents.
+pub fn budget(task: &str) -> usize {
+    MAX_CONTEXT_BYTES.min(120_000usize.saturating_sub(task.len()))
+}
+
 fn agent_name(a: Agent) -> &'static str {
     match a {
         Agent::Claude => "Claude Code",
@@ -22,11 +28,19 @@ fn agent_name(a: Agent) -> &'static str {
 /// each with its events. The newest messages are kept when it is too long.
 pub fn transcript(runs: &[(Run, Vec<RunEvent>)], budget: usize) -> String {
     let Some((root, _)) = runs.first() else { return String::new() };
+    // Every agent that took part, in order of first reply (a thread can switch agents).
+    let mut agents = vec![root.agent];
+    for (r, _) in runs {
+        if r.kind != "restore" && !agents.contains(&r.agent) {
+            agents.push(r.agent);
+        }
+    }
+    let with: Vec<&str> = agents.iter().map(|a| agent_name(*a)).collect();
     let header = format!(
         "This task continues a conversation that started in another session (with {}). \
          The transcript up to this point is below, for context. The files in your working \
          directory already include every change made in it. Reply to the new message after the transcript.\n\n<transcript>\n",
-        agent_name(root.agent)
+        with.join(", then ")
     );
     let footer = "</transcript>\n\nNew message:";
     let blocks: Vec<String> = runs.iter().map(|(run, events)| block(run, events)).collect();
@@ -147,6 +161,18 @@ mod tests {
         assert!(t.contains("restored to how they were before"));
         assert!(!t.contains("secret thoughts") && !t.contains("big output"));
         assert!(t.ends_with("New message:"));
+    }
+
+    #[test]
+    fn names_every_agent_that_took_part() {
+        let runs = vec![
+            (run("plan it", Agent::Claude, "agent"), vec![]),
+            (run("build it", Agent::Codex, "agent"), vec![]),
+            (run("review it", Agent::Claude, "agent"), vec![]),
+        ];
+        let t = transcript(&runs, MAX_CONTEXT_BYTES);
+        assert!(t.starts_with("This task continues a conversation that started in another session (with Claude Code, then Codex)"), "{t}");
+        assert!(t.contains("## User\nbuild it\n\n## Codex\n"));
     }
 
     #[test]

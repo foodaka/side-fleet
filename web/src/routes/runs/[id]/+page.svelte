@@ -13,13 +13,14 @@
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
-	import type { Run } from '#lib/sf/types';
-	import { duration, PERMISSIONS, permName, repoLabel } from '#lib/sf/format';
+	import type { AgentId, Run } from '#lib/sf/types';
+	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, PERMISSIONS, permName, repoLabel } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import CopyButton from '#lib/sf/ui/CopyButton.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
+	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
@@ -100,14 +101,30 @@
 	let box: HTMLTextAreaElement | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
 	const attachments = new Attachments();
-	const canReply = $derived(!!thread?.hasSession || live);
+
+	// The agent for the next message: the thread's latest one, or another to switch to.
+	let agent = $state<AgentId>('claude');
+	let model = $state('');
+	const threadAgent = $derived(thread?.latest?.agent ?? null);
+	$effect(() => {
+		const a = threadAgent;
+		if (!a) return;
+		untrack(() => { agent = a; model = thread!.latest!.model; });
+	});
+	const switching = $derived(!!threadAgent && agent !== threadAgent);
+	const host = $derived(fleet.workers.filter((w) => w.id === thread?.machine));
+	/** The model this agent last used in the thread, else its default. */
+	const lastModel = (a: AgentId) => thread?.runs.findLast((r) => r.agent === a)?.model ?? defaultModel(a);
+	// A new agent starts a session of its own, so a thread without one can carry on that way.
+	const canReply = $derived(!!thread?.hasSession || live || switching);
 
 	async function send(e?: Event) {
 		e?.preventDefault();
-		if (!thread || !reply.trim() || sending) return;
+		if (!thread || !reply.trim() || sending || !modelValid(agent, model)) return;
 		sending = true;
 		try {
-			await thread.reply(reply.trim(), perm || undefined, await attachments.payload());
+			const pick = switching || model !== thread.latest?.model ? { agent, model } : undefined;
+			await thread.reply(reply.trim(), perm || undefined, await attachments.payload(), pick);
 			reply = '';
 			attachments.clear();
 			void fleet.refresh();
@@ -142,7 +159,8 @@
 	}
 	$effect(() => { void reply; grow(); });
 	const hint = $derived(
-		live ? 'Your message waits until this one finishes; Send now interrupts it.'
+		switching ? `Switches to ${agentName(agent)}: a new session with the conversation so far, same files.`
+		: live ? 'Your message waits until this one finishes; Send now interrupts it.'
 		: !thread?.hasSession ? 'There is no session to continue; start a new task instead.'
 		: `Continues the same session on ${thread?.machine ?? 'that machine'}${thread?.branch ? `, on ${thread.branch}` : ''}.`
 	);
@@ -255,12 +273,21 @@
 						rows="1"
 						disabled={!canReply}
 						onpaste={attachments.paste}
-						placeholder={live ? 'Queue your next message…' : 'Reply to continue on the same machine…'}
+						placeholder={switching ? `Message ${agentName(agent)}…` : live ? 'Queue your next message…' : 'Reply to continue on the same machine…'}
 						onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) send(e); }}
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
 					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
-					<div class="flex items-center gap-2 px-2.5 pb-2.5">
+					<div class="flex flex-wrap items-center gap-2 px-2.5 pb-2.5">
+						<AgentModelPicker
+							bind:agent
+							bind:model
+							models={machineModels(host, agent)}
+							id="reply-model"
+							size="sm"
+							unavailable={(a) => (!host.length || host.some((w) => hasAgent(w, a)) ? '' : `Not on ${thread?.machine}`)}
+							onagent={(a) => (model = lastModel(a))}
+						/>
 						<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
 							<Select.Trigger size="sm" class="h-7 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent" aria-label="Permissions for this reply">
 								{perm ? permName(perm) : `Same permissions${latest?.permission_mode ? ` (${permName(latest.permission_mode)})` : ''}`}
@@ -275,7 +302,7 @@
 							<Paperclip class="size-4" />
 						</button>
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-						<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
+						<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending || !modelValid(agent, model)} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />
 						</button>
 					</div>

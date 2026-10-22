@@ -252,7 +252,8 @@ async fn get_thread(
     Ok(Json(db::thread_runs(&state.pool, run.parent_id.unwrap_or(run.id)).await?))
 }
 
-/// Continue the conversation: queue a run that resumes the thread's session, with the same agent.
+/// Continue the conversation: queue a run that resumes the thread's session, with the same agent
+/// or, when `agent` names another, with that one (it gets a transcript of the thread so far).
 /// While an earlier message runs, the new one waits behind it (stop that one to send this now).
 async fn follow_up(
     State(state): State<AppState>,
@@ -266,13 +267,13 @@ async fn follow_up(
     if task.len() > MAX_TASK_BYTES {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("message is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
     }
-    if let Some(m) = &req.model {
-        let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
-        run.agent.check_model(m.trim()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    }
+    let agent = match req.agent.as_deref().map(str::trim) {
+        None | Some("") => None,
+        a => Some(parse_agent(a)?),
+    };
     check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    match db::create_follow_up(&state.pool, id, task, req.model.as_deref().map(str::trim), mode, &req.images).await? {
+    match db::create_follow_up(&state.pool, id, task, agent, req.model.as_deref().map(str::trim), mode, &req.images).await? {
         FollowUpOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");
@@ -281,6 +282,11 @@ async fn follow_up(
         FollowUpOutcome::NotFound => Err(not_found()),
         FollowUpOutcome::QueueFull => Err(ApiError(StatusCode::CONFLICT, format!("{} messages are already waiting; wait for them or stop some", db::MAX_QUEUED_MESSAGES))),
         FollowUpOutcome::NoSession(_) => Err(ApiError(StatusCode::CONFLICT, "this thread has no agent session to resume; start a new task instead".into())),
+        FollowUpOutcome::BadModel(e) => Err(ApiError(StatusCode::BAD_REQUEST, e)),
+        FollowUpOutcome::AgentMissing(w) => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("{w} doesn't have {}; the thread's files are there, so pick an agent installed on it", agent.map_or("that agent", |a| a.as_str())),
+        )),
     }
 }
 
@@ -319,8 +325,7 @@ async fn fork_run(
     let model = req.model.trim();
     agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    // Task and transcript go to the agent together, as one argument for some agents.
-    let context_budget = crate::fork::MAX_CONTEXT_BYTES.min(120_000usize.saturating_sub(task.len()));
+    let context_budget = crate::fork::budget(task);
     let worker = match req.worker_id.as_deref().map(str::trim) {
         None | Some("") => None,
         Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),

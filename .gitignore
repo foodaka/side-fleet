@@ -2,3 +2,4 @@
 .env
 *.log
 .claude/launch.json
+.gstack/

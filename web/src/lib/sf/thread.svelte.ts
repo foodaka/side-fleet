@@ -1,7 +1,7 @@
 import { api } from './api';
 import { followRun } from './sse';
 import { fleet } from './state.svelte';
-import type { Run, RunEvent } from './types';
+import type { AgentId, Run, RunEvent } from './types';
 import { agentName } from './format';
 import type { DiffSet } from './diff/parse';
 
@@ -118,11 +118,15 @@ export class Thread {
 		}
 	}
 
-	/** Send a follow-up on the same session. While a message runs, it waits behind it. */
-	async reply(text: string, permission?: string, images: { media_type: string; data: string }[] = []) {
+	/**
+	 * Send a follow-up on the same session. While a message runs, it waits behind it.
+	 * With another agent the thread switches to it: it starts its own session with the conversation so far.
+	 */
+	async reply(text: string, permission?: string, images: { media_type: string; data: string }[] = [], agent?: { agent: AgentId; model: string }) {
 		const root = this.root!;
 		const body: Record<string, unknown> = { task: text };
 		if (permission) body.permission_mode = permission;
+		if (agent) Object.assign(body, agent);
 		if (images.length) body.images = images;
 		const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(body) });
 		const run = await api<Run>(`/v1/runs/${r.id}`);

@@ -92,7 +92,28 @@ pub struct Run {
     /// Create the worktree from this branch on `origin` (fetched first) instead of HEAD.
     #[serde(default)]
     pub resume_from_branch: Option<String>,
+    /// Images the user attached to this message (`GET /v1/images/:id`, `/v1/worker/images/:id`).
+    #[serde(default)]
+    pub images: Vec<ImageRef>,
 }
+
+/// A stored image, as runs and events refer to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageRef {
+    pub id: Uuid,
+    pub media_type: String,
+    pub bytes: usize,
+}
+
+/// An image sent with a task or reply: base64 `data` of a PNG, JPEG, GIF or WebP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUpload {
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Images one message may carry.
+pub const MAX_ATTACHED_IMAGES: usize = 8;
 
 pub fn default_agent() -> Agent {
     Agent::Claude
@@ -347,6 +368,9 @@ pub struct CreateRunRequest {
     /// checkpoints of the task's `sidefleet/...` branch to the repo's `origin`.
     #[serde(default)]
     pub failover: bool,
+    /// Images for the agent to look at, up to `MAX_ATTACHED_IMAGES`.
+    #[serde(default)]
+    pub images: Vec<ImageUpload>,
 }
 
 /// Continue a thread: a new run that resumes the previous session with the same agent.
@@ -357,6 +381,8 @@ pub struct FollowUpRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub images: Vec<ImageUpload>,
 }
 
 pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "bypassPermissions", "plan", "default", "dontAsk"];

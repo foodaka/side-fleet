@@ -65,13 +65,13 @@ Bearer `SIDEFLEET_DEV_KEY`:
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it) |
+| `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?, images?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it); `images` is up to 8 `{media_type, data}` (base64 PNG, JPEG, GIF or WebP, 10 MB each) for the agent to look at; the run lists them as `images: [{id, media_type, bytes}]` |
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
-| `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine. While an earlier message is queued or running, it waits behind it and resumes the latest session once claimed (stop the running one to send it now); `409` when the thread has no session to continue or 10 messages are already waiting |
+| `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?, images?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine. While an earlier message is queued or running, it waits behind it and resumes the latest session once claimed (stop the running one to send it now); `409` when the thread has no session to continue or 10 messages are already waiting |
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind; replays then live; ends with `end` |
-| `GET` | `/v1/images/:id` | an image from a tool result (PNG, JPEG, GIF or WebP); `tool_result` events refer to them as `images: [{id, media_type, bytes}]` |
+| `GET` | `/v1/images/:id` | an image from a tool result or attached to a message (PNG, JPEG, GIF or WebP); `tool_result` events and runs refer to them as `images: [{id, media_type, bytes}]` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `GET` | `/v1/setup` | control URL and the first worker token, for the page's connect command |
@@ -85,6 +85,7 @@ individually; compared as SHA-256 digests in constant time and never logged):
 `POST /v1/worker/register`, `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (sends the
 agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
 only get `claude` runs, and workers that send no slots are not load balanced),
-`POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`,
+`POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`, `GET /v1/worker/images/:id`
+(a run's attached images, which the worker saves to a temporary folder for the agent),
 `POST /v1/worker/runs/:id/finish` (`{status, result, usage_limit?: {resets_at?}}`; answers with
 the run, which is `queued` again when a usage limit moved it to another machine).

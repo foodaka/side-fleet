@@ -1138,6 +1138,49 @@ async fn tool_result_images_are_stored_apart_and_served_to_the_page() {
 }
 
 #[tokio::test]
+async fn images_attached_to_tasks_and_replies_reach_the_worker() {
+    use base64::Engine;
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let png = vec![137u8, 80, 78, 71, 1, 2, 3];
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let body = |images: Value| json!({"task": "look", "model": "claude-sonnet-5-5", "repo": "r", "images": images});
+
+    for (images, why) in [
+        (json!([{"media_type": "image/svg+xml", "data": "PHN2Zz4="}]), "not a raster image"),
+        (json!([{"media_type": "image/png", "data": "not base64!"}]), "not base64"),
+        (json!(vec![json!({"media_type": "image/png", "data": b64}); 9]), "too many"),
+    ] {
+        let r = api.dev(reqwest::Method::POST, "/v1/runs").json(&body(images)).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{why}");
+    }
+
+    let id = create_id(&api, body(json!([{"media_type": "image/png", "data": b64}]))).await;
+    let run = api.claim("w1", &["r"]).await.unwrap();
+    assert_eq!(run.id, id);
+    assert_eq!(run.images.len(), 1);
+    assert_eq!(run.images[0].media_type, "image/png");
+    assert_eq!(api.get_run(id).await.images, run.images, "the page sees them too");
+    let r = api.worker(reqwest::Method::GET, &format!("/v1/worker/images/{}", run.images[0].id)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), png.as_slice());
+
+    // A reply carries its own images.
+    api.post_events("w1", id, json!([{"kind": "agent_init", "payload": {"model": "claude-sonnet-5-5", "session_id": "s1"}}])).await;
+    api.finish("w1", id, "succeeded", json!({"session_id": "s1"})).await;
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/messages"))
+        .json(&json!({"task": "and this one?", "images": [{"media_type": "image/png", "data": b64}, {"media_type": "image/png", "data": b64}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let next = api.claim("w1", &["r"]).await.unwrap();
+    assert_eq!(next.images.len(), 2);
+    assert_ne!(next.images[0].id, run.images[0].id);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn a_queued_message_follows_a_failover_run_to_its_new_machine() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

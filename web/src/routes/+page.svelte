@@ -4,12 +4,16 @@
 	import { Kbd } from '#lib/components/ui/kbd';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
+	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, hasAgent, machineModels, modelName, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
+	import AgentIcon from '#lib/sf/ui/AgentIcon.svelte';
+	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
+	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
 	const PICK = '__pick__';
@@ -32,6 +36,8 @@
 	let failover = $state(false);
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
+	let picker: HTMLInputElement | undefined = $state();
+	const attachments = new Attachments();
 
 	function load(k: string) { try { return localStorage.getItem(k) ?? ''; } catch { return ''; } }
 	function save(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
@@ -103,9 +109,10 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover })
+				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload() })
 			});
 			task = '';
+			attachments.clear();
 			void fleet.refresh();
 			await goto('#/runs/' + r.id);
 		} catch (err) {
@@ -135,6 +142,7 @@
 </script>
 
 <svelte:head><title>Sidefleet</title></svelte:head>
+<svelte:window ondragenter={attachments.dragenter} ondragleave={attachments.dragleave} ondragover={attachments.dragover} ondrop={attachments.drop} />
 
 {#if !fleet.loaded}
 	<div class="mx-auto mt-[18vh] w-full max-w-2xl px-4">
@@ -168,26 +176,31 @@
 	<section class="mx-auto flex w-full max-w-2xl flex-col gap-10 px-4 pt-[14vh] pb-16">
 		<form class="flex flex-col gap-3" onsubmit={run}>
 			<h1 class="text-center text-[28px] leading-tight font-medium tracking-tight">What should run?</h1>
-			<div class="rounded-2xl border border-input bg-card shadow-[0_1px_3px_rgb(0_0_0/0.04)] transition-shadow focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
+			<div class="relative rounded-2xl border border-input bg-card shadow-[0_1px_3px_rgb(0_0_0/0.04)] transition-shadow focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
+				{#if attachments.dragging}
+					<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[14px] text-muted-foreground">Drop images to attach them</div>
+				{/if}
 				<label for="task" class="sr-only">Task</label>
 				<textarea
 					id="task"
 					bind:this={box}
 					bind:value={task}
 					onkeydown={keydown}
+					onpaste={attachments.paste}
 					rows="3"
 					placeholder="Describe the task. It runs in a repo on one of your machines."
 					class="block max-h-[55vh] min-h-[88px] w-full resize-none bg-transparent px-4 pt-4 pb-2 text-[15px] leading-relaxed outline-none placeholder:text-faint"
 				></textarea>
+				<AttachedImages {attachments} class="px-4 pt-1 pb-3" />
 				<div class="flex items-end gap-2 px-3 pb-3">
 					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
 					<Select.Root type="single" value={agent} onValueChange={pickAgent}>
-						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Agent">{agentName(agent)}</Select.Trigger>
+						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Agent"><AgentIcon {agent} />{agentName(agent)}</Select.Trigger>
 						<Select.Content>
 							{#each AGENTS as a (a.id)}
 								{@const n = withRepo.filter((w) => hasAgent(w, a.id)).length}
 								<Select.Item value={a.id} label={a.name} disabled={!!repo && n === 0}>
-									<span class="flex flex-col"><span>{a.name}</span><span class="text-xs text-muted-foreground">{repo && n === 0 ? `Not on a machine with ${repoLabel(repo)}` : a.hint}</span></span>
+									<AgentIcon agent={a.id} class="mt-0.5 self-start" /><span class="flex flex-col"><span>{a.name}</span><span class="text-xs text-muted-foreground">{repo && n === 0 ? `Not on a machine with ${repoLabel(repo)}` : a.hint}</span></span>
 								</Select.Item>
 							{/each}
 						</Select.Content>
@@ -286,6 +299,10 @@
 					</div>
 					<span class="flex shrink-0 items-center gap-2">
 						{#if task.length > 2000}<span class="tnum text-xs text-faint">{task.length.toLocaleString()} characters</span>{/if}
+						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" onclick={() => picker?.click()} class="grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground">
+							<Paperclip class="size-4" />
+						</button>
+						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
 						<span class="hidden items-center gap-1 text-xs text-faint sm:flex"><Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd><Kbd>↵</Kbd></span>
 						<button type="submit" disabled={!canRun} aria-label="Run task" class="grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />

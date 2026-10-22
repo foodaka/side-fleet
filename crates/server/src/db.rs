@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker};
+use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -31,6 +31,7 @@ fn row_to_run(r: &PgRow) -> Run {
         failover: r.get("failover"),
         moved_from: r.get("moved_from"),
         resume_from_branch: r.get("resume_from_branch"),
+        images: serde_json::from_value(r.get("images")).unwrap_or_default(),
     }
 }
 
@@ -69,7 +70,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch";
+    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -114,15 +115,16 @@ pub struct NewRun<'a> {
     pub isolation: &'a str,
     pub pinned_worker_id: Option<&'a str>,
     pub failover: bool,
+    pub images: &'a [ImageUpload],
 }
 
 pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
-    let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id, failover } = new;
+    let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id, failover, images } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -133,9 +135,11 @@ pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, Ru
     .bind(pinned_worker_id)
     .bind(agent.as_str())
     .bind(failover)
+    .bind(json!([]))
     .fetch_one(&mut *tx)
     .await?;
-    let run = row_to_run(&row);
+    let mut run = row_to_run(&row);
+    run.images = attach_uploads(&mut tx, id, images).await?;
     let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task})).await?;
     tx.commit().await?;
     Ok((run, ev))
@@ -163,6 +167,7 @@ pub async fn create_follow_up(
     task: &str,
     model: Option<&str>,
     permission_mode: Option<&str>,
+    images: &[ImageUpload],
 ) -> sqlx::Result<FollowUpOutcome> {
     let Some(any) = get_run(pool, run_id).await? else {
         return Ok(FollowUpOutcome::NotFound);
@@ -187,8 +192,8 @@ pub async fn create_follow_up(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover, images)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -201,9 +206,11 @@ pub async fn create_follow_up(
     .bind(&latest.isolation)
     .bind(latest.agent.as_str())
     .bind(latest.failover)
+    .bind(json!([]))
     .fetch_one(&mut *tx)
     .await?;
-    let run = row_to_run(&row);
+    let mut run = row_to_run(&row);
+    run.images = attach_uploads(&mut tx, id, images).await?;
     let mut payload = json!({"status": "queued", "task": task, "resumes": session});
     if busy {
         payload["after"] = json!(latest.id);
@@ -338,7 +345,7 @@ pub const MAX_IMAGES_PER_EVENT: usize = 8;
 /// Decoded size limit for one image.
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 /// Raster formats only: an SVG served from this origin could run script.
-const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+pub const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// Store one `{media_type, data}` (base64) image and return the reference that
 /// replaces it in the event: `{id, media_type, bytes}`. Unusable images are dropped.
@@ -363,6 +370,20 @@ async fn store_image(tx: &mut Transaction<'_, Postgres>, run_id: Uuid, img: &Val
         .execute(&mut **tx)
         .await?;
     Ok(Some(json!({"id": id, "media_type": media_type, "bytes": bytes.len()})))
+}
+
+/// Store the images attached to a just-inserted message (validated by the route) and list them on it.
+async fn attach_uploads(tx: &mut Transaction<'_, Postgres>, run_id: Uuid, images: &[ImageUpload]) -> sqlx::Result<Vec<ImageRef>> {
+    let mut refs = Vec::with_capacity(images.len());
+    for img in images {
+        if let Some(r) = store_image(tx, run_id, &json!(img)).await? {
+            refs.push(serde_json::from_value(r).expect("store_image returns an image reference"));
+        }
+    }
+    if !refs.is_empty() {
+        sqlx::query("UPDATE runs SET images = $2 WHERE id = $1").bind(run_id).bind(json!(refs)).execute(&mut **tx).await?;
+    }
+    Ok(refs)
 }
 
 /// An image's media type and bytes.
@@ -821,8 +842,8 @@ async fn move_lost_run(
     let new_id = Uuid::new_v4();
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, parent_id, permission_mode, isolation, agent,
-                           failover, moved_from, resume_from_branch, excluded_worker_ids)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, true, $9, $10, ARRAY[$11]) RETURNING {RUN_COLS}"
+                           failover, moved_from, resume_from_branch, excluded_worker_ids, images)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, true, $9, $10, ARRAY[$11], $12) RETURNING {RUN_COLS}"
     ))
     .bind(new_id)
     .bind(&task)
@@ -835,6 +856,7 @@ async fn move_lost_run(
     .bind(run.id)
     .bind(branch.as_ref().filter(|_| run.isolation == "worktree"))
     .bind(lost_worker)
+    .bind(json!(run.images))
     .fetch_one(&mut **tx)
     .await?;
     let moved = row_to_run(&row);

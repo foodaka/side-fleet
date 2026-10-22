@@ -316,6 +316,47 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Download the images attached to the run into a private temporary folder
+/// (outside the repo, so they never end up in a commit). One that cannot be
+/// fetched is reported and left out.
+async fn fetch_images(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Vec<PathBuf>) {
+    if run.images.is_empty() {
+        return (None, vec![]);
+    }
+    let dir = std::env::temp_dir().join("sidefleet-images").join(run.id.to_string());
+    let made = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)
+    };
+    if let Err(e) = made {
+        let msg = format!("could not save the attached images ({e}); the task runs without them");
+        let _ = client.post_events(run.id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+        return (None, vec![]);
+    }
+    let mut paths = Vec::with_capacity(run.images.len());
+    for (n, img) in run.images.iter().enumerate() {
+        let ext = match img.media_type.as_str() {
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        let path = dir.join(format!("image-{}.{ext}", n + 1));
+        let saved = match client.image(img.id).await {
+            Ok(bytes) => std::fs::write(&path, bytes).map_err(anyhow::Error::from),
+            Err(e) => Err(e),
+        };
+        match saved {
+            Ok(()) => paths.push(path),
+            Err(e) => {
+                let msg = format!("could not fetch attached image {} ({e:#}); the task runs without it", n + 1);
+                let _ = client.post_events(run.id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+            }
+        }
+    }
+    (Some(dir), paths)
+}
+
 /// Execute one claimed run: forward events as they arrive, poll for stop, report the outcome.
 async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_path: Option<PathBuf>) {
     let run_id = run.id;
@@ -384,6 +425,8 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     };
     let diff_cwd = cwd.clone();
 
+    let (images_dir, images) = fetch_images(client, &run).await;
+
     let bin = match run.agent {
         Agent::Claude => &cfg.claude_bin,
         Agent::Codex => &cfg.codex_bin,
@@ -399,6 +442,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         max_turns: cfg.max_turns,
         extra_args: cfg.extra_args.clone(),
         resume_session_id: run.resume_session_id.clone(),
+        images,
     };
 
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);
@@ -485,6 +529,9 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     };
     // Executor dropped its sender; forwarder drains the channel and exits.
     let _ = forwarder.await;
+    if let Some(dir) = images_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     // What this turn changed, sent before the outcome so it lands while the run is still live.
     if let Some(before) = &before {

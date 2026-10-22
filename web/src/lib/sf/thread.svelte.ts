@@ -116,10 +116,11 @@ export class Thread {
 	}
 
 	/** Send a follow-up on the same session. While a message runs, it waits behind it. */
-	async reply(text: string, permission?: string) {
+	async reply(text: string, permission?: string, images: { media_type: string; data: string }[] = []) {
 		const root = this.root!;
-		const body: Record<string, string> = { task: text };
+		const body: Record<string, unknown> = { task: text };
 		if (permission) body.permission_mode = permission;
+		if (images.length) body.images = images;
 		const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(body) });
 		const run = await api<Run>(`/v1/runs/${r.id}`);
 		this.runs.push(run);

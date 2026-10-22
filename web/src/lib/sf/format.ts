@@ -81,6 +81,26 @@ export function rel(iso: string | null | undefined, now = Date.now()): string {
 	return Math.round(s / 86400) + 'd ago';
 }
 
+/** The compact form for tight spaces: `now`, `5m`, `2h`, `3d`, then the date. */
+export function ago(iso: string | null | undefined, now = Date.now()): string {
+	if (!iso) return '';
+	const t = new Date(iso).getTime(), s = Math.max(0, (now - t) / 1000);
+	if (s < 60) return 'now';
+	if (s < 3600) return Math.floor(s / 60) + 'm';
+	if (s < 86400) return Math.floor(s / 3600) + 'h';
+	if (s < 7 * 86400) return Math.floor(s / 86400) + 'd';
+	return new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+/** Which calendar bucket a time falls in, by the viewer's local days. */
+export function dayGroup(iso: string, now = Date.now()): 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older' {
+	const midnight = new Date(now).setHours(0, 0, 0, 0), t = new Date(iso).getTime();
+	if (t >= midnight) return 'Today';
+	if (t >= midnight - 86400000) return 'Yesterday';
+	if (t >= midnight - 7 * 86400000) return 'Previous 7 days';
+	return 'Older';
+}
+
 export function duration(start: string | null | undefined, end?: string | null, now = Date.now()): string {
 	if (!start) return '';
 	const s = Math.max(0, ((end ? new Date(end).getTime() : now) - new Date(start).getTime()) / 1000);

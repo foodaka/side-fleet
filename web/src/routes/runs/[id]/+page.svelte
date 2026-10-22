@@ -6,7 +6,6 @@
 	import * as Select from '#lib/components/ui/select';
 	import { Button } from '#lib/components/ui/button';
 	import { Conversation, ConversationContent, ConversationScrollButton } from '#lib/components/ai-elements/conversation';
-	import ArrowLeft from '@lucide/svelte/icons/arrow-left';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
 	import Square from '@lucide/svelte/icons/square';
@@ -111,10 +110,9 @@
 
 <svelte:head><title>{root ? root.task.slice(0, 60) : 'Run'} · Sidefleet</title></svelte:head>
 
-<div class="flex h-dvh flex-col md:h-dvh max-md:h-[calc(100dvh-3.25rem)]">
+<div class="flex h-dvh flex-col max-md:h-[calc(100dvh-3.25rem)]">
 	<header class="border-b bg-background/80 backdrop-blur">
 		<div class="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 pt-5 pb-4">
-			<a href="#/runs" class="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"><ArrowLeft class="size-3.5" />Runs</a>
 			{#if thread?.error}
 				<h1 class="text-xl font-medium">This run doesn't exist</h1>
 				<p class="text-[13px] text-muted-foreground">{thread.error}</p>

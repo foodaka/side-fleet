@@ -1,0 +1,20 @@
+<script lang="ts">
+	// Adapted from movingicons.dev (MIT, @jis3r), the Svelte port of lucide-animated.
+	// Animates while an ancestor with the `mi-hover` class is hovered, or when `animate` is set.
+	let { size = 16, animate = false, class: className = "" }: { size?: number; animate?: boolean; class?: string } = $props();
+</script>
+
+<span class="mi {className}" aria-hidden="true">
+	<svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="gear" class:animate>
+		<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+		<circle cx="12" cy="12" r="3" />
+	</svg>
+</span>
+
+<style>
+	.mi { display: inline-flex; flex-shrink: 0; }
+	svg { overflow: visible; }
+	@media (prefers-reduced-motion: reduce) { svg, svg * { animation: none !important; transition: none !important; } }
+	.gear { transform-origin: center; transition: transform 1s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+	.gear.animate, :global(.mi-hover:hover) .gear { transform: rotate(180deg); }
+</style>

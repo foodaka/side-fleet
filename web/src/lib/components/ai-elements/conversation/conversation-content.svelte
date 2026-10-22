@@ -28,9 +28,10 @@
 		() => element,
 		() => {
 			if (element) {
-				context.setElement(element);
+				// Follow the element that actually scrolls: a [data-scroller] wrapper when there is one.
+				context.setElement(element.closest<HTMLElement>("[data-scroller]") ?? element);
 				// Initial scroll to bottom
-				context.scrollToBottom("smooth");
+				context.scrollToBottom("auto");
 			}
 		}
 	);

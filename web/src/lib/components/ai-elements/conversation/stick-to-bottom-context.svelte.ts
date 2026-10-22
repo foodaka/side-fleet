@@ -11,6 +11,7 @@ class StickToBottomContext {
 	#intersectionObserver: IntersectionObserver | null = null;
 	#sentinel: HTMLElement | null = null;
 	#userHasScrolled = $state(false);
+	#lastScrollTop = 0;
 
 	isAtBottom = $derived(this.#isAtBottom);
 
@@ -66,7 +67,12 @@ class StickToBottomContext {
 		// Update the isAtBottom state based on scroll position
 		this.#isAtBottom = isAtBottom;
 
-		if (!isAtBottom) {
+		// Only scrolling up leaves the bottom. Our own jump to the bottom can land after more
+		// content arrived, which reads as "not at bottom" without the user doing anything.
+		const scrolledUp = scrollTop < this.#lastScrollTop;
+		this.#lastScrollTop = scrollTop;
+
+		if (!isAtBottom && scrolledUp) {
 			this.#userHasScrolled = true;
 		} else if (isAtBottom && this.#userHasScrolled) {
 			// User scrolled back to bottom, reset flag
@@ -107,14 +113,17 @@ class StickToBottomContext {
 
 		// Setup resize observer for smooth scrolling on resize
 		this.#resizeObserver = new ResizeObserver(() => {
-			// Check position after resize
+			// Follow unless the user scrolled up. Content can grow by more than the threshold in
+			// one step, so being near the bottom after the resize is no test.
 			this.#checkScrollPosition();
-			if (this.#isAtBottom && !this.#userHasScrolled) {
+			if (!this.#userHasScrolled) {
 				this.scrollToBottom("auto");
 			}
 		});
 
 		this.#resizeObserver.observe(this.#element);
+		// And the content inside it, which grows without DOM changes (fonts, highlighting, images).
+		for (const child of this.#element.children) this.#resizeObserver.observe(child);
 
 		// Setup mutation observer for smooth scrolling on content changes
 		this.#mutationObserver = new MutationObserver(() => {
@@ -122,14 +131,15 @@ class StickToBottomContext {
 			requestAnimationFrame(() => {
 				// Check if we should auto-scroll BEFORE updating the position
 				// Only auto-scroll if user was at bottom and hasn't manually scrolled
-				const shouldAutoScroll = this.#isAtBottom && !this.#userHasScrolled;
+				const shouldAutoScroll = !this.#userHasScrolled;
 
 				// Now update the scroll position after content changes
 				this.#checkScrollPosition();
 
 				// Auto-scroll if conditions were met
+				// Instantly: a smooth scroll lags behind streamed text, and through a whole thread on load.
 				if (shouldAutoScroll) {
-					this.scrollToBottom("smooth");
+					this.scrollToBottom("auto");
 				}
 			});
 		});

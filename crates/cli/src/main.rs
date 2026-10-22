@@ -272,7 +272,8 @@ async fn main() -> Result<()> {
             println!("  Installed:   {}", r.installed_to.display());
             for s in &r.restarted { println!("  Restarted:   {s}"); }
             for s in &r.needs_manual_restart { println!("  Restart yourself: {s}"); }
-            if r.restarted.is_empty() && r.needs_manual_restart.is_empty() { println!("  Nothing was running as a service; start `sidefleet serve` or `sidefleet run` when ready."); }
+            if no_restart { println!("  Not restarting services (--no-restart); running ones keep the old binary until restarted."); }
+            else if r.restarted.is_empty() && r.needs_manual_restart.is_empty() { println!("  Nothing was running as a service; start `sidefleet serve` or `sidefleet run` when ready."); }
             Ok(())
         }
         Cmd::Connect { control, token, repos, name, permission_mode, no_service, parallel } => connect(control, token, repos, name, permission_mode, no_service, parallel).await,

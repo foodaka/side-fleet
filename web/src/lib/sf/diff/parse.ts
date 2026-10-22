@@ -18,6 +18,8 @@ export interface DiffSet {
 	file_count: number;
 	additions: number;
 	deletions: number;
+	/** The turn caught up with the main branch; those commits are not counted above. */
+	caught_up?: { commits: number; upstream: string } | null;
 }
 
 /** A `[start, end)` character range of a line that changed within it. */

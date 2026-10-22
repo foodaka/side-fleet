@@ -371,7 +371,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         tracing::warn!(error = %e, "posting workspace event failed");
     }
     // The tree before the agent starts, and the one the thread started from, to diff against afterwards.
-    let before = match diff::snapshot(&cwd).await {
+    let before = match diff::point(&cwd).await {
         Ok(t) => Some(t),
         Err(e) => {
             tracing::debug!(error = %e, "no snapshot before the run");
@@ -490,7 +490,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     if let Some(before) = &before {
         match diff::snapshot(&diff_cwd).await {
             Ok(after) => {
-                if let Some(payload) = diff::diff_event(&diff_cwd, base.as_deref(), before, &after).await {
+                if let Some(payload) = diff::diff_event(&diff_cwd, base.as_ref(), before, &after).await {
                     if let Err(e) = client.post_events(run_id, vec![NewEvent { kind: "diff".into(), payload }]).await {
                         tracing::warn!(error = %e, "posting diff failed");
                     }

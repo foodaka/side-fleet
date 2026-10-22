@@ -46,4 +46,9 @@
 			</li>
 		{/if}
 	</ul>
+	{#if set.caught_up}
+		<p class="border-t px-3.5 py-2 text-xs text-muted-foreground">
+			Also caught up with <span class="font-mono">{set.caught_up.upstream}</span> ({set.caught_up.commits.toLocaleString()} commit{set.caught_up.commits === 1 ? '' : 's'}), not counted above.
+		</p>
+	{/if}
 </div>

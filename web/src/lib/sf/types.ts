@@ -38,6 +38,8 @@ export interface Run {
 	/** For a fork: the message (run) of the thread it continues from. */
 	forked_from: string | null;
 	fork_commit: string | null;
+	/** On a thread's first run: when the thread was archived. */
+	archived_at?: string | null;
 }
 
 export interface RunSummary extends Run {

@@ -1352,7 +1352,21 @@ async fn forks_start_a_thread_with_any_agent_where_the_files_are() {
     // The files are on `w`, which has no Codex.
     let r = fork(id, json!({"task": "review it", "agent": "codex", "model": "gpt-fake"})).await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
-    assert!(r.text().await.unwrap().contains("on w, which doesn't have codex"));
+    assert!(r.text().await.unwrap().contains("w doesn't have codex"));
+
+    // Or on another machine, chosen: there it starts from that machine's HEAD, without the files.
+    let r = fork(id, json!({"task": "review it", "agent": "codex", "worker_id": "w2"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let elsewhere = api.get_run(r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((elsewhere.pinned_worker_id.as_deref(), elsewhere.fork_commit.as_deref()), (Some("w2"), None));
+    assert!(elsewhere.context.unwrap().contains("Parser done."));
+    api.stop(elsewhere.id).await;
+    assert_eq!(fork(id, json!({"task": "x", "agent": "codex", "worker_id": "nope"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    // Choosing the machine with the files is the same as not choosing.
+    let r = fork(id, json!({"task": "x", "agent": "claude", "model": "claude-opus-5-5", "worker_id": "w"})).await.unwrap();
+    let same = api.get_run(r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap()).await;
+    assert_eq!((same.pinned_worker_id.as_deref(), same.fork_commit.as_deref()), (Some("w"), Some(after)));
+    api.stop(same.id).await;
 
     // With an agent that machine has: a new thread, pinned there, starting from the snapshot.
     let r = fork(id, json!({"task": "add tests", "agent": "claude", "model": "claude-opus-5-5", "permission_mode": "plan"})).await.unwrap();
@@ -1388,5 +1402,52 @@ async fn forks_start_a_thread_with_any_agent_where_the_files_are() {
     let f2: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
     let f2run = api.get_run(f2).await;
     assert_eq!((f2run.pinned_worker_id, f2run.fork_commit), (None, None));
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn threads_can_be_archived_and_come_back_with_a_new_message() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let (_, body) = api.create_run("add a login page", "r").await;
+    let root: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, root);
+    api.post_events("w1", root, json!([{"kind": "agent_init", "payload": {"session_id": "sess-1"}}])).await;
+    api.finish("w1", root, "succeeded", json!({})).await;
+    let f1 = send_message(&api, root, "now a logout button").await;
+    api.stop(f1).await;
+
+    let list = |archived: bool| {
+        let api = &api;
+        async move {
+            let v: Vec<RunSummary> = api.dev(reqwest::Method::GET, &format!("/v1/runs?archived={archived}")).send().await.unwrap().json().await.unwrap();
+            v.into_iter().map(|s| s.run.id).collect::<Vec<_>>()
+        }
+    };
+    let archive = |id: Uuid, archived: bool| {
+        api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/archive")).json(&json!({"archived": archived})).send()
+    };
+    // Any run of the thread names it; the root comes back.
+    let r = archive(f1, true).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let got = r.json::<Run>().await.unwrap();
+    assert_eq!(got.id, root);
+    assert!(got.archived_at.is_some());
+    assert_eq!(list(false).await, Vec::<Uuid>::new());
+    assert_eq!(list(true).await, vec![root]);
+
+    let r = archive(root, false).await.unwrap();
+    assert!(r.json::<Run>().await.unwrap().archived_at.is_none());
+    assert_eq!(list(false).await, vec![root]);
+
+    // A new message in an archived thread brings it back.
+    archive(root, true).await.unwrap();
+    let f2 = send_message(&api, root, "and a test").await;
+    assert_eq!(list(false).await, vec![root]);
+    assert!(list(true).await.is_empty());
+    api.stop(f2).await;
+
+    assert_eq!(archive(Uuid::new_v4(), true).await.unwrap().status(), StatusCode::NOT_FOUND);
     env.teardown().await;
 }

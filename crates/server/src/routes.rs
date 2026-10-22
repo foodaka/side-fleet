@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sidefleet_core::{
-    Agent, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
+    Agent, ArchiveRequest, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, ImageUpload, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
@@ -53,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/runs/{id}/restore", post(restore_run))
         .route("/v1/runs/{id}/fork", post(fork_run))
+        .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/images/{id}", get(get_image))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}/update", post(request_update))
@@ -196,6 +197,9 @@ fn parse_agent(agent: Option<&str>) -> Result<Agent, ApiError> {
 struct ListQuery {
     #[serde(default = "default_limit")]
     limit: i64,
+    /// List archived threads instead of the others.
+    #[serde(default)]
+    archived: bool,
 }
 fn default_limit() -> i64 {
     50
@@ -205,7 +209,7 @@ async fn list_runs(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<RunSummary>>, ApiError> {
-    Ok(Json(db::list_runs(&state.pool, q.limit.clamp(1, 500)).await?))
+    Ok(Json(db::list_runs(&state.pool, q.limit.clamp(1, 500), q.archived).await?))
 }
 
 /// Attached images must be raster images the agents can read, and not too many or too large.
@@ -317,7 +321,12 @@ async fn fork_run(
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     // Task and transcript go to the agent together, as one argument for some agents.
     let context_budget = crate::fork::MAX_CONTEXT_BYTES.min(120_000usize.saturating_sub(task.len()));
-    let new = db::NewFork { task, agent, model, permission_mode: mode, context_budget };
+    let worker = match req.worker_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
+        Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
+    };
+    let new = db::NewFork { task, agent, model, permission_mode: mode, worker_id: worker, context_budget };
     match db::create_fork(&state.pool, id, new).await? {
         ForkOutcome::Created(run, ev) => {
             state.events.publish(ev);
@@ -328,7 +337,7 @@ async fn fork_run(
         ForkOutcome::NotFinished(_) => Err(ApiError(StatusCode::CONFLICT, "this message is still running; fork it once it finishes".into())),
         ForkOutcome::AgentMissing(w) => Err(ApiError(
             StatusCode::BAD_REQUEST,
-            format!("the files of this thread are on {w}, which doesn't have {}; pick an agent installed there", agent.as_str()),
+            format!("{w} doesn't have {}; pick an agent installed there, or another machine", agent.as_str()),
         )),
     }
 }
@@ -405,6 +414,17 @@ async fn request_update(State(state): State<AppState>, Path(id): Path<String>) -
     } else {
         Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()))
     }
+}
+
+/// Hide a thread from the list (or bring it back). Any run of the thread may be named.
+async fn archive_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ArchiveRequest>,
+) -> Result<Json<Run>, ApiError> {
+    let root = db::set_archived(&state.pool, id, req.archived).await?.ok_or_else(not_found)?;
+    tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
+    Ok(Json(root))
 }
 
 #[derive(Deserialize)]

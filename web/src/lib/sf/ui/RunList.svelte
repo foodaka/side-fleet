@@ -1,14 +1,27 @@
 <script lang="ts">
 	import { tick } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { fleet } from '../state.svelte';
 	import { seen } from '../seen.svelte';
 	import { ago, dayGroup, duration, repoLabel } from '../format';
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
+	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
+	import Ellipsis from '@lucide/svelte/icons/ellipsis';
+	import GitFork from '@lucide/svelte/icons/git-fork';
+	import Archive from '@lucide/svelte/icons/archive';
+	import ArchiveRestore from '@lucide/svelte/icons/archive-restore';
+	import ChevronRight from '@lucide/svelte/icons/chevron-right';
 
 	let { query = '', activeId = null }: { query?: string; activeId?: string | null } = $props();
 
 	let scroller = $state<HTMLElement | null>(null);
+	let showArchived = $state(false);
+
+	function toggleArchived() {
+		showArchived = !showArchived;
+		if (showArchived) void fleet.loadArchived();
+	}
 
 	const live = (r: RunSummary) => r.thread_status === 'running' || r.thread_status === 'queued';
 
@@ -20,8 +33,9 @@
 	});
 
 	const q = $derived(query.trim().toLowerCase());
+	// Archived tasks are searched too once their list has been opened.
 	const matches = $derived(
-		q ? fleet.runs.filter((r) => [r.task, repoLabel(r.repo), r.worker_id ?? ''].some((s) => s.toLowerCase().includes(q))) : []
+		q ? [...fleet.runs, ...(fleet.archived ?? [])].filter((r) => [r.task, repoLabel(r.repo), r.worker_id ?? ''].some((s) => s.toLowerCase().includes(q))) : []
 	);
 
 	const active = $derived(
@@ -52,12 +66,13 @@
 	{@const on = r.id === activeId}
 	{@const unread = !on && seen.unread(r)}
 	{@const other = r.repo !== homeRepo}
+	<div class="group/row relative">
 	<a
 		href="#/runs/{r.id}"
 		data-run={r.id}
 		aria-current={on ? 'page' : undefined}
 		title={r.task}
-		class="group flex items-start gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] leading-[18px] transition-colors {on
+		class="group flex items-start gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] leading-[18px] transition-colors pointer-coarse:pr-9 {on
 			? 'bg-sidebar-accent text-foreground'
 			: 'text-foreground/80 hover:bg-sidebar-accent/60 hover:text-foreground'}"
 	>
@@ -79,11 +94,30 @@
 			{/if}
 		</span>
 		{#if unread}
-			<span class="mt-[6px] size-1.5 shrink-0 rounded-full bg-foreground" aria-label="New"></span>
+			<span class="mt-[6px] size-1.5 shrink-0 rounded-full bg-foreground group-hover/row:invisible" aria-label="New"></span>
 		{:else if !detail}
-			<span class="tnum shrink-0 text-[11px] text-faint group-hover:text-muted-foreground">{ago(r.last_activity_at, fleet.now)}</span>
+			<span class="tnum shrink-0 text-[11px] text-faint group-hover:text-muted-foreground group-hover/row:invisible">{ago(r.last_activity_at, fleet.now)}</span>
 		{/if}
 	</a>
+	<DropdownMenu.Root>
+		<DropdownMenu.Trigger
+			class="absolute top-[5px] right-1.5 grid size-[22px] place-items-center rounded text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 data-[state=open]:bg-sidebar-accent data-[state=open]:opacity-100 pointer-coarse:opacity-100"
+			aria-label="Actions for {r.task.slice(0, 60)}"
+		>
+			<Ellipsis class="size-3.5" />
+		</DropdownMenu.Trigger>
+		<DropdownMenu.Content align="start" side="right" class="w-52">
+			<DropdownMenu.Item onclick={() => { fleet.forkThread = r.id; void goto('#/runs/' + r.id); }}>
+				<GitFork class="size-3.5" /><span class="flex flex-col"><span>Fork…</span><span class="text-xs text-muted-foreground">New thread from its latest message, any agent, model or machine</span></span>
+			</DropdownMenu.Item>
+			{#if r.archived_at}
+				<DropdownMenu.Item onclick={() => fleet.setArchived(r, false)}><ArchiveRestore class="size-3.5" />Unarchive</DropdownMenu.Item>
+			{:else}
+				<DropdownMenu.Item onclick={() => fleet.setArchived(r, true)}><Archive class="size-3.5" />Archive</DropdownMenu.Item>
+			{/if}
+		</DropdownMenu.Content>
+	</DropdownMenu.Root>
+	</div>
 {/snippet}
 
 {#snippet heading(label: string, count?: number)}
@@ -126,6 +160,26 @@
 		{/each}
 		{#if fleet.runs.length >= 100}
 			<p class="px-2.5 pt-4 text-[11px] text-faint">Showing the latest {fleet.runs.length} tasks.</p>
+		{/if}
+	{/if}
+	{#if fleet.loaded && !q}
+		<button
+			type="button"
+			aria-expanded={showArchived}
+			onclick={toggleArchived}
+			class="mt-3 flex w-full items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium text-faint hover:text-muted-foreground"
+		>
+			<ChevronRight class="size-3 transition-transform {showArchived ? 'rotate-90' : ''}" />Archived
+			{#if fleet.archived?.length}<span class="tnum font-normal">{fleet.archived.length}</span>{/if}
+		</button>
+		{#if showArchived}
+			{#if !fleet.archived}
+				<p class="px-2.5 py-1 text-xs text-muted-foreground">Loading…</p>
+			{:else if !fleet.archived.length}
+				<p class="px-2.5 py-1 text-xs text-muted-foreground">Nothing archived. Archive a task from its ⋯ menu to tidy this list.</p>
+			{:else}
+				{#each fleet.archived as r (r.id)}{@render row(r, false)}{/each}
+			{/if}
 		{/if}
 	{/if}
 </div>

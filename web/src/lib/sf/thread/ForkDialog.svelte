@@ -18,7 +18,9 @@
 	let model = $state('');
 	let perm = $state('acceptEdits');
 	let task = $state('');
+	let machine = $state('');
 	let busy = $state(false);
+	const DEFAULT = '__default__';
 
 	// Start from the thread's own agent and model each time it opens.
 	$effect(() => {
@@ -27,18 +29,26 @@
 		model = run.model;
 		perm = PERMISSIONS.some((p) => p.id === run.permission_mode) ? run.permission_mode! : 'acceptEdits';
 		task = '';
+		machine = '';
 	});
 
-	/** Where the fork can run: the machine holding the files, or any online machine with the repo. */
-	const machines = $derived(
-		hasFiles
-			? fleet.workers.filter((w) => w.id === run.worker_id)
-			: fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === run.repo || r.name === run.repo))
+	/** The machine holding the files after this message, if they were kept. */
+	const filesOn = $derived(hasFiles ? run.worker_id : null);
+	/** Machines to choose from: the one with the files (even offline), then online ones with the repo. */
+	const choices = $derived(
+		fleet.workers.filter(
+			(w) => w.id === filesOn || (w.online && (w.capabilities.repos ?? []).some((r) => repoKey(r) === run.repo || r.name === run.repo))
+		).sort((a, b) => Number(b.id === filesOn) - Number(a.id === filesOn))
 	);
-	const where = $derived(hasFiles ? (run.worker_id ?? 'that machine') : `a machine with ${repoLabel(run.repo)}`);
+	const chosen = $derived(choices.find((w) => w.id === machine));
+	/** Where the fork can run: the chosen machine, else the one with the files, else any with the repo. */
+	const machines = $derived(chosen ? [chosen] : filesOn ? choices.filter((w) => w.id === filesOn) : choices);
+	/** It starts from the message's files only on the machine that has them. */
+	const withFiles = $derived(!!filesOn && (!chosen || chosen.id === filesOn));
+	const where = $derived(chosen?.display_name ?? (filesOn ? filesOn : `a machine with ${repoLabel(run.repo)}`));
 	const models = $derived(machineModels(machines, agent));
 	const can = $derived(!!task.trim() && modelValid(agent, model) && machines.some((w) => hasAgent(w, agent)) && !busy);
-	const offline = $derived(hasFiles && !machines.some((w) => w.online));
+	const offline = $derived(machines.length === 1 && !machines[0].online);
 
 	async function submit(e: Event) {
 		e.preventDefault();
@@ -47,7 +57,7 @@
 		try {
 			const r = await api<{ id: string }>(`/v1/runs/${run.id}/fork`, {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, permission_mode: perm })
+				body: JSON.stringify({ task: task.trim(), agent, model, permission_mode: perm, worker_id: chosen?.id })
 			});
 			open = false;
 			void fleet.refresh();
@@ -64,7 +74,7 @@
 		<Dialog.Header>
 			<Dialog.Title>Fork into a new thread</Dialog.Title>
 			<Dialog.Description>
-				A new thread that knows the conversation up to this message{hasFiles ? ', and starts with the files as they were after it, on its own branch' : ''}. This thread stays as it is.
+				A new thread that knows the conversation up to this message{withFiles ? ', and starts with the files as they were after it, on its own branch' : ''}. This thread stays as it is.
 			</Dialog.Description>
 		</Dialog.Header>
 		<form class="flex flex-col gap-3" onsubmit={submit}>
@@ -77,6 +87,25 @@
 					unavailable={(a) => (machines.some((w) => hasAgent(w, a)) ? '' : `Not on ${where}`)}
 					onagent={(a) => (model = a === run.agent ? run.model : defaultModel(a))}
 				/>
+				<Select.Root type="single" value={chosen?.id ?? DEFAULT} onValueChange={(v) => (machine = v === DEFAULT ? '' : v)}>
+					<Select.Trigger size="sm" class="h-8 max-w-[14rem] rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Machine">
+						<span class="truncate">{chosen?.display_name ?? (filesOn ? `${filesOn} (has the files)` : 'Any machine')}</span>
+					</Select.Trigger>
+					<Select.Content>
+						{#if !filesOn}
+							<Select.Item value={DEFAULT} label="Any machine"><span class="flex flex-col"><span>Any machine</span><span class="text-xs text-muted-foreground">The first one with {repoLabel(run.repo)} and a free slot</span></span></Select.Item>
+							{#if choices.length}<Select.Separator />{/if}
+						{/if}
+						{#each choices as w (w.id)}
+							<Select.Item value={w.id === filesOn ? DEFAULT : w.id} label={w.display_name}>
+								<span class="flex flex-col">
+									<span>{w.display_name}{#if !w.online}<span class="ml-1.5 text-xs text-muted-foreground">offline</span>{/if}</span>
+									<span class="text-xs text-muted-foreground">{w.id === filesOn ? 'Starts with the files as they were after this message' : filesOn ? `Starts from ${repoLabel(run.repo)} as it is there, without this thread's files` : `${w.capabilities.slots ? `${w.capabilities.slots.active} of ${w.capabilities.slots.parallel} slots busy` : 'Has the repo'}`}</span>
+								</span>
+							</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 				<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
 					<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === perm)?.name}</Select.Trigger>
 					<Select.Content>

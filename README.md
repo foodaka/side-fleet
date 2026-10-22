@@ -2,6 +2,10 @@
 
 **Run coding agents on your own machines, from anywhere.**
 
+> [!NOTE]
+> Sidefleet is under active development: expect rough edges, and things may change between
+> versions.
+
 Type a task on a web page, pick an agent, a model and a repo, and a machine you own picks it up:
 your desk Mac, a Mac mini, a VPS. It runs Claude Code, Codex or opencode in its own git worktree
 and streams the agent's narration back live; reply to keep the conversation going. No API keys for
@@ -57,8 +61,9 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Secrets stay put**: anything that looks like a credential is redacted on the worker and again
   on the control plane; tokens are stored as SHA-256 digests and never logged.
 
-![The task box and recent runs](docs/screenshots/home.png)
-![A finished thread, ready for a follow-up](docs/screenshots/run-thread.png)
+![The task box, with running and recent tasks in the sidebar](docs/screenshots/home.png)
+![A finished task with its changes, ready for a follow-up](docs/screenshots/run-thread.png)
+![Reviewing a task's diff](docs/screenshots/review.png)
 ![The Machines page](docs/screenshots/machines.png)
 
 ## Install

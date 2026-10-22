@@ -50,6 +50,17 @@
 	--ok: #13a05a;    --ok-soft: #e6f6ee;  --ok-ink: #0b6b3a;
 	--err: #e5484d;   --err-soft: #fdecec; --err-ink: #a32323;
 	--off: #b4b2a9;
+
+	/* Diffs: green for what was added, red for what was removed. Line tints mix into the card. */
+	--diff-add: #2da44e; --diff-add-ink: #1a7f37;
+	--diff-del: #e5484d; --diff-del-ink: #c4262e;
+	--diff-add-line: color-mix(in oklab, var(--diff-add) 9%, var(--card));
+	--diff-add-num: color-mix(in oklab, var(--diff-add) 17%, var(--card));
+	--diff-add-word: color-mix(in oklab, var(--diff-add) 30%, var(--card));
+	--diff-del-line: color-mix(in oklab, var(--diff-del) 8%, var(--card));
+	--diff-del-num: color-mix(in oklab, var(--diff-del) 15%, var(--card));
+	--diff-del-word: color-mix(in oklab, var(--diff-del) 27%, var(--card));
+	--diff-hunk: color-mix(in oklab, var(--foreground) 3.5%, var(--card));
 }
 
 .dark {
@@ -88,6 +99,16 @@
 	--ok: #3ccf86;    --ok-soft: #17291f;  --ok-ink: #7fe0ae;
 	--err: #f2555a;   --err-soft: #331b1c; --err-ink: #f8a0a3;
 	--off: #5b5a55;
+
+	--diff-add: #3fb950; --diff-add-ink: #6fdd8b;
+	--diff-del: #f85149; --diff-del-ink: #ff9b95;
+	--diff-add-line: color-mix(in oklab, var(--diff-add) 11%, var(--card));
+	--diff-add-num: color-mix(in oklab, var(--diff-add) 20%, var(--card));
+	--diff-add-word: color-mix(in oklab, var(--diff-add) 34%, var(--card));
+	--diff-del-line: color-mix(in oklab, var(--diff-del) 11%, var(--card));
+	--diff-del-num: color-mix(in oklab, var(--diff-del) 20%, var(--card));
+	--diff-del-word: color-mix(in oklab, var(--diff-del) 34%, var(--card));
+	--diff-hunk: color-mix(in oklab, var(--foreground) 4%, var(--card));
 }
 
 @theme inline {
@@ -99,6 +120,8 @@
 	--color-ok: var(--ok); --color-ok-soft: var(--ok-soft); --color-ok-ink: var(--ok-ink);
 	--color-err: var(--err); --color-err-soft: var(--err-soft); --color-err-ink: var(--err-ink);
 	--color-off: var(--off);
+	--color-diff-add: var(--diff-add); --color-diff-add-ink: var(--diff-add-ink);
+	--color-diff-del: var(--diff-del); --color-diff-del-ink: var(--diff-del-ink);
 	--font-sans: 'Inter Variable', sans-serif;
 	--color-sidebar-ring: var(--sidebar-ring);
 	--color-sidebar-border: var(--sidebar-border);
@@ -183,3 +206,23 @@
 .sf-slot-busy { background-image: repeating-linear-gradient(-45deg, var(--run) 0 6px, color-mix(in oklab, var(--run) 55%, transparent) 6px 12px); background-size: 17px 100%; animation: sf-stripes 0.9s linear infinite; }
 @keyframes sf-stripes { to { background-position: 17px 0; } }
 @media (prefers-reduced-motion: reduce) { .sf-slot-busy { animation: none; } }
+
+/* Diff tables. Syntax colours come from Shiki as variables for both themes. */
+.sf-diff { font-family: var(--font-mono); font-size: 12px; line-height: 20px; border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 100%; }
+.sf-diff td { padding: 0; vertical-align: top; }
+.sf-diff .num { padding: 0 10px 0 8px; text-align: right; color: var(--faint); user-select: none; font-variant-numeric: tabular-nums; }
+.sf-diff .sign { user-select: none; text-align: center; color: var(--faint); }
+.sf-diff .code { padding-right: 16px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--foreground); tab-size: 4; }
+.sf-diff .code [style] { color: var(--shiki-light); }
+.dark .sf-diff .code [style] { color: var(--shiki-dark); }
+.sf-diff .add { background: var(--diff-add-line); }
+.sf-diff .add.num { background: var(--diff-add-num); color: color-mix(in oklab, var(--diff-add-ink) 75%, var(--faint)); }
+.sf-diff .add.sign { color: var(--diff-add-ink); }
+.sf-diff .add mark { background: var(--diff-add-word); color: inherit; border-radius: 2px; }
+.sf-diff .del { background: var(--diff-del-line); }
+.sf-diff .del.num { background: var(--diff-del-num); color: color-mix(in oklab, var(--diff-del-ink) 75%, var(--faint)); }
+.sf-diff .del.sign { color: var(--diff-del-ink); }
+.sf-diff .del mark { background: var(--diff-del-word); color: inherit; border-radius: 2px; }
+.sf-diff .empty { background: repeating-linear-gradient(-45deg, transparent 0 5px, color-mix(in oklab, var(--foreground) 3%, transparent) 5px 6px); }
+.sf-diff .hunk td { background: var(--diff-hunk); color: var(--muted-foreground); line-height: 28px; }
+.sf-diff .split-l { border-right: 1px solid var(--border); }

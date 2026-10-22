@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::agent::{self, AgentSpec};
 use crate::client::{Backoff, ClientError, ControlClient};
+use crate::diff;
 use crate::detect::{self, DetectOptions};
 
 #[derive(Debug, Clone)]
@@ -344,6 +345,19 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     if let Err(e) = client.post_events(run_id, pre_events).await {
         tracing::warn!(error = %e, "posting workspace event failed");
     }
+    // The tree before the agent starts, and the one the thread started from, to diff against afterwards.
+    let before = match diff::snapshot(&cwd).await {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::debug!(error = %e, "no snapshot before the run");
+            None
+        }
+    };
+    let base = match &before {
+        Some(b) => diff::thread_base(&cwd, run.parent_id.unwrap_or(run.id), b).await,
+        None => None,
+    };
+    let diff_cwd = cwd.clone();
 
     let bin = match run.agent {
         Agent::Claude => &cfg.claude_bin,
@@ -426,6 +440,20 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     };
     // Executor dropped its sender; forwarder drains the channel and exits.
     let _ = forwarder.await;
+
+    // What this turn changed, sent before the outcome so it lands while the run is still live.
+    if let Some(before) = &before {
+        match diff::snapshot(&diff_cwd).await {
+            Ok(after) => {
+                if let Some(payload) = diff::diff_event(&diff_cwd, base.as_deref(), before, &after).await {
+                    if let Err(e) = client.post_events(run_id, vec![NewEvent { kind: "diff".into(), payload }]).await {
+                        tracing::warn!(error = %e, "posting diff failed");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "no snapshot after the run"),
+        }
+    }
 
     let mut backoff = Backoff::new(Duration::from_secs(30));
     for attempt in 1..=10 {

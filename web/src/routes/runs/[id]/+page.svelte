@@ -17,6 +17,9 @@
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import CopyButton from '#lib/sf/ui/CopyButton.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
+	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
+	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
+	import FileDiffIcon from '@lucide/svelte/icons/file-diff';
 
 	let thread = $state<Thread | null>(null);
 	const id = $derived(page.params.id);
@@ -37,6 +40,31 @@
 	const latest = $derived(thread?.latest);
 	const live = $derived(!!thread?.live);
 	const machineOnline = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.online);
+
+	// The review panel: everything the thread changed, or one message's changes.
+	let diffOpen = $state(false);
+	let diffScope = $state('all');
+	let diffFocus = $state<string | null>(null);
+	const diffScopes = $derived.by((): DiffScope[] => {
+		if (!thread?.changes) return [];
+		const changed = thread.turns.filter((t) => t.diff);
+		const all: DiffScope = { id: 'all', label: 'All changes', set: thread.changes };
+		if (changed.length < 2) return [all];
+		return [
+			all,
+			...changed.map((t) => ({
+				id: t.run.id,
+				label: t.run.parent_id ? `Message ${thread!.turns.indexOf(t) + 1}` : 'First message',
+				hint: t.run.task,
+				set: t.diff!.turn
+			}))
+		];
+	});
+	function openDiff(runId: string | null, path: string | null) {
+		diffScope = runId && diffScopes.some((s) => s.id === runId) ? runId : 'all';
+		diffFocus = path;
+		diffOpen = true;
+	}
 
 	let reply = $state('');
 	let perm = $state('');
@@ -106,6 +134,18 @@
 						</span>
 					{/if}
 					{#if thread.runs.length > 1}<span class="tnum">{thread.runs.length} messages</span>{/if}
+					{#if thread.changes}
+						<button
+							type="button"
+							class="inline-flex items-center gap-2 rounded-md border bg-card py-0.5 pr-2 pl-1.5 transition-colors hover:bg-muted"
+							onclick={() => openDiff(null, null)}
+							title="Review changes"
+						>
+							<FileDiffIcon class="size-3.5" />
+							<span class="tnum text-foreground/80">{thread.changes.file_count} file{thread.changes.file_count === 1 ? '' : 's'}</span>
+							<DiffStat add={thread.changes.additions} del={thread.changes.deletions} blocks={false} class="text-[11px]" />
+						</button>
+					{/if}
 				</div>
 			{:else}
 				<div class="h-6 w-2/3 animate-pulse rounded bg-muted"></div>
@@ -119,7 +159,7 @@
 			<ConversationContent class="mx-auto w-full max-w-3xl gap-10 px-4 py-6">
 				{#if thread}
 					{#each thread.turns as turn, i (turn.run.id)}
-						<TurnView {turn} first={i === 0} live={live && i === thread.turns.length - 1} />
+						<TurnView {turn} first={i === 0} live={live && i === thread.turns.length - 1} onopendiff={openDiff} />
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}
 						<p class="rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground">
@@ -131,6 +171,10 @@
 		</div>
 		<ConversationScrollButton />
 	</Conversation>
+
+	{#if diffScopes.length}
+		<DiffViewer bind:open={diffOpen} scopes={diffScopes} bind:scope={diffScope} focus={diffFocus} />
+	{/if}
 
 	{#if root}
 		<div class="border-t bg-background">

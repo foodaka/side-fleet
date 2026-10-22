@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fake Claude Code CLI for tests. Prints stream-json lines slowly.
 # Understands: --version, -p <task> (task containing "slow" sleeps a long time
-# before the result; "fail" exits non-zero; "error-result" reports is_error).
+# before the result; "fail" exits non-zero; "error-result" reports is_error;
+# "edit" changes README.md and adds notes.txt; "rename" moves notes.txt).
 if [ "$1" = "--version" ]; then printf '%s\n' "9.9.9 (Claude Code fake)"; exit 0; fi
 task=""
 model="unknown"
@@ -27,6 +28,10 @@ sleep 0.2
 printf '%s\n' "fake stderr line with token=abcdefghijklmnop" >&2
 case "$task" in
   *slow*) sleep 60;;
+esac
+case "$task" in
+  *edit*) printf 'demo\nedited by the agent\n' > README.md; printf 'one\ntwo\n' > notes.txt;;
+  *rename*) git mv -f notes.txt docs-notes.txt 2>/dev/null || mv notes.txt docs-notes.txt;;
 esac
 case "$task" in
   *fail*) printf '%s\n' "fatal: simulated crash" >&2; kill $child 2>/dev/null; exit 3;;

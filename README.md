@@ -37,6 +37,12 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   If the machine stops responding (a laptop going to sleep), the task moves to another machine with
   the repo and continues from the last pushed commit, with a digest of the thread so far. Off by
   default, because it pushes; only the task's own `sidefleet/...` branch is ever pushed.
+- **Restore**: every message's files are snapshotted before and after it, so "Restore to before"
+  puts the worktree back to how it was before any message. The conversation carries on, and a
+  restore can itself be undone.
+- **Fork**: start a new thread from any message, with any agent and model (say, a Claude Code
+  thread continued in Codex). The new thread starts on its own branch with the files as they were
+  after that message, and its agent gets the conversation up to there as a transcript.
 - **Live, and a conversation**: events stream over SSE within milliseconds, survive reloads and
   dropped connections, and replies resume the same agent session like a chat. Reply while it works
   and the message waits its turn, or press Send now to interrupt. Screenshots and other images the
@@ -184,7 +190,15 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
   through it.
 - One shared developer key, no users or roles, no built-in TLS. Keep the control plane on a private
   network (LAN or Tailscale), or put TLS in front of it.
-- A thread keeps the agent it started with; switching agents means a new task.
+- A thread keeps the agent it started with; to switch, fork it. A fork's agent gets a transcript
+  of the messages, replies and tool calls (the newest 32 KB), not the original session, so it
+  doesn't see tool output or the agent's thinking.
+- A fork that starts from a message's files runs on the machine that has them, so the agent you
+  pick must be installed there.
+- Restoring puts back the files, not the conversation: the agent still remembers what it did.
+  Only tasks in their own worktree can be restored. Snapshots are kept as git refs under
+  `refs/sidefleet/snapshots/` (remove with
+  `git for-each-ref --format='delete %(refname)' refs/sidefleet/ | git update-ref --stdin`).
 - Codex's sandbox only writes inside the worktree, and a worktree's git data lives in the main
   checkout, so `git commit` by Codex can fail under "Read & edit files". Commit from the branch
   afterwards, or use Full access.

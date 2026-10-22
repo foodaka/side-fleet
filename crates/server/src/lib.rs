@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod db;
 pub mod events;
+pub mod fork;
 pub mod routes;
 pub mod test_support;
 

@@ -8,12 +8,12 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, hasAgent, machineModels, modelName, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
-	import AgentIcon from '#lib/sf/ui/AgentIcon.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
+	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
 	const PICK = '__pick__';
@@ -61,7 +61,7 @@
 	const pinned = $derived(machines.find((w) => w.id === machine));
 	const target = $derived(pinned ?? machines[0]);
 	const models = $derived(machineModels(pinned ? [pinned] : machines, agent));
-	const modelOk = $derived(agent === 'claude' ? MODELS.some((m) => m.id === model) : /^[A-Za-z0-9._:/@+-]*$/.test(model) && !model.startsWith('-'));
+	const modelOk = $derived(modelValid(agent, model));
 	const canRun = $derived(!!task.trim() && !!repo && machines.length > 0 && modelOk && !busy);
 	/** Why the chosen machine may fail the task, if it can tell. */
 	const warning = $derived.by(() => {
@@ -86,15 +86,13 @@
 		if (other && other.id !== agent) { agent = other.id; model = initialModel(other.id); }
 	});
 
-	function pickAgent(v: string) {
-		agent = v as AgentId;
-		save('sidefleet_agent', v);
-		model = initialModel(agent);
+	function pickAgent(a: AgentId) {
+		save('sidefleet_agent', a);
+		model = initialModel(a);
 	}
 
-	function pickModel(v: string) {
-		model = v.trim();
-		save(modelKey(agent), model);
+	function pickModel(m: string) {
+		save(modelKey(agent), m);
 	}
 
 	function pickMachine(v: string) {
@@ -194,51 +192,14 @@
 				<AttachedImages {attachments} class="px-4 pt-1 pb-3" />
 				<div class="flex items-end gap-2 px-3 pb-3">
 					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-					<Select.Root type="single" value={agent} onValueChange={pickAgent}>
-						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Agent"><AgentIcon {agent} />{agentName(agent)}</Select.Trigger>
-						<Select.Content>
-							{#each AGENTS as a (a.id)}
-								{@const n = withRepo.filter((w) => hasAgent(w, a.id)).length}
-								<Select.Item value={a.id} label={a.name} disabled={!!repo && n === 0}>
-									<AgentIcon agent={a.id} class="mt-0.5 self-start" /><span class="flex flex-col"><span>{a.name}</span><span class="text-xs text-muted-foreground">{repo && n === 0 ? `Not on a machine with ${repoLabel(repo)}` : a.hint}</span></span>
-								</Select.Item>
-							{/each}
-						</Select.Content>
-					</Select.Root>
-
-					{#if agent === 'claude'}
-						<Select.Root type="single" value={model} onValueChange={pickModel}>
-							<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Model">{modelName(model)}</Select.Trigger>
-							<Select.Content>
-								{#each MODELS as m (m.id)}<Select.Item value={m.id} label={m.name}><span class="flex flex-col"><span>{m.name}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
-							</Select.Content>
-						</Select.Root>
-					{:else if agent === 'codex' && (models.length || !model)}
-						<Select.Root type="single" value={model} onValueChange={pickModel}>
-							<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted font-mono text-[12.5px] shadow-none hover:bg-accent" aria-label="Model">{model || 'Default model'}</Select.Trigger>
-							<Select.Content>
-								<Select.Item value="" label="Default model"><span class="flex flex-col"><span>Default model</span><span class="text-xs text-muted-foreground">Whatever Codex uses on that machine</span></span></Select.Item>
-								{#if models.length}<Select.Separator />{/if}
-								{#each models as m (m)}<Select.Item value={m} label={m}><span class="font-mono text-[12.5px]">{m}</span></Select.Item>{/each}
-								{#if model && !models.includes(model)}<Select.Item value={model} label={model}><span class="font-mono text-[12.5px]">{model}</span></Select.Item>{/if}
-							</Select.Content>
-						</Select.Root>
-					{:else}
-						<!-- opencode can offer hundreds of models (OpenRouter alone): type to search them. -->
-						<label class="sr-only" for="model">Model</label>
-						<input
-							id="model"
-							list="agent-models"
-							value={model}
-							oninput={(e) => (model = e.currentTarget.value.trim())}
-							onchange={(e) => pickModel(e.currentTarget.value)}
-							placeholder="Default model"
-							spellcheck="false"
-							autocomplete="off"
-							class="h-8 w-[15rem] max-w-full rounded-full bg-muted px-3 font-mono text-[12.5px] outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {modelOk ? '' : 'text-err-ink'}"
-						/>
-						<datalist id="agent-models">{#each models as m (m)}<option value={m}></option>{/each}</datalist>
-					{/if}
+					<AgentModelPicker
+						bind:agent
+						bind:model
+						{models}
+						unavailable={(a) => (repo && !withRepo.some((w) => hasAgent(w, a)) ? `Not on a machine with ${repoLabel(repo)}` : '')}
+						onagent={pickAgent}
+						onmodel={pickModel}
+					/>
 
 					<Select.Root type="single" value={repo} onValueChange={pickRepo}>
 						<Select.Trigger size="sm" class="h-8 max-w-[15rem] rounded-full border-transparent bg-muted font-mono text-[12.5px] shadow-none hover:bg-accent" aria-label="Repo">

@@ -17,6 +17,7 @@ use crate::agent::{self, AgentSpec};
 use crate::checkpoint::{self, ChangeTracker};
 use crate::client::{Backoff, ClientError, ControlClient};
 use crate::diff;
+use crate::snapshot;
 use crate::detect::{self, DetectOptions};
 
 #[derive(Debug, Clone)]
@@ -271,13 +272,15 @@ fn log_caps(caps: &Capabilities) {
 /// `sidefleet/<first 8 of root id>`. Follow-ups reuse the root's worktree so the
 /// agent's session (Claude Code keys sessions by cwd) resumes in the same place.
 /// A run moved here from a machine that dropped starts from `resume_from`, the
-/// task branch that machine pushed to `origin`.
+/// task branch that machine pushed to `origin`. A fork starts from `start`, a
+/// snapshot: the branch begins at the commit that was HEAD when it was taken,
+/// and the files are then set to the snapshot.
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
 }
 
-pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>) -> Result<Worktree> {
+pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>, start: Option<&str>) -> Result<Worktree> {
     let slug: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let path = worktrees_dir.join(slug).join(root_id.to_string());
     let branch = format!("sidefleet/{}", &root_id.simple().to_string()[..8]);
@@ -295,6 +298,11 @@ pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, workt
     let branch_exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
     if branch_exists {
         git(repo, &["worktree", "add", &p, &branch]).await?;
+    } else if let Some(snap) = start {
+        git(repo, &["cat-file", "-e", &format!("{snap}^{{commit}}")]).await.context("the snapshot to fork from is not in this repo")?;
+        let base = git(repo, &["rev-parse", "--verify", "--quiet", &format!("{snap}^1")]).await.unwrap_or_else(|_| "HEAD".into());
+        git(repo, &["worktree", "add", "-b", &branch, &p, &base]).await?;
+        snapshot::restore(&path, snap).await.context("setting up the forked files")?;
     } else {
         git(repo, &["worktree", "add", "-b", &branch, &p, "HEAD"]).await?;
     }
@@ -373,20 +381,23 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let mut pre_events: Vec<NewEvent> = Vec::new();
     // The worktree and branch to checkpoint, for a run that may move if this machine drops.
     let mut checkpoints: Option<(PathBuf, String)> = None;
+    let root_id = run.parent_id.unwrap_or(run.id);
+    let fork_from = run.fork_commit.as_deref().filter(|c| snapshot::is_commit_id(c));
+    let mut in_worktree = false;
     let cwd = if run.isolation == "worktree" {
-        let root_id = run.parent_id.unwrap_or(run.id);
         let mut resume_from = run.resume_from_branch.as_deref();
-        let mut prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, resume_from).await;
+        let mut prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, resume_from, fork_from).await;
         if let (Err(e), Some(from)) = (&prepared, resume_from) {
             pre_events.push(NewEvent {
                 kind: "error".into(),
                 payload: json!({"message": format!("could not continue from {from} on origin ({e:#}); starting from this machine's HEAD")}),
             });
             resume_from = None;
-            prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, None).await;
+            prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, None, fork_from).await;
         }
         match prepared {
             Ok(wt) => {
+                in_worktree = true;
                 pre_events.push(NewEvent {
                     kind: "workspace".into(),
                     payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy(), "resumed_from": resume_from}),
@@ -395,6 +406,14 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                     checkpoints = Some((wt.path.clone(), wt.branch.clone()));
                 }
                 wt.path
+            }
+            Err(e) if fork_from.is_some() => {
+                // Running a fork in the checkout would lose the files it continues from.
+                let msg = format!("could not set up the forked worktree: {e:#}");
+                pre_events.push(NewEvent { kind: "error".into(), payload: json!({"message": msg}) });
+                let _ = client.post_events(run_id, pre_events).await;
+                report_finish(client, run_id, RunStatus::Failed, json!({"error": msg}), None).await;
+                return;
             }
             Err(e) => {
                 pre_events.push(NewEvent {
@@ -411,6 +430,20 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     if let Err(e) = client.post_events(run_id, pre_events).await {
         tracing::warn!(error = %e, "posting workspace event failed");
     }
+
+    if run.kind == "restore" {
+        let (status, result) = match run_restore(client, &run, root_id, &cwd, in_worktree).await {
+            Ok(sha) => (RunStatus::Succeeded, json!({"restored_to": sha})),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+                (RunStatus::Failed, json!({"error": msg}))
+            }
+        };
+        report_finish(client, run_id, status, result, None).await;
+        return;
+    }
+
     // The tree before the agent starts, and the one the thread started from, to diff against afterwards.
     let before = match diff::point(&cwd).await {
         Ok(t) => Some(t),
@@ -420,7 +453,12 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         }
     };
     let base = match &before {
-        Some(b) => diff::thread_base(&cwd, run.parent_id.unwrap_or(run.id), b).await,
+        Some(b) => diff::thread_base(&cwd, root_id, b).await,
+        None => None,
+    };
+    // Kept as a commit too, to restore to or fork from later.
+    let before_commit = match &before {
+        Some(p) => snapshot::keep(&cwd, &p.tree, &snapshot::ref_name(root_id, run_id, "before")).await.map_err(|e| tracing::warn!(error = %format!("{e:#}"), "keeping the snapshot failed")).ok(),
         None => None,
     };
     let diff_cwd = cwd.clone();
@@ -435,7 +473,11 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let spec = AgentSpec {
         agent: run.agent,
         bin: bin.clone(),
-        task: run.task.clone(),
+        // A fork's agent gets the earlier conversation ahead of the new message.
+        task: match &run.context {
+            Some(c) if !c.is_empty() => format!("{c}\n\n{}", run.task),
+            _ => run.task.clone(),
+        },
         model: run.model.clone(),
         cwd,
         permission_mode: run.permission_mode.clone().unwrap_or_else(|| cfg.permission_mode.clone()),
@@ -537,8 +579,18 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     if let Some(before) = &before {
         match diff::snapshot(&diff_cwd).await {
             Ok(after) => {
+                let mut events = Vec::new();
+                if let Some(before_commit) = &before_commit {
+                    match snapshot::keep(&diff_cwd, &after, &snapshot::ref_name(root_id, run_id, "after")).await {
+                        Ok(c) => events.push(NewEvent { kind: "snapshot".into(), payload: json!({"before": before_commit, "after": c}) }),
+                        Err(e) => tracing::warn!(error = %format!("{e:#}"), "keeping the snapshot failed"),
+                    }
+                }
                 if let Some(payload) = diff::diff_event(&diff_cwd, base.as_ref(), before, &after).await {
-                    if let Err(e) = client.post_events(run_id, vec![NewEvent { kind: "diff".into(), payload }]).await {
+                    events.push(NewEvent { kind: "diff".into(), payload });
+                }
+                if !events.is_empty() {
+                    if let Err(e) = client.post_events(run_id, events).await {
                         tracing::warn!(error = %e, "posting diff failed");
                     }
                 }
@@ -547,9 +599,35 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         }
     }
 
+    report_finish(client, run_id, outcome.status, outcome.result, outcome.usage_limit).await;
+}
+
+/// A restore run: put the thread's worktree back to `run.restore_to`. The
+/// restore is snapshotted and diffed like any turn, so it can itself be undone.
+async fn run_restore(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Path, in_worktree: bool) -> Result<String> {
+    if !in_worktree {
+        anyhow::bail!("refusing to restore files outside the task's own worktree");
+    }
+    let target = run.restore_to.clone().filter(|c| snapshot::is_commit_id(c)).context("restore run without a snapshot to restore")?;
+    let before = diff::point(cwd).await?;
+    let base = diff::thread_base(cwd, root_id, &before).await;
+    let before_commit = snapshot::keep(cwd, &before.tree, &snapshot::ref_name(root_id, run.id, "before")).await?;
+    snapshot::restore(cwd, &target).await.context("restoring the snapshot")?;
+    let after = diff::snapshot(cwd).await?;
+    let after_commit = snapshot::keep(cwd, &after, &snapshot::ref_name(root_id, run.id, "after")).await?;
+    let mut events = vec![NewEvent { kind: "snapshot".into(), payload: json!({"before": before_commit, "after": after_commit}) }];
+    if let Some(payload) = diff::diff_event(cwd, base.as_ref(), &before, &after).await {
+        events.push(NewEvent { kind: "diff".into(), payload });
+    }
+    events.push(NewEvent { kind: "restored".into(), payload: json!({"to": target}) });
+    client.post_events(run.id, events).await?;
+    Ok(target)
+}
+
+async fn report_finish(client: &ControlClient, run_id: Uuid, status: RunStatus, result: serde_json::Value, usage_limit: Option<sidefleet_core::UsageLimit>) {
     let mut backoff = Backoff::new(Duration::from_secs(30));
     for attempt in 1..=10 {
-        match client.finish(run_id, outcome.status, Some(outcome.result.clone()), outcome.usage_limit.clone()).await {
+        match client.finish(run_id, status, Some(result.clone()), usage_limit.clone()).await {
             Ok(r) => {
                 tracing::info!(run_id = %run_id, status = r.status.as_str(), "run finished");
                 return;

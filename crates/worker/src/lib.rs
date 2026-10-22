@@ -7,5 +7,6 @@ pub mod checkpoint;
 pub mod client;
 pub mod detect;
 pub mod diff;
+pub mod snapshot;
 pub mod updater;
 pub mod worker;

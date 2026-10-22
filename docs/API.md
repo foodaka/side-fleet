@@ -35,6 +35,22 @@
    - The machine that lost the run cannot claim the new one for 10 minutes; after that it may (so a
      single laptop that slept picks its task back up). A moved run does not move again; a stop
      that was pending wins over moving.
+5. Before the agent starts and after it exits, the worker snapshots the working tree (tracked and
+   untracked files, not ignored ones; a throwaway index, so the branch, index and stash are
+   untouched). The changes go out as a `diff` event; the two snapshots are also kept as commits
+   (parent: HEAD at the time) under `refs/sidefleet/snapshots/<root>/<run>/{before,after}` and
+   reported as a `snapshot` event `{before, after}`.
+6. Restore (`POST /v1/runs/:id/restore`) queues a run of kind `restore` in the thread, pinned to
+   the machine, carrying the thread's session. The worker resets the worktree to the snapshot taken
+   before `:id` started (HEAD back where it was, files it didn't have removed, its uncommitted
+   changes back as unstaged edits; ignored files untouched) and reports `snapshot`, `diff` and
+   `restored` events. Only `worktree` threads can be restored.
+7. Fork (`POST /v1/runs/:id/fork`) starts a new thread (a root run with `forked_from`) with any
+   agent and model. The control plane writes a transcript of the thread up to `:id` (messages,
+   replies, one line per tool call; newest 32 KB) into `context`, which the worker puts ahead of
+   the task. When `:id` has a snapshot, the fork is pinned to that machine and its worktree starts
+   with the files after `:id` (`fork_commit`): a new branch at the commit HEAD was on, then the
+   snapshot's files. Without one it starts from the repo's HEAD on any machine with the agent.
 
 ## Which machine runs a task
 
@@ -71,6 +87,8 @@ Bearer `SIDEFLEET_DEV_KEY`:
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
 | `POST` | `/v1/runs/:id/messages` `{task, model?, permission_mode?, images?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine. While an earlier message is queued or running, it waits behind it and resumes the latest session once claimed (stop the running one to send it now); `409` when the thread has no session to continue or 10 messages are already waiting |
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind; replays then live; ends with `end` |
+| `POST` | `/v1/runs/:id/restore` | `202`: put the thread's worktree back to before this run; `409` while a message in the thread is queued or running, for in-place threads, or when the run has no snapshot |
+| `POST` | `/v1/runs/:id/fork` `{task, agent?, model, permission_mode?}` | `202 {id, status}`: a new thread from this message; `409` while it runs, `400` when the machine holding its files doesn't have the agent |
 | `GET` | `/v1/images/:id` | an image from a tool result or attached to a message (PNG, JPEG, GIF or WebP); `tool_result` events and runs refer to them as `images: [{id, media_type, bytes}]` |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
@@ -84,7 +102,8 @@ Bearer one of `SIDEFLEET_WORKER_TOKENS` (comma-separated, one per machine if you
 individually; compared as SHA-256 digests in constant time and never logged):
 `POST /v1/worker/register`, `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (sends the
 agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
-only get `claude` runs, and workers that send no slots are not load balanced),
+only get `claude` runs, workers that send no slots are not load balanced, and workers that send
+no `kinds` (`agent`, `restore`, `fork`) only get plain agent runs),
 `POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`, `GET /v1/worker/images/:id`
 (a run's attached images, which the worker saves to a temporary folder for the agent),
 `POST /v1/worker/runs/:id/finish` (`{status, result, usage_limit?: {resets_at?}}`; answers with

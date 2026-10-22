@@ -231,7 +231,7 @@ async fn worker_claims_runs_and_streams_narration_live() {
         ordered,
         vec![
             "status", "status", "workspace", "started", "agent_init", "assistant_text", "tool_use", "tool_result",
-            "assistant_text", "result", "status"
+            "assistant_text", "result", "snapshot", "status"
         ],
         "{kinds:?}"
     );
@@ -423,8 +423,8 @@ async fn each_turn_reports_its_changes_and_the_thread_total() {
     h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
     let events = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).filter(|k| *k != "stderr").collect();
-    // The diff lands before the run's final status.
-    assert_eq!(&kinds[kinds.len() - 3..], ["result", "diff", "status"], "{kinds:?}");
+    // The snapshots and the diff land before the run's final status.
+    assert_eq!(&kinds[kinds.len() - 4..], ["result", "snapshot", "diff", "status"], "{kinds:?}");
     let d = &events.iter().find(|e| e.kind == "diff").unwrap().payload;
     let files: Vec<(&str, &str)> = d["turn"]["files"].as_array().unwrap().iter().map(|f| (f["path"].as_str().unwrap(), f["status"].as_str().unwrap())).collect();
     assert_eq!(files, vec![("README.md", "modified"), ("notes.txt", "added")]);
@@ -590,4 +590,89 @@ async fn a_failover_run_pushes_checkpoints_and_continues_on_another_machine_when
 
     b.abort();
     env.teardown().await;
+}
+
+#[tokio::test]
+async fn each_run_is_snapshotted_and_a_thread_can_be_restored_to_before_a_message() {
+    let h = Harness::start(3).await;
+    let id = h.create("edit the readme", "demo").await;
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let events = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
+    let wt = std::path::PathBuf::from(events.iter().find(|e| e.kind == "workspace").unwrap().payload["path"].as_str().unwrap().to_string());
+    let snap = events.iter().find(|e| e.kind == "snapshot").expect("snapshot event").payload.clone();
+    assert!(wt.join("notes.txt").exists());
+    // The snapshots live under hidden refs in the repo, not on any branch.
+    let repo = h._repos.path().join("demo");
+    let refs = std::process::Command::new("git").arg("-C").arg(&repo).args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/sidefleet/"]).output().unwrap();
+    let refs = String::from_utf8_lossy(&refs.stdout);
+    assert!(refs.contains(&format!("refs/sidefleet/snapshots/{id}/{id}/before {}", snap["before"].as_str().unwrap())), "{refs}");
+    assert!(refs.contains(&format!("refs/sidefleet/snapshots/{id}/{id}/after {}", snap["after"].as_str().unwrap())), "{refs}");
+
+    // Restore to before that message: its files are back as they were, and the restore shows what it undid.
+    let r = h.http.post(format!("{}/v1/runs/{id}/restore", h.env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    let rid: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let restore = h.wait_status(rid, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    assert_eq!(restore.kind, "restore");
+    assert_eq!(restore.parent_id, Some(id));
+    assert!(!wt.join("notes.txt").exists(), "the agent's new file is gone");
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "demo\n");
+    let revents = sidefleet_server::db::events_since(&h.env.pool, rid, 0).await.unwrap();
+    let kinds: Vec<&str> = revents.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(kinds, vec!["status", "status", "workspace", "snapshot", "diff", "restored", "status"], "{kinds:?}");
+    let undone: Vec<(&str, &str)> = revents[4].payload["turn"]["files"].as_array().unwrap().iter().map(|f| (f["path"].as_str().unwrap(), f["status"].as_str().unwrap())).collect();
+    assert_eq!(undone, vec![("README.md", "modified"), ("notes.txt", "deleted")]);
+
+    // The conversation continues on the same session after a restore.
+    let r = h.http.post(format!("{}/v1/runs/{id}/messages", h.env.base_url)).bearer_auth(DEV_KEY).json(&json!({"task": "go on"})).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    let fid: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let f = h.wait_status(fid, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    assert_eq!(f.resume_session_id.as_deref(), Some("fake-session"));
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn a_thread_forks_into_a_new_thread_with_another_agent_and_the_files_so_far() {
+    let h = Harness::start(2).await;
+    let id = h.create("edit the readme", "demo").await;
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let src_ws = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap().into_iter().find(|e| e.kind == "workspace").unwrap().payload;
+
+    // Fork into Codex with a chosen model.
+    let r = h
+        .http
+        .post(format!("{}/v1/runs/{id}/fork", h.env.base_url))
+        .bearer_auth(DEV_KEY)
+        .json(&json!({"task": "now review it", "agent": "codex", "model": "gpt-fake"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let fid: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let fork = h.wait_status(fid, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    assert_eq!(fork.parent_id, None, "a fork is a thread of its own");
+    assert_eq!(fork.forked_from, Some(id));
+    assert_eq!(fork.agent, sidefleet_core::Agent::Codex);
+    assert_eq!(fork.model, "gpt-fake");
+    assert_eq!(fork.pinned_worker_id.as_deref(), Some("test-worker"), "runs where the files are");
+
+    // Codex got the earlier conversation ahead of the new message.
+    let said = fork.result.as_ref().unwrap()["result"].as_str().unwrap().to_string();
+    assert!(said.starts_with("task=This task continues a conversation"), "{said}");
+    assert!(said.contains("## User\nedit the readme") && said.contains("The working tree has one untracked file."), "{said}");
+    assert!(said.ends_with("New message:\n\nnow review it"), "{said}");
+
+    // Its own worktree and branch, starting with the source's files; nothing for its own diff to show.
+    let events = sidefleet_server::db::events_since(&h.env.pool, fid, 0).await.unwrap();
+    let ws = events.iter().find(|e| e.kind == "workspace").unwrap().payload.clone();
+    assert_eq!(ws["mode"], "worktree");
+    assert_ne!(ws["path"], src_ws["path"]);
+    assert_ne!(ws["branch"], src_ws["branch"]);
+    let wt = std::path::PathBuf::from(ws["path"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(wt.join("notes.txt")).unwrap(), "one\ntwo\n");
+    assert!(std::fs::read_to_string(wt.join("README.md")).unwrap().contains("edited by the agent"));
+    assert!(events.iter().any(|e| e.kind == "snapshot"));
+    assert!(!events.iter().any(|e| e.kind == "diff"), "the fork changed nothing itself");
+    h.teardown().await;
 }

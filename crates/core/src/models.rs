@@ -95,6 +95,26 @@ pub struct Run {
     /// Images the user attached to this message (`GET /v1/images/:id`, `/v1/worker/images/:id`).
     #[serde(default)]
     pub images: Vec<ImageRef>,
+    /// `agent` (the coding agent works on the task) or `restore` (the worker puts
+    /// the thread's worktree back to the snapshot in `restore_to`).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// For a restore run: the snapshot commit to restore.
+    #[serde(default)]
+    pub restore_to: Option<String>,
+    /// For a fork (a new thread continuing from another thread's message): that message's run.
+    #[serde(default)]
+    pub forked_from: Option<Uuid>,
+    /// For a fork: the snapshot its worktree starts from (the files after that message).
+    #[serde(default)]
+    pub fork_commit: Option<String>,
+    /// For a fork: the earlier conversation, given to the agent ahead of the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+pub fn default_kind() -> String {
+    "agent".into()
 }
 
 /// A stored image, as runs and events refer to it.
@@ -385,6 +405,20 @@ pub struct FollowUpRequest {
     pub images: Vec<ImageUpload>,
 }
 
+/// Fork a thread at a message into a new thread, with any agent and model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkRequest {
+    /// The first message of the new thread.
+    pub task: String,
+    /// claude (default), codex or opencode.
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+}
+
 pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "bypassPermissions", "plan", "default", "dontAsk"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +475,10 @@ pub struct ClaimRequest {
     /// to the least busy machine. None from older workers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<Slots>,
+    /// Kinds of run this worker can execute (`agent`, `restore`, `fork`). Empty
+    /// from older workers, which only run plain `agent` runs.
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

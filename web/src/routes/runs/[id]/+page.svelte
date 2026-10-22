@@ -8,9 +8,12 @@
 	import { Conversation, ConversationContent, ConversationScrollButton } from '#lib/components/ai-elements/conversation';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
+	import GitFork from '@lucide/svelte/icons/git-fork';
 	import Square from '@lucide/svelte/icons/square';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
+	import { api } from '#lib/sf/api';
+	import type { Run } from '#lib/sf/types';
 	import { duration, PERMISSIONS, permName, repoLabel } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
@@ -39,6 +42,13 @@
 	});
 
 	const root = $derived(thread?.root);
+	// The title of the thread this one was forked from.
+	let forkSource = $state<string | null>(null);
+	$effect(() => {
+		const from = root?.forked_from;
+		forkSource = null;
+		if (from) api<Run[]>(`/v1/runs/${from}/thread`).then((t) => (forkSource = t[0]?.task ?? null)).catch(() => {});
+	});
 	const latest = $derived(thread?.current);
 	const live = $derived(!!thread?.live);
 	const machineOnline = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.online);
@@ -97,6 +107,14 @@
 	async function cancel(id: string) {
 		try { await thread?.cancel(id); } catch (err) { toast.error('Could not cancel', { description: (err as Error).message }); }
 	}
+	async function restore(runId: string) {
+		try {
+			await thread?.restore(runId);
+			void fleet.refresh();
+		} catch (err) {
+			toast.error('Could not restore', { description: (err as Error).message });
+		}
+	}
 	async function stop() {
 		stopping = true;
 		try { await thread?.stop(); } catch (err) { toast.error('Could not stop', { description: (err as Error).message }); }
@@ -151,6 +169,9 @@
 						</span>
 					{/if}
 					{#if thread.runs.length > 1}<span class="tnum">{thread.runs.length} messages</span>{/if}
+					{#if root.forked_from}
+						<a href="#/runs/{root.forked_from}" class="inline-flex items-center gap-1 hover:text-foreground"><GitFork class="size-3" />Forked from <span class="max-w-[16rem] truncate text-foreground/80">{forkSource ?? 'another thread'}</span></a>
+					{/if}
 					{#if thread.changes}
 						<button
 							type="button"
@@ -184,6 +205,7 @@
 							onsendnow={sendNow}
 							oncancel={() => cancel(turn.run.id)}
 							onopendiff={openDiff}
+							onrestore={!live && turn.run.isolation === 'worktree' ? () => restore(turn.run.id) : undefined}
 						/>
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}

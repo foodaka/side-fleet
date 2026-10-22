@@ -32,6 +32,11 @@ fn row_to_run(r: &PgRow) -> Run {
         moved_from: r.get("moved_from"),
         resume_from_branch: r.get("resume_from_branch"),
         images: serde_json::from_value(r.get("images")).unwrap_or_default(),
+        kind: r.get("kind"),
+        restore_to: r.get("restore_to"),
+        forked_from: r.get("forked_from"),
+        fork_commit: r.get("fork_commit"),
+        context: r.get("context"),
     }
 }
 
@@ -70,7 +75,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images";
+    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -220,6 +225,160 @@ pub async fn create_follow_up(
     Ok(FollowUpOutcome::Created(run, ev))
 }
 
+pub enum RestoreOutcome {
+    Created(Run, RunEvent),
+    NotFound,
+    /// The thread's latest run is still queued or running.
+    Busy(Run),
+    /// The thread works in the checkout itself; restoring would overwrite the developer's files.
+    InPlace,
+    /// The run has no snapshot (it never started, or its worker predates snapshots).
+    NoCheckpoint,
+}
+
+/// Queue a restore run that puts the thread's worktree back to how it was
+/// before `run_id` started. It runs on the machine holding the snapshot and
+/// keeps the thread's session, so the next message continues the conversation.
+pub async fn create_restore(pool: &PgPool, run_id: Uuid) -> sqlx::Result<RestoreOutcome> {
+    let Some(target) = get_run(pool, run_id).await? else {
+        return Ok(RestoreOutcome::NotFound);
+    };
+    let root_id = target.parent_id.unwrap_or(target.id);
+    let thread = thread_runs(pool, root_id).await?;
+    let Some(latest) = thread.last().cloned() else {
+        return Ok(RestoreOutcome::NotFound);
+    };
+    if !latest.status.is_terminal() {
+        return Ok(RestoreOutcome::Busy(latest));
+    }
+    if target.isolation != "worktree" {
+        return Ok(RestoreOutcome::InPlace);
+    }
+    let before = snapshot_commit(pool, run_id, "before").await?;
+    let (Some(before), Some(worker)) = (before, target.worker_id.clone()) else {
+        return Ok(RestoreOutcome::NoCheckpoint);
+    };
+    let session = thread.iter().rev().find_map(|r| r.session_id.clone());
+    let quoted: String = target.task.chars().take(80).collect();
+    let task = format!("Restore the files to before “{quoted}{}”", if target.task.chars().count() > 80 { "…" } else { "" });
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, session_id, pinned_worker_id, permission_mode, isolation, agent, kind, restore_to)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 'worktree', $9, 'restore', $10) RETURNING {RUN_COLS}"
+    ))
+    .bind(id)
+    .bind(&task)
+    .bind(&latest.model)
+    .bind(&latest.repo)
+    .bind(root_id)
+    .bind(&session)
+    .bind(&worker)
+    .bind(&latest.permission_mode)
+    .bind(latest.agent.as_str())
+    .bind(&before)
+    .fetch_one(&mut *tx)
+    .await?;
+    let run = row_to_run(&row);
+    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task, "restores": run_id})).await?;
+    tx.commit().await?;
+    Ok(RestoreOutcome::Created(run, ev))
+}
+
+/// The commit (`before` or `after`) in a run's latest `snapshot` event, if it looks like one.
+async fn snapshot_commit(pool: &PgPool, run_id: Uuid, which: &str) -> sqlx::Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'snapshot' ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .map(|r| r.get::<Value, _>("payload"))
+        .and_then(|p| p.get(which).and_then(Value::as_str).map(str::to_string))
+        .filter(|c| (40..=64).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_hexdigit())))
+}
+
+pub struct NewFork<'a> {
+    pub task: &'a str,
+    pub agent: Agent,
+    pub model: &'a str,
+    pub permission_mode: Option<&'a str>,
+    /// Bytes of transcript the task leaves room for.
+    pub context_budget: usize,
+}
+
+pub enum ForkOutcome {
+    Created(Run, RunEvent),
+    NotFound,
+    /// The message is still queued or running.
+    NotFinished(Run),
+    /// The files are on this machine, which doesn't have the chosen agent (or is gone).
+    AgentMissing(String),
+}
+
+/// Start a new thread from `run_id`: its worktree begins with the files as they
+/// were after that message (on the machine that has them), and the agent gets
+/// the conversation up to it as a transcript.
+pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx::Result<ForkOutcome> {
+    let Some(target) = get_run(pool, run_id).await? else {
+        return Ok(ForkOutcome::NotFound);
+    };
+    if !target.status.is_terminal() {
+        return Ok(ForkOutcome::NotFinished(target));
+    }
+    let thread = thread_runs(pool, target.parent_id.unwrap_or(target.id)).await?;
+    let upto = thread.iter().position(|r| r.id == run_id).map(|i| i + 1).unwrap_or(thread.len());
+    let mut history = Vec::with_capacity(upto);
+    for r in thread.into_iter().take(upto) {
+        let events = events_since(pool, r.id, 0).await?;
+        history.push((r, events));
+    }
+    let context = crate::fork::transcript(&history, new.context_budget);
+
+    let fork_commit = snapshot_commit(pool, run_id, "after").await?;
+    let pinned = match (&fork_commit, &target.worker_id) {
+        (Some(_), Some(w)) => {
+            let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1").bind(w).fetch_optional(pool).await?;
+            let caps: Option<Capabilities> = caps.and_then(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).ok());
+            // Workers from before multi-agent support report no agents and run Claude Code.
+            let has = caps.map(|c| {
+                let a = c.agents.runnable();
+                a.contains(&new.agent) || (a.is_empty() && new.agent == Agent::Claude)
+            });
+            if has != Some(true) {
+                return Ok(ForkOutcome::AgentMissing(w.clone()));
+            }
+            Some(w.clone())
+        }
+        _ => None,
+    };
+    let fork_commit = pinned.as_ref().and(fork_commit);
+
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, forked_from, fork_commit, context)
+         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10) RETURNING {RUN_COLS}"
+    ))
+    .bind(id)
+    .bind(new.task)
+    .bind(new.model)
+    .bind(&target.repo)
+    .bind(new.permission_mode.or(target.permission_mode.as_deref()))
+    .bind(&pinned)
+    .bind(new.agent.as_str())
+    .bind(run_id)
+    .bind(&fork_commit)
+    .bind(&context)
+    .fetch_one(&mut *tx)
+    .await?;
+    let run = row_to_run(&row);
+    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": new.task, "forked_from": run_id})).await?;
+    tx.commit().await?;
+    Ok(ForkOutcome::Created(run, ev))
+}
+
 /// All runs of a thread, root first, in order.
 pub async fn thread_runs(pool: &PgPool, root_id: Uuid) -> sqlx::Result<Vec<Run>> {
     let rows = sqlx::query(&format!(
@@ -257,8 +416,11 @@ pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<RunSummary
         .iter()
         .map(|r| {
             let ts: String = r.get("thread_status");
+            let mut run = row_to_run(r);
+            // The fork transcript is for the agent; the list doesn't need it.
+            run.context = None;
             RunSummary {
-                run: row_to_run(r),
+                run,
                 follow_ups: r.get("follow_ups"),
                 thread_status: RunStatus::parse(&ts).unwrap_or(RunStatus::Failed),
                 last_activity_at: r.get("last_activity_at"),
@@ -501,6 +663,7 @@ pub async fn claim_run(
     busy_repos: &[String],
     agents: &[String],
     slots: Option<&Slots>,
+    kinds: &[String],
 ) -> sqlx::Result<Claimed> {
     let free = slots.map(|s| s.parallel.saturating_sub(s.active) as i32);
     if let Some(s) = slots {
@@ -534,6 +697,8 @@ pub async fn claim_run(
                            AND p.status IN ('queued', 'running'))
                   AND (NOT ($1 = ANY(r.excluded_worker_ids)) OR r.created_at < now() - make_interval(secs => $7))
                   AND r.agent = ANY($4)
+                  AND r.kind = ANY($8)
+                  AND (r.forked_from IS NULL OR 'fork' = ANY($8))
                   AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
                   AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
                        OR (r.parent_id IS NOT NULL AND r.moved_from IS NULL)
@@ -551,6 +716,7 @@ pub async fn claim_run(
         .bind(free)
         .bind(LEAST_BUSY_GRACE_SECS as f64)
         .bind(EXCLUSION_GRACE_SECS as f64)
+        .bind(kinds)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
@@ -558,7 +724,8 @@ pub async fn claim_run(
             return Ok(Claimed { run: None, failed });
         };
         let mut run = row_to_run(&row);
-        if let (Some(root), None, None) = (run.parent_id, &run.resume_session_id, &run.moved_from) {
+        // (A restore carries the thread's session itself and starts no agent.)
+        if let (Some(root), None, None, "agent") = (run.parent_id, &run.resume_session_id, &run.moved_from, run.kind.as_str()) {
             // A message that waited behind another: continue the thread's latest session on this machine.
             let session: Option<String> = sqlx::query(
                 "SELECT session_id FROM runs WHERE (id = $1 OR parent_id = $1) AND id <> $2 AND worker_id = $3

@@ -23,6 +23,13 @@ export function modelName(id: string, agent?: string | null) {
 	return agent === 'opencode' && id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
 }
 
+/** Claude Code takes one of its models; Codex and opencode any id that can't pass as a flag (empty: the machine's default). */
+export const modelValid = (agent: AgentId, model: string) =>
+	agent === 'claude' ? MODELS.some((m) => m.id === model) : /^[A-Za-z0-9._:/@+-]*$/.test(model) && !model.startsWith('-');
+
+/** Default model for an agent: Sonnet for Claude Code, the machine's default otherwise. */
+export const defaultModel = (agent: AgentId) => (agent === 'claude' ? 'claude-sonnet-5-5' : '');
+
 /** `Claude Code · Sonnet 5.5`, `opencode · moonshotai/kimi-k2`. */
 export const agentModel = (agent: string | null | undefined, model: string) => `${agentName(agent)} · ${modelName(model, agent)}`;
 

@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sidefleet_core::{
-    Agent, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest,
+    Agent, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, ImageUpload, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
@@ -28,7 +28,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
 use crate::auth::{self, WorkerTokenHash};
-use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome};
+use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, RestoreOutcome};
 use crate::AppState;
 
 /// The web app, built from `web/` with `pnpm build` and committed so a source
@@ -51,6 +51,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/messages", post(follow_up).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
+        .route("/v1/runs/{id}/restore", post(restore_run))
+        .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/images/{id}", get(get_image))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}/update", post(request_update))
@@ -154,13 +156,7 @@ async fn create_run(
     if task.len() > MAX_TASK_BYTES {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("task is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
     }
-    let agent = match req.agent.as_deref().map(str::trim) {
-        None | Some("") => Agent::Claude,
-        Some(a) => Agent::parse(a).ok_or_else(|| {
-            let all: Vec<&str> = sidefleet_core::AGENTS.iter().map(Agent::as_str).collect();
-            ApiError(StatusCode::BAD_REQUEST, format!("agent must be one of {}", all.join(", ")))
-        })?,
-    };
+    let agent = parse_agent(req.agent.as_deref())?;
     let model = req.model.trim();
     agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let repo = req.repo.trim();
@@ -184,6 +180,16 @@ async fn create_run(
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+}
+
+fn parse_agent(agent: Option<&str>) -> Result<Agent, ApiError> {
+    match agent.map(str::trim) {
+        None | Some("") => Ok(Agent::Claude),
+        Some(a) => Agent::parse(a).ok_or_else(|| {
+            let all: Vec<&str> = sidefleet_core::AGENTS.iter().map(Agent::as_str).collect();
+            ApiError(StatusCode::BAD_REQUEST, format!("agent must be one of {}", all.join(", ")))
+        }),
+    }
 }
 
 #[derive(Deserialize)]
@@ -271,6 +277,59 @@ async fn follow_up(
         FollowUpOutcome::NotFound => Err(not_found()),
         FollowUpOutcome::QueueFull => Err(ApiError(StatusCode::CONFLICT, format!("{} messages are already waiting; wait for them or stop some", db::MAX_QUEUED_MESSAGES))),
         FollowUpOutcome::NoSession(_) => Err(ApiError(StatusCode::CONFLICT, "this thread has no agent session to resume; start a new task instead".into())),
+    }
+}
+
+/// Put the thread's files back to how they were before this run started.
+async fn restore_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    match db::create_restore(&state.pool, id).await? {
+        RestoreOutcome::Created(run, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, restores = %id, "restore queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        RestoreOutcome::NotFound => Err(not_found()),
+        RestoreOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into())),
+        RestoreOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself; only tasks in their own worktree can be restored".into())),
+        RestoreOutcome::NoCheckpoint => Err(ApiError(StatusCode::CONFLICT, "this message has no snapshot to restore".into())),
+    }
+}
+
+/// Fork the thread at this message into a new thread, with any agent and model.
+async fn fork_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ForkRequest>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    let task = req.task.trim();
+    if task.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "message must not be empty".into()));
+    }
+    if task.len() > MAX_TASK_BYTES {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("message is too long ({} characters; the limit is {})", task.chars().count(), MAX_TASK_BYTES)));
+    }
+    let agent = parse_agent(req.agent.as_deref())?;
+    let model = req.model.trim();
+    agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    // Task and transcript go to the agent together, as one argument for some agents.
+    let context_budget = crate::fork::MAX_CONTEXT_BYTES.min(120_000usize.saturating_sub(task.len()));
+    let new = db::NewFork { task, agent, model, permission_mode: mode, context_budget };
+    match db::create_fork(&state.pool, id, new).await? {
+        ForkOutcome::Created(run, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, forked_from = %id, agent = %run.agent, model = %run.model, "fork queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        ForkOutcome::NotFound => Err(not_found()),
+        ForkOutcome::NotFinished(_) => Err(ApiError(StatusCode::CONFLICT, "this message is still running; fork it once it finishes".into())),
+        ForkOutcome::AgentMissing(w) => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("the files of this thread are on {w}, which doesn't have {}; pick an agent installed there", agent.as_str()),
+        )),
     }
 }
 
@@ -564,7 +623,9 @@ async fn claim_run(
     }
     // Workers from before multi-agent support only run Claude Code.
     let agents = if req.agents.is_empty() { vec![Agent::Claude.as_str().to_string()] } else { req.agents.clone() };
-    let claimed = db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref()).await?;
+    // Workers from before restores and forks only run plain agent runs.
+    let kinds = if req.kinds.is_empty() { vec!["agent".to_string()] } else { req.kinds.clone() };
+    let claimed = db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds).await?;
     for ev in claimed.failed {
         tracing::warn!(run_id = %ev.run_id, "queued message had no session to continue; failed");
         state.events.publish(ev);

@@ -33,6 +33,8 @@ case "$task" in
     printf '%s\n' '{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"simulated model error\"}}"}}'
     exit 1;;
 esac
-printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_2\",\"type\":\"agent_message\",\"text\":\"task=$task\"}}"
+# JSON-escape the task (a fork's task is a multi-line transcript).
+esc=$(printf '%s' "$task" | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); if (NR>1) print "\\n"; print}')
+printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_2\",\"type\":\"agent_message\",\"text\":\"task=$esc\"}}"
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10}}'
 exit 0

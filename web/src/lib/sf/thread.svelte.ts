@@ -58,6 +58,8 @@ export interface Turn {
 	reconnecting: boolean;
 	/** What this turn changed, and everything the thread has changed so far (null: same as `turn`). */
 	diff: { turn: DiffSet; total: DiffSet | null } | null;
+	/** Snapshots (commits) of the files before and after this turn, to restore to or fork from. */
+	snapshot: { before: string; after: string } | null;
 }
 
 function newTurn(run: Run): Turn {
@@ -75,7 +77,8 @@ function newTurn(run: Run): Turn {
 		result: null,
 		lastText: '',
 		reconnecting: false,
-		diff: null
+		diff: null,
+		snapshot: null
 	};
 }
 
@@ -122,6 +125,15 @@ export class Thread {
 		if (permission) body.permission_mode = permission;
 		if (images.length) body.images = images;
 		const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(body) });
+		const run = await api<Run>(`/v1/runs/${r.id}`);
+		this.runs.push(run);
+		this.turns.push(newTurn(run));
+		void this.#follow(this.runs.length - 1);
+	}
+
+	/** Put the files back to how they were before `runId` started; the session carries on. */
+	async restore(runId: string) {
+		const r = await api<{ id: string }>(`/v1/runs/${runId}/restore`, { method: 'POST' });
 		const run = await api<Run>(`/v1/runs/${r.id}`);
 		this.runs.push(run);
 		this.turns.push(newTurn(run));
@@ -213,7 +225,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
 				t.machine = run.worker_id;
-				t.activity = 'Starting ' + agentName(run.agent);
+				t.activity = run.kind === 'restore' ? 'Restoring the files' : 'Starting ' + agentName(run.agent);
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
@@ -280,6 +292,13 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				cost: p.total_cost_usd ?? null,
 				tokens: tokenCount(p.usage)
 			};
+			t.activity = null;
+			break;
+		case 'snapshot':
+			if (p.before && p.after) t.snapshot = { before: p.before, after: p.after };
+			break;
+		case 'restored':
+			t.items.push({ kind: 'note', key, tone: 'ok', text: 'Restored the files', at: ev.at });
 			t.activity = null;
 			break;
 		case 'diff':

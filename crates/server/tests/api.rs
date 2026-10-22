@@ -1212,3 +1212,181 @@ async fn a_queued_message_follows_a_failover_run_to_its_new_machine() {
     assert_eq!(c.resume_session_id.as_deref(), Some("on-desktop"));
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn restores_go_only_to_workers_that_can_run_them_and_need_a_snapshot() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let restore = |id: Uuid| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/restore")).send();
+    let before = "0123456789abcdef0123456789abcdef01234567";
+
+    let (_, body) = api.create_run("task", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(restore(id).await.unwrap().status(), StatusCode::CONFLICT, "busy while queued");
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", id, json!([{"kind": "agent_init", "payload": {"session_id": "s1"}}])).await;
+    api.finish("w", id, "succeeded", json!({})).await;
+    let r = restore(id).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert!(r.text().await.unwrap().contains("no snapshot"));
+
+    // With a snapshot: a restore run is queued, pinned to the machine, carrying the session.
+    let (_, body) = api.create_run("task 2", "r").await;
+    let id2: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", id2, json!([
+        {"kind": "agent_init", "payload": {"session_id": "s2"}},
+        {"kind": "snapshot", "payload": {"before": before, "after": before, "files": []}},
+    ])).await;
+    api.finish("w", id2, "succeeded", json!({})).await;
+    let r = restore(id2).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let rid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let run = api.get_run(rid).await;
+    assert_eq!(run.kind, "restore");
+    assert_eq!(run.restore_to.as_deref(), Some(before));
+    assert_eq!(run.parent_id, Some(id2));
+    assert_eq!(run.pinned_worker_id.as_deref(), Some("w"));
+    assert_eq!(run.session_id.as_deref(), Some("s2"));
+
+    // A worker that doesn't say it can restore never gets it; one that does, does.
+    assert!(api.claim("w", &["r"]).await.is_none(), "older worker must not run a restore as a task");
+    let r = api
+        .worker(reqwest::Method::POST, "/v1/worker/claim")
+        .json(&json!({"worker_id": "w", "repos": ["r"], "busy_repos": [], "agents": ["claude"], "kinds": ["agent", "restore"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().id, rid);
+    api.finish("w", rid, "succeeded", json!({})).await;
+
+    // A follow-up after the restore resumes the same session.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{id2}/messages")).json(&json!({"task": "next"})).send().await.unwrap();
+    let f: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.get_run(f).await.resume_session_id.as_deref(), Some("s2"));
+
+    // In-place tasks can't be restored.
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "inplace", "model": "claude-haiku-5-5", "repo": "r", "isolation": "checkout"}))
+        .send()
+        .await
+        .unwrap();
+    let ip: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let claimed = api
+        .worker(reqwest::Method::POST, "/v1/worker/claim")
+        .json(&json!({"worker_id": "w", "repos": ["r"], "busy_repos": [], "agents": ["claude"], "kinds": ["agent", "restore"]}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Run>()
+        .await
+        .unwrap();
+    // The queued follow-up is older; finish it first, then the in-place task.
+    assert_eq!(claimed.id, f);
+    api.finish("w", f, "succeeded", json!({})).await;
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", ip, json!([{"kind": "snapshot", "payload": {"before": before}}])).await;
+    api.finish("w", ip, "succeeded", json!({})).await;
+    let r = restore(ip).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert!(r.text().await.unwrap().contains("in the checkout"));
+
+    // A message whose agent never started a session can still be restored: a restore starts no agent.
+    let (_, body) = api.create_run("task 3", "r").await;
+    let id3: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", id3, json!([{"kind": "snapshot", "payload": {"before": before, "after": before}}])).await;
+    api.finish("w", id3, "failed", json!({"error": "agent crashed"})).await;
+    let r = restore(id3).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let rid3: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let r = api
+        .worker(reqwest::Method::POST, "/v1/worker/claim")
+        .json(&json!({"worker_id": "w", "repos": ["r"], "busy_repos": [], "agents": ["claude"], "kinds": ["agent", "restore"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().id, rid3, "not failed for having no session to continue");
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn forks_start_a_thread_with_any_agent_where_the_files_are() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    // `w` has only Claude Code; `w2` has Codex too.
+    for (id, agents) in [("w", json!({"claude": {"version": "1", "signed_in": true}})), ("w2", json!({"claude": {"version": "1", "signed_in": true}, "codex": {"version": "1"}}))] {
+        let r = api
+            .worker(reqwest::Method::POST, "/v1/worker/register")
+            .json(&json!({"id": id, "display_name": id, "capabilities": {"repos": [{"name": "r", "path": "/tmp/r"}], "agents": agents}, "active_runs": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+    let fork = |id: Uuid, body: Value| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/fork")).json(&body).send();
+    let claim = |worker: &'static str, kinds: Value| {
+        api.worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": worker, "repos": ["r"], "busy_repos": [], "agents": ["claude", "codex"], "kinds": kinds}))
+            .send()
+    };
+    let after = "89abcdef0123456789abcdef0123456789abcdef";
+
+    let (_, body) = api.create_run("build the parser", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let r = fork(id, json!({"task": "x", "agent": "codex"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT, "not while it is queued");
+    assert_eq!(claim("w", json!(["agent"])).await.unwrap().json::<Run>().await.unwrap().id, id);
+    api.post_events("w", id, json!([
+        {"kind": "assistant_text", "payload": {"text": "Parser done."}},
+        {"kind": "snapshot", "payload": {"before": after, "after": after, "files": []}},
+    ])).await;
+    api.finish("w", id, "succeeded", json!({})).await;
+
+    // Validation: agent, model, empty message.
+    assert_eq!(fork(id, json!({"task": "x", "agent": "gemini"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(fork(id, json!({"task": "x", "agent": "claude", "model": "gpt-fake"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(fork(id, json!({"task": " ", "agent": "codex"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    // The files are on `w`, which has no Codex.
+    let r = fork(id, json!({"task": "review it", "agent": "codex", "model": "gpt-fake"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(r.text().await.unwrap().contains("on w, which doesn't have codex"));
+
+    // With an agent that machine has: a new thread, pinned there, starting from the snapshot.
+    let r = fork(id, json!({"task": "add tests", "agent": "claude", "model": "claude-opus-5-5", "permission_mode": "plan"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let fid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let f = api.get_run(fid).await;
+    assert_eq!((f.parent_id, f.forked_from), (None, Some(id)));
+    assert_eq!(f.model, "claude-opus-5-5");
+    assert_eq!(f.permission_mode.as_deref(), Some("plan"));
+    assert_eq!(f.isolation, "worktree");
+    assert_eq!(f.pinned_worker_id.as_deref(), Some("w"));
+    assert_eq!(f.fork_commit.as_deref(), Some(after));
+    let ctx = f.context.unwrap();
+    assert!(ctx.contains("## User\nbuild the parser") && ctx.contains("Parser done."), "{ctx}");
+    assert_eq!(f.task, "add tests");
+    // It is listed as a thread, without the transcript.
+    let list: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    let mine = list.iter().find(|s| s["id"] == fid.to_string()).expect("fork listed");
+    assert!(mine.get("context").is_none());
+
+    // Workers that don't say they can fork never get it.
+    assert_eq!(claim("w", json!(["agent", "restore"])).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(claim("w", json!(["agent", "restore", "fork"])).await.unwrap().json::<Run>().await.unwrap().id, fid);
+    api.finish("w", fid, "succeeded", json!({})).await;
+
+    // A message without a snapshot forks from the repo's HEAD on any machine with the agent.
+    let (_, body) = api.create_run("question", "r").await;
+    let q: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    claim("w", json!(["agent"])).await.unwrap();
+    api.finish("w", q, "succeeded", json!({})).await;
+    let r = fork(q, json!({"task": "with codex", "agent": "codex"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let f2: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let f2run = api.get_run(f2).await;
+    assert_eq!((f2run.pinned_worker_id, f2run.fork_commit), (None, None));
+    env.teardown().await;
+}

@@ -437,6 +437,26 @@ h2 { font-size: clamp(32px, 3.6vw, 44px); line-height: 1.08; }
 .copy:hover { color: #fff; background: #2c2c2a; }
 .copy.ok { color: #6fd59f; }
 
+/* Hosted early access */
+.hosted { display: grid; grid-template-columns: 5fr 7fr; gap: 48px; padding: 72px 64px; align-items: center; }
+.hosted-copy .eyebrow { display: block; margin-bottom: 14px; }
+.hosted-copy p { margin-top: 18px; color: var(--ink-2); font-size: 17px; }
+.ea { display: flex; flex-direction: column; gap: 16px; padding: 28px; border-radius: 16px; background: var(--tint); border: 1px solid var(--line); }
+.ea-f span { display: block; font-size: 13px; font-weight: 500; margin-bottom: 7px; }
+.ea-f em { font-style: normal; font-weight: 400; color: var(--faint); margin-left: 4px; }
+.ea-f input { width: 100%; height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--card); color: var(--ink); font: inherit; font-size: 15px; transition: border-color 0.15s, box-shadow 0.15s; }
+.ea-f input::placeholder { color: var(--faint); }
+.ea-f input:focus { outline: none; border-color: var(--run); box-shadow: 0 0 0 4px var(--run-soft); }
+.ea-f input[aria-invalid='true'] { border-color: var(--err); }
+.ea-hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+.ea .btn { align-self: flex-start; cursor: pointer; border: 0; }
+.ea .btn:disabled { opacity: 0.6; cursor: default; }
+.ea-msg { font-size: 13.5px; color: var(--muted); }
+.ea-msg.err { color: var(--err-ink); }
+.ea.done .ea-f, .ea.done .btn { display: none; }
+.ea.done .ea-msg { font-size: 16px; color: var(--ok-ink); }
+.qs a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+
 /* FAQ */
 .faq { display: grid; grid-template-columns: 4fr 8fr; gap: 48px; padding: 72px 64px; }
 .qs details { border-top: 1px solid var(--line); }
@@ -501,7 +521,9 @@ h2 { font-size: clamp(32px, 3.6vw, 44px); line-height: 1.08; }
 	.shots .head-row { padding: 48px 24px 28px; }
 	.shots .tabs { flex-wrap: wrap; }
 	.shot-frame { margin: 0 12px; }
-	.install, .faq { grid-template-columns: 1fr; padding: 48px 24px; gap: 28px; }
+	.install, .faq, .hosted { grid-template-columns: 1fr; padding: 48px 24px; gap: 28px; }
+	.ea { padding: 20px; }
+	.ea .btn { align-self: stretch; justify-content: center; }
 	.closing { padding: 72px 24px; }
 	.foot { grid-template-columns: 1fr; gap: 36px; padding: 40px 24px 28px; }
 	.arc { height: 200px; }

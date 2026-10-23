@@ -1,5 +1,6 @@
 {
 	"cleanUrls": true,
+	"git": { "deploymentEnabled": { "sidefleet/*": false } },
 	"headers": [
 		{ "source": "/fonts/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] },
 		{ "source": "/(img|brand)/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }] }

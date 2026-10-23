@@ -2,6 +2,8 @@
 
 **Run coding agents on your own machines, from anywhere.**
 
+[Website](https://www.sidefleet.xyz) · [Install](#install) · [Quick start](#quick-start) · [API](docs/API.md)
+
 > [!NOTE]
 > Sidefleet is under active development: expect rough edges, and things may change between
 > versions.
@@ -9,7 +11,7 @@
 Type a task on a web page, pick an agent, a model and a repo, and a machine you own picks it up:
 your desk Mac, a Mac mini, a VPS. It runs Claude Code, Codex or opencode in its own git worktree
 and streams the agent's narration back live; reply to keep the conversation going. No API keys for
-Claude or Codex: it drives the sign-in already on that machine. opencode brings any other model
+Claude or Codex: it uses the login already on that machine. opencode brings any other model
 (Kimi, GLM, DeepSeek, Qwen through OpenRouter, or local ones). No open ports: machines only make
 outbound calls to your control plane. One Rust binary, macOS and Linux.
 
@@ -196,6 +198,8 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
 - `crates/worker`: machine detection, control-plane client, process-group executor, worker loop.
 - `crates/cli`: the `sidefleet` binary.
 - `web/`: the web UI, SvelteKit + shadcn-svelte. See [web/README.md](web/README.md).
+- `site/`: the website at [www.sidefleet.xyz](https://www.sidefleet.xyz), one static page. See
+  [site/README.md](site/README.md).
 
 ## Known limitations
 

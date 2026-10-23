@@ -93,7 +93,22 @@ retention period yet.
 
 The control plane ships as a container ([Dockerfile](Dockerfile)): a release build of
 `sidefleet`, started as `sidefleet serve --no-worker`, listening on 8080, with `/healthz`
-checking the database. [fly.toml](fly.toml) runs it on Fly.io with managed Postgres and Fly's TLS:
+checking the database.
+
+**Render** (what app.sidefleet.xyz runs on). [render.yaml](render.yaml) is a Blueprint for one
+Starter web service and a small Postgres that only the service can reach:
+
+1. In the Render dashboard, New → Blueprint, pick this repository, and enter
+   `SIDEFLEET_GITHUB_CLIENT_ID` and `SIDEFLEET_GITHUB_CLIENT_SECRET` when asked.
+2. On the `sidefleet` service, Settings → Custom Domains → add `app.sidefleet.xyz`, then create
+   the CNAME it shows at your DNS provider.
+3. Check `https://app.sidefleet.xyz/healthz` prints `ok`.
+
+Pushes to `main` that touch the binary deploy once CI passes. Render keeps the old instance
+serving until the new one is healthy, so two run side by side for a moment and live updates
+pause briefly during a deploy (see the one-instance note below).
+
+**Fly.io.** [fly.toml](fly.toml) runs it with managed Postgres and Fly's TLS:
 
 ```bash
 fly apps create sidefleet

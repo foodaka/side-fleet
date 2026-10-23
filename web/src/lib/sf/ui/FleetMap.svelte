@@ -153,8 +153,21 @@
 				ctx.lineCap = 'butt';
 			}
 			if (n.ring === 0) {
+				// The Sidefleet mark (see site/brand/mark.py): fibres from the page to two machines.
+				const s = 0.55, ox = p.x - 16 * s, oy = p.y - 16 * s;
+				const at = (x: number, y: number) => [ox + x * s, oy + y * s] as const;
+				ctx.lineWidth = 1.6 * s; ctx.lineCap = 'round';
+				for (const [ty, hues] of [[7.5, ['#3fb8c9', '#5c98ff', '#8b5cf6']], [24.5, ['#ff6fae', '#f7797d', '#e9b13c']]] as const) {
+					hues.forEach((hue, i) => {
+						const off = (i - 1) * 2.4;
+						ctx.strokeStyle = hue;
+						ctx.beginPath(); ctx.moveTo(...at(6, 16));
+						ctx.bezierCurveTo(...at(17, 16 + off), ...at(15, ty + off), ...at(26, ty)); ctx.stroke();
+					});
+				}
+				ctx.lineCap = 'butt';
 				ctx.fillStyle = colors.ink;
-				[[-4, 0], [3.2, -3.6], [3.2, 3.6]].forEach(([dx, dy]) => { ctx.beginPath(); ctx.arc(p.x + dx, p.y + dy, 2.4, 0, Math.PI * 2); ctx.fill(); });
+				[[6, 16], [26, 7.5], [26, 24.5]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(...at(x, y), 3.2 * s, 0, Math.PI * 2); ctx.fill(); });
 			}
 			const busy = running(n.id);
 			for (let i = 0; i < busy; i++) {

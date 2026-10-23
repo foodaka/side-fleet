@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+	<meta name="color-scheme" content="light dark" />
+	<meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)" />
+	<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
+	<title>Sidefleet: coding agents on your own machines, from anywhere</title>
+	<meta name="description" content="Type a task on any device. A machine you own picks it up and runs Claude Code, Codex or opencode in its own git worktree, streaming every step back live. No API keys, no open ports." />
+	<meta property="og:title" content="Sidefleet" />
+	<meta property="og:description" content="Coding agents on your own machines, from anywhere." />
+	<meta property="og:image" content="brand/og.png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+	<meta name="twitter:card" content="summary_large_image" />
+	<link rel="icon" href="brand/favicon.ico" sizes="48x48" />
+	<link rel="icon" type="image/svg+xml" href="brand/mark-small.svg" />
+	<link rel="apple-touch-icon" href="brand/apple-touch-icon.png" />
+	<link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+	<link rel="stylesheet" href="styles.css" />
+	<script defer src="fibres.js"></script>
+	<script defer src="page.js"></script>
+</head>
+<body>
+	<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+		<defs>
+			<symbol id="logo" viewBox="0 0 32 32"><g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".95"><path d="M6.00 16.00 L6.79 15.73 L7.52 15.49 L8.19 15.23 L8.80 14.96 L9.35 14.69 L9.86 14.40 L10.31 14.11 L10.73 13.81 L11.11 13.52 L11.46 13.22 L11.79 12.92 L12.10 12.62 L12.39 12.32 L12.68 12.02 L12.97 11.71 L13.25 11.41 L13.55 11.10 L13.85 10.78 L14.16 10.47 L14.49 10.15 L14.84 9.83 L15.20 9.51 L15.59 9.20 L16.01 8.89 L16.44 8.59 L16.91 8.31 L17.40 8.04 L17.91 7.79 L18.46 7.57 L19.03 7.37 L19.62 7.21 L20.24 7.08 L20.87 6.99 L21.54 6.93 L22.22 6.92 L22.92 6.94 L23.65 7.00 L24.41 7.11 L25.19 7.26 L26.00 7.50" stroke="#3fb8c9"/><path d="M6.00 16.00 L6.80 15.98 L7.56 15.94 L8.27 15.86 L8.94 15.76 L9.57 15.63 L10.16 15.48 L10.72 15.31 L11.25 15.12 L11.75 14.90 L12.22 14.67 L12.67 14.43 L13.09 14.16 L13.50 13.89 L13.89 13.61 L14.26 13.31 L14.62 13.01 L14.98 12.70 L15.32 12.39 L15.66 12.07 L16.00 11.75 L16.34 11.43 L16.68 11.11 L17.02 10.80 L17.38 10.49 L17.74 10.19 L18.11 9.89 L18.50 9.61 L18.91 9.34 L19.33 9.07 L19.78 8.83 L20.25 8.60 L20.75 8.38 L21.28 8.19 L21.84 8.02 L22.43 7.87 L23.06 7.74 L23.73 7.64 L24.44 7.56 L25.20 7.52 L26.00 7.50" stroke="#5c98ff"/><path d="M6.00 16.00 L6.81 16.24 L7.59 16.39 L8.35 16.50 L9.08 16.56 L9.78 16.58 L10.46 16.57 L11.13 16.51 L11.76 16.42 L12.38 16.29 L12.97 16.13 L13.54 15.93 L14.09 15.71 L14.60 15.46 L15.09 15.19 L15.56 14.91 L15.99 14.61 L16.41 14.30 L16.80 13.99 L17.16 13.67 L17.51 13.35 L17.84 13.03 L18.15 12.72 L18.45 12.40 L18.75 12.09 L19.03 11.79 L19.32 11.48 L19.61 11.18 L19.90 10.88 L20.21 10.58 L20.54 10.28 L20.89 9.98 L21.27 9.69 L21.69 9.39 L22.14 9.10 L22.65 8.81 L23.20 8.54 L23.81 8.27 L24.48 8.01 L25.21 7.77 L26.00 7.50" stroke="#6f7cff"/><path d="M6.00 16.00 L6.81 15.76 L7.59 15.61 L8.35 15.50 L9.08 15.44 L9.78 15.42 L10.46 15.43 L11.13 15.49 L11.76 15.58 L12.38 15.71 L12.97 15.87 L13.54 16.07 L14.09 16.29 L14.60 16.54 L15.09 16.81 L15.56 17.09 L15.99 17.39 L16.41 17.70 L16.80 18.01 L17.16 18.33 L17.51 18.65 L17.84 18.97 L18.15 19.28 L18.45 19.60 L18.75 19.91 L19.03 20.21 L19.32 20.52 L19.61 20.82 L19.90 21.12 L20.21 21.42 L20.54 21.72 L20.89 22.02 L21.27 22.31 L21.69 22.61 L22.14 22.90 L22.65 23.19 L23.20 23.46 L23.81 23.73 L24.48 23.99 L25.21 24.23 L26.00 24.50" stroke="#ff6fae"/><path d="M6.00 16.00 L6.80 16.02 L7.56 16.06 L8.27 16.14 L8.94 16.24 L9.57 16.37 L10.16 16.52 L10.72 16.69 L11.25 16.88 L11.75 17.10 L12.22 17.33 L12.67 17.57 L13.09 17.84 L13.50 18.11 L13.89 18.39 L14.26 18.69 L14.62 18.99 L14.98 19.30 L15.32 19.61 L15.66 19.93 L16.00 20.25 L16.34 20.57 L16.68 20.89 L17.02 21.20 L17.38 21.51 L17.74 21.81 L18.11 22.11 L18.50 22.39 L18.91 22.66 L19.33 22.93 L19.78 23.17 L20.25 23.40 L20.75 23.62 L21.28 23.81 L21.84 23.98 L22.43 24.13 L23.06 24.26 L23.73 24.36 L24.44 24.44 L25.20 24.48 L26.00 24.50" stroke="#f7797d"/><path d="M6.00 16.00 L6.79 16.27 L7.52 16.51 L8.19 16.77 L8.80 17.04 L9.35 17.31 L9.86 17.60 L10.31 17.89 L10.73 18.19 L11.11 18.48 L11.46 18.78 L11.79 19.08 L12.10 19.38 L12.39 19.68 L12.68 19.98 L12.97 20.29 L13.25 20.59 L13.55 20.90 L13.85 21.22 L14.16 21.53 L14.49 21.85 L14.84 22.17 L15.20 22.49 L15.59 22.80 L16.01 23.11 L16.44 23.41 L16.91 23.69 L17.40 23.96 L17.91 24.21 L18.46 24.43 L19.03 24.63 L19.62 24.79 L20.24 24.92 L20.87 25.01 L21.54 25.07 L22.22 25.08 L22.92 25.06 L23.65 25.00 L24.41 24.89 L25.19 24.74 L26.00 24.50" stroke="#f08a2e"/></g><g fill="currentColor"><circle cx="6.0" cy="16.0" r="3.2"/><circle cx="26.0" cy="7.5" r="3.2"/><circle cx="26.0" cy="24.5" r="3.2"/></g></symbol>
+			<symbol id="i-claude" viewBox="0 0 24 24"><g stroke="#d97757" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4M8.5 3.6l7 16.8M15.5 3.6l-7 16.8" /></g></symbol>
+			<symbol id="i-codex" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="7" fill="url(#codex-g)" /><path d="m7 9 3 3-3 3M12.5 15.5h4.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" /></symbol>
+			<linearGradient id="codex-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7aa7ff" /><stop offset="1" stop-color="#6a4cf0" /></linearGradient>
+			<symbol id="i-opencode" viewBox="0 0 24 24"><rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#1b1b1a" stroke="#4a4a47" /><rect x="7" y="6.5" width="10" height="11" rx="1.2" fill="none" stroke="#fff" stroke-width="2" /><rect x="9.5" y="9.5" width="5" height="5" fill="#8f8e88" /></symbol>
+			<symbol id="i-desktop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></symbol>
+			<symbol id="i-laptop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.6" /><path d="M2 19h20" /></symbol>
+			<symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3.5" width="18" height="7" rx="1.6" /><rect x="3" y="13.5" width="18" height="7" rx="1.6" /><path d="M7 7h.01M7 17h.01" /></symbol>
+			<symbol id="i-mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="2.4" /><path d="M7 12h3" /></symbol>
+			<symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></symbol>
+			<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5" /></symbol>
+			<symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6" /></symbol>
+			<symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 1.5a10.5 10.5 0 0 0-3.32 20.46c.53.1.72-.23.72-.5v-1.8c-2.92.63-3.54-1.25-3.54-1.25-.48-1.22-1.17-1.54-1.17-1.54-.95-.65.08-.64.08-.64 1.05.08 1.6 1.08 1.6 1.08.94 1.6 2.46 1.14 3.06.87.1-.68.37-1.14.66-1.4-2.33-.27-4.78-1.17-4.78-5.18 0-1.15.41-2.08 1.08-2.82-.1-.26-.47-1.33.1-2.78 0 0 .88-.28 2.88 1.07a10 10 0 0 1 5.24 0c2-1.35 2.88-1.07 2.88-1.07.57 1.45.21 2.52.1 2.78.68.74 1.08 1.67 1.08 2.82 0 4.02-2.45 4.9-4.79 5.16.38.33.71.97.71 1.96v2.9c0 .28.19.61.73.5A10.5 10.5 0 0 0 12 1.5Z" /></symbol>
+		</defs>
+	</svg>
+
+	<header class="nav">
+		<div class="nav-in">
+			<a class="brand" href="#top" aria-label="Sidefleet home"><svg><use href="#logo" /></svg>Sidefleet</a>
+			<span class="tag">Open source</span>
+			<nav class="nav-links" aria-label="Sections">
+				<a href="#how">How it works</a>
+				<a href="#fleet">Fleet</a>
+				<a href="#security">Security</a>
+				<a href="#faq">Questions</a>
+			</nav>
+			<div class="nav-end">
+				<a class="nav-gh" href="https://github.com/foodaka/side-fleet"><svg><use href="#i-github" /></svg><span>GitHub</span></a>
+				<a class="btn btn-dark btn-sm" href="#install">Install</a>
+			</div>
+		</div>
+	</header>
+
+	<main id="top">
+		<!-- ───────────────────────── Hero ───────────────────────── -->
+		<section class="hero" data-fibres="hero" aria-labelledby="hero-title">
+			<div class="hero-card" aria-hidden="true">
+				<div class="hc-feed" id="hc-feed"></div>
+				<div class="hc-compose">
+					<div class="hc-input"><span id="hc-text"></span><i class="caret"></i><span class="hc-ph" id="hc-ph">Ask anything, from anywhere</span></div>
+					<div class="hc-row">
+						<span class="pill" id="hc-agent"><svg><use href="#i-claude" /></svg><b>Claude Code</b><em>Opus 5.5</em></span>
+						<span class="pill pill-ghost" id="hc-repo">foodaka/shop</span>
+						<span class="pill pill-ghost" id="hc-route">Any machine</span>
+						<button class="hc-send" id="hero-send" tabindex="-1"><svg><use href="#i-arrow" /></svg></button>
+					</div>
+				</div>
+			</div>
+
+			<div class="hero-copy">
+				<h1 id="hero-title">Your machines.<br />Your agents.<br />One page.</h1>
+				<p class="lede">Type a task on any device. A machine you own picks it up and runs <span class="chip"><svg><use href="#i-claude" /></svg>Claude&nbsp;Code</span>, <span class="chip"><svg><use href="#i-codex" /></svg>Codex</span> or <span class="chip"><svg><use href="#i-opencode" /></svg>opencode</span> in its own worktree, streaming every step back live.</p>
+				<div class="ctas">
+					<a class="btn btn-dark" href="#install">Install Sidefleet</a>
+					<a class="btn btn-light" href="https://github.com/foodaka/side-fleet"><svg><use href="#i-github" /></svg>View on GitHub</a>
+				</div>
+				<p class="fine">MIT licensed · One Rust binary · macOS and Linux</p>
+			</div>
+
+			<ul class="hero-nodes" aria-label="Example machines">
+				<li class="node" data-node="mini"><svg class="ni"><use href="#i-mini" /></svg><span class="nn">Mac mini<small>desk · 14 repos</small></span><span class="ns"><i></i><b>idle</b></span></li>
+				<li class="node" data-node="vps"><svg class="ni"><use href="#i-server" /></svg><span class="nn">vps-fra-1<small>Hetzner · 9 repos</small></span><span class="ns"><i></i><b>idle</b></span></li>
+				<li class="node" data-node="mbp"><svg class="ni"><use href="#i-laptop" /></svg><span class="nn">MacBook Pro<small>on the train · 21 repos</small></span><span class="ns"><i></i><b>idle</b></span></li>
+			</ul>
+		</section>
+
+		<!-- ───────────────────────── Works with ───────────────────────── -->
+		<div class="rail">
+			<section class="cell strip reveal" aria-label="Works with">
+				<div class="strip-a">
+					<span class="eyebrow">Drives</span>
+					<div class="agents">
+						<span class="agent"><svg><use href="#i-claude" /></svg>Claude Code</span>
+						<span class="agent"><svg><use href="#i-codex" /></svg>Codex</span>
+						<span class="agent"><svg><use href="#i-opencode" /></svg>opencode</span>
+					</div>
+				</div>
+				<div class="strip-b">
+					<span class="eyebrow">Any model through opencode</span>
+					<div class="marquee"><div class="marquee-in">
+						<span>Opus</span><span>Sonnet</span><span>Haiku</span><span>Codex models</span><span>Kimi K2</span><span>GLM</span><span>DeepSeek</span><span>Qwen</span><span>OpenRouter</span><span>Ollama</span><span>LM Studio</span>
+						<span aria-hidden="true">Opus</span><span aria-hidden="true">Sonnet</span><span aria-hidden="true">Haiku</span><span aria-hidden="true">Codex models</span><span aria-hidden="true">Kimi K2</span><span aria-hidden="true">GLM</span><span aria-hidden="true">DeepSeek</span><span aria-hidden="true">Qwen</span><span aria-hidden="true">OpenRouter</span><span aria-hidden="true">Ollama</span><span aria-hidden="true">LM Studio</span>
+					</div></div>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── How it works ───────────────────────── -->
+			<section class="cell head-row reveal" id="how" aria-labelledby="how-title">
+				<h2 id="how-title">Three commands from a spare machine to a fleet</h2>
+				<p>No API keys for Claude or Codex: Sidefleet drives the sign-in already on each machine. No open ports: machines only ever call out to your control plane.</p>
+			</section>
+			<section class="cell steps reveal" aria-label="Steps">
+				<article class="step">
+					<div class="art term" data-type-on-view>
+						<div class="term-bar"><i></i><i></i><i></i><span>desk-mac</span></div>
+						<pre><span class="p">$</span> <span data-type="sidefleet serve"></span>
+<span class="o" data-after>Sidefleet control plane is running.
+
+  Open the page:     <u>http://100.84.2.7:7373/</u>
+  Connect a machine: sidefleet connect …</span></pre>
+					</div>
+					<h3><span class="n">1</span>Start the control plane</h3>
+					<p>The web page, the API and Postgres on one box. If it has an agent, it's your first worker too.</p>
+				</article>
+				<article class="step">
+					<div class="art checks" data-checks>
+						<div class="ck"><svg><use href="#i-check" /></svg><span>Claude Code <em>signed in</em></span></div>
+						<div class="ck"><svg><use href="#i-check" /></svg><span>Codex <em>signed in</em></span></div>
+						<div class="ck"><svg><use href="#i-check" /></svg><span>opencode <em>OpenRouter</em></span></div>
+						<div class="ck"><svg><use href="#i-check" /></svg><span>14 git checkouts <em>matched by remote</em></span></div>
+						<div class="ck"><svg><use href="#i-check" /></svg><span>systemd service <em>survives reboots</em></span></div>
+					</div>
+					<h3><span class="n">2</span>Connect your machines</h3>
+					<p><code>sidefleet connect</code> finds your agents and repos and installs a service. Or paste a prompt and let the agent connect itself.</p>
+				</article>
+				<article class="step">
+					<div class="art claim">
+						<div class="claim-task">Add dark mode to the settings page</div>
+						<div class="claim-line"><i></i></div>
+						<div class="claim-by"><svg><use href="#i-mini" /></svg><span>Claimed by <b>Mac mini</b></span><em>0.4s</em></div>
+					</div>
+					<h3><span class="n">3</span>Type a task from anywhere</h3>
+					<p>Your phone on the couch, a borrowed laptop, the desk. The least busy machine with that repo and agent picks it up.</p>
+				</article>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Fleet ───────────────────────── -->
+			<section class="cell split reveal" id="fleet" aria-labelledby="fleet-title">
+				<div class="split-art tinted">
+					<div class="fleet" id="fleet-panel">
+						<div class="fleet-head"><b>Machines</b><span><i class="dot ok"></i>3 online</span></div>
+						<div class="fm" data-m="0">
+							<svg class="fm-i"><use href="#i-mini" /></svg>
+							<div class="fm-n"><b>Mac mini</b><small>macOS · arm64 · parallel 3</small></div>
+							<div class="fm-a"><svg><use href="#i-claude" /></svg><svg><use href="#i-codex" /></svg></div>
+							<div class="fm-cpu"><canvas width="120" height="28"></canvas><small>CPU <b>38%</b></small></div>
+							<div class="fm-t"><span class="badge run">2 running</span></div>
+						</div>
+						<div class="fm" data-m="1">
+							<svg class="fm-i"><use href="#i-server" /></svg>
+							<div class="fm-n"><b>vps-fra-1</b><small>Linux · x86_64 · parallel 4</small></div>
+							<div class="fm-a"><svg><use href="#i-claude" /></svg><svg><use href="#i-opencode" /></svg></div>
+							<div class="fm-cpu"><canvas width="120" height="28"></canvas><small>CPU <b>12%</b></small></div>
+							<div class="fm-t"><span class="badge run">1 running</span></div>
+						</div>
+						<div class="fm" data-m="2">
+							<svg class="fm-i"><use href="#i-laptop" /></svg>
+							<div class="fm-n"><b>MacBook Pro</b><small>macOS · arm64 · parallel 2</small></div>
+							<div class="fm-a"><svg><use href="#i-codex" /></svg></div>
+							<div class="fm-cpu"><canvas width="120" height="28"></canvas><small>CPU <b>4%</b></small></div>
+							<div class="fm-t"><span class="badge limit">usage limit until 14:00</span></div>
+						</div>
+					</div>
+				</div>
+				<div class="split-copy">
+					<h2 id="fleet-title">Every machine, on one page</h2>
+					<p>Each connected machine shows up live with its repos, agents, CPU and running tasks. Each task lands on the least busy machine that has the repo and the agent, or you pin one.</p>
+					<ul class="ticks">
+						<li><b>Different accounts, one fleet.</b> When one machine hits its usage limit, its task moves to another.</li>
+						<li><b>Repos match by git remote</b>, whatever the folder is called on each machine.</li>
+						<li><b>Run several at once.</b> Set how many tasks each machine takes in parallel.</li>
+					</ul>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Live ───────────────────────── -->
+			<section class="cell split flip reveal" aria-labelledby="live-title">
+				<div class="split-copy">
+					<h2 id="live-title">Watch it work. Reply from your phone.</h2>
+					<p>The agent's narration and tool calls stream in within milliseconds and survive reloads and dropped connections. It's a conversation: reply to keep going, and the agent resumes the same session.</p>
+					<ul class="ticks">
+						<li><b>Reply while it works</b> and the message waits its turn, or press Send now to interrupt.</li>
+						<li><b>Screenshots show inline</b>, so you can ask for one from the couch.</li>
+						<li><b>Drop, paste or attach images</b> to a task and the agent gets them too.</li>
+					</ul>
+				</div>
+				<div class="split-art tinted">
+					<div class="phone">
+						<div class="phone-in">
+							<div class="ph-top"><span>Add dark mode to settings</span><span class="badge run"><i class="spin"></i>Running</span></div>
+							<div class="ph-meta"><svg><use href="#i-mini" /></svg>Mac mini · <svg><use href="#i-claude" /></svg>Opus 5.5 · sidefleet/9c2e</div>
+							<div class="ph-feed" id="ph-feed"></div>
+							<div class="ph-reply"><span id="ph-reply">Reply…</span><button tabindex="-1"><svg><use href="#i-arrow" /></svg></button></div>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Failover ───────────────────────── -->
+			<section class="cell failover reveal" aria-labelledby="fail-title">
+				<div class="fo-head">
+					<div>
+						<h2 id="fail-title">Survives a machine dropping</h2>
+						<p>Turn on “Move if it drops” and the worker pushes the task's own branch at most once a minute while the agent edits. If the machine goes quiet, another one with the repo picks up from the last pushed commit, with a digest of the thread so far.</p>
+					</div>
+					<div class="tabs" role="tablist" data-tabs="fo">
+						<button role="tab" aria-selected="true" data-tab="sleep">Laptop sleeps</button>
+						<button role="tab" aria-selected="false" data-tab="limit">Usage limit</button>
+					</div>
+				</div>
+				<div class="fo-card" id="fo-card">
+					<div class="fo-title"><b>Port the search indexer to the new job queue</b><span class="badge run"><i class="spin"></i>Running</span></div>
+					<div class="fo-stats">
+						<div><small>Elapsed</small><b id="fo-time">0m 00s</b></div>
+						<div><small>Machines</small><b id="fo-hops">1</b></div>
+						<div><small>Last push</small><b id="fo-push" class="mono">—</b></div>
+						<div><small>Lost work</small><b class="okc">none</b></div>
+					</div>
+					<div class="fo-track">
+						<div class="fo-axis"><span>start</span><span>5 min</span><span>10 min</span></div>
+						<div class="fo-lane" data-lane="a">
+							<div class="fo-who"><svg><use href="#i-laptop" /></svg><span><b>MacBook Pro</b><small id="fo-a-note">Codex</small></span></div>
+							<div class="fo-bar"><i class="seg a"></i><i class="drop" id="fo-drop"><span id="fo-drop-label">asleep</span></i></div>
+						</div>
+						<div class="fo-lane" data-lane="b">
+							<div class="fo-who"><svg><use href="#i-mini" /></svg><span><b>Mac mini</b><small>Codex · continues</small></span></div>
+							<div class="fo-bar"><i class="seg b"></i></div>
+						</div>
+						<div class="fo-cursor" id="fo-cursor"></div>
+					</div>
+					<div class="fo-log" id="fo-log"></div>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Worktrees ───────────────────────── -->
+			<section class="cell split reveal" aria-labelledby="wt-title">
+				<div class="split-art tinted branches" data-fibres="branches">
+					<div class="br-root" data-br-root><span class="mono">main</span><small>your checkout, untouched</small></div>
+					<ul class="br-list">
+						<li data-br><span class="mono">sidefleet/9c2e</span><small><svg><use href="#i-claude" /></svg>Add dark mode to settings</small></li>
+						<li data-br><span class="mono">sidefleet/41af</span><small><svg><use href="#i-codex" /></svg>Bump axum and fix the build</small></li>
+						<li data-br><span class="mono">sidefleet/d07b</span><small><svg><use href="#i-opencode" /></svg>Write the 0.4 release notes</small></li>
+						<li data-br><span class="mono">sidefleet/7f3a</span><small><svg><use href="#i-claude" /></svg>Add a password strength meter to sign-up</small></li>
+					</ul>
+				</div>
+				<div class="split-copy">
+					<h2 id="wt-title">Every task gets its own branch</h2>
+					<p>Each task runs in its own git worktree on a <code>sidefleet/&lt;id&gt;</code> branch, so several tasks on one repo run side by side without touching your checkout. Choose “In place” when a task needs installed dependencies or local config.</p>
+					<p class="sub">When it's done, read through the changes on the page, then merge the branch like any other.</p>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Restore & fork ───────────────────────── -->
+			<section class="cell split flip reveal" aria-labelledby="rf-title">
+				<div class="split-copy">
+					<h2 id="rf-title">Rewind any message. Fork into any agent.</h2>
+					<p>Every message's files are snapshotted before and after, so you can put the worktree back to how it was before any of them. Or start a new thread from any message, with a different agent and model.</p>
+					<div class="tabs" role="tablist" data-tabs="rf">
+						<button role="tab" aria-selected="true" data-tab="restore">Restore</button>
+						<button role="tab" aria-selected="false" data-tab="fork">Fork</button>
+					</div>
+					<p class="sub" data-rf-note="restore">The conversation carries on, and a restore can itself be undone.</p>
+					<p class="sub" data-rf-note="fork" hidden>A Claude Code thread continued in Codex starts on its own branch, with the files as they were after that message and the conversation so far as a transcript.</p>
+				</div>
+				<div class="split-art tinted">
+					<div class="thread" id="thread" data-mode="restore">
+						<div class="tm"><span class="who you">You</span><p>Move the cart total into a hook</p><span class="act">Restore to before</span></div>
+						<div class="tm"><span class="who"><svg><use href="#i-claude" /></svg>Claude</span><p>Moved it into <code>useCartTotal</code>; 3 files changed, tests pass.</p><span class="act">Fork from here</span></div>
+						<div class="tm hot"><span class="who you">You</span><p>Now cache it in localStorage too</p><span class="act">Restore to before</span></div>
+						<div class="tm hot"><span class="who"><svg><use href="#i-claude" /></svg>Claude</span><p>Added a cache layer and a migration for old carts.</p><span class="act">Fork from here</span></div>
+						<div class="thread-banner" id="thread-banner"></div>
+					</div>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Security ───────────────────────── -->
+			<section class="cell split reveal" id="security" aria-labelledby="sec-title">
+				<div class="split-copy">
+					<h2 id="sec-title">Your code never leaves your machines</h2>
+					<p>Sidefleet is a control plane and a worker you run yourself. There's no Sidefleet cloud in the middle: the agents run where your code already lives.</p>
+				</div>
+				<div class="split-art">
+					<ol class="rules">
+						<li><span>01</span><div><b>No open ports.</b> Workers only make outbound HTTP calls to your control plane: register, heartbeat, claim, events.</div></li>
+						<li><span>02</span><div><b>No API keys to hand over.</b> Claude Code and Codex use the sign-in already on that machine.</div></li>
+						<li><span>03</span><div><b>Secrets redacted twice.</b> Anything that looks like a credential is scrubbed on the worker, then again on the control plane.</div></li>
+						<li><span>04</span><div><b>Tokens stored as SHA-256 digests</b> and never logged.</div></li>
+						<li><span>05</span><div><b>Made for your tailnet.</b> Put the control plane on Tailscale: no port forwarding, no public exposure.</div></li>
+						<li><span>06</span><div><b>Permission modes per task.</b> Read and edit files, full access for unattended runs, or read only for questions.</div></li>
+					</ol>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Screens ───────────────────────── -->
+			<section class="cell shots reveal" aria-labelledby="shots-title">
+				<div class="head-row in">
+					<h2 id="shots-title">This is the real page</h2>
+					<div class="tabs" role="tablist" data-tabs="shots">
+						<button role="tab" aria-selected="true" data-tab="run-live">Live run</button>
+						<button role="tab" aria-selected="false" data-tab="run-thread">Thread</button>
+						<button role="tab" aria-selected="false" data-tab="review">Review</button>
+						<button role="tab" aria-selected="false" data-tab="machines">Machines</button>
+						<button role="tab" aria-selected="false" data-tab="home">Compose</button>
+					</div>
+				</div>
+				<figure class="shot-frame">
+					<div class="shot-bar"><i></i><i></i><i></i><span>sidefleet · 100.84.2.7:7373</span></div>
+					<div class="shot-stack">
+						<picture><source srcset="img/run-live-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="run-live" class="on" src="img/run-live.png" width="2720" height="1720" alt="A task running on a VPS, streamed live to the page" /></picture>
+						<picture><source srcset="img/run-thread-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="run-thread" src="img/run-thread.png" width="2720" height="1720" alt="A finished task with its changes, ready for a follow-up" loading="lazy" /></picture>
+						<picture><source srcset="img/review-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="review" src="img/review.png" width="2720" height="1720" alt="Reviewing a task's diff" loading="lazy" /></picture>
+						<picture><source srcset="img/machines-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="machines" src="img/machines.png" width="2720" height="1720" alt="The Machines page" loading="lazy" /></picture>
+						<picture><source srcset="img/home-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="home" src="img/home.png" width="2720" height="1720" alt="The task box, with running and recent tasks in the sidebar" loading="lazy" /></picture>
+					</div>
+				</figure>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Install ───────────────────────── -->
+			<section class="cell install reveal" id="install" aria-labelledby="install-title">
+				<div class="install-copy">
+					<h2 id="install-title">Free, open source, and yours</h2>
+					<p>Downloads a prebuilt <code>sidefleet</code> into <code>~/.local/bin</code> with no sudo, or builds from source when there's no release for your platform.</p>
+				</div>
+				<div class="install-cmds">
+					<div class="cmd">
+						<small>1 · Install on every machine</small>
+						<div class="cmd-line"><code>curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh" aria-label="Copy install command"><svg><use href="#i-copy" /></svg></button></div>
+					</div>
+					<div class="cmd">
+						<small>2 · Start the control plane (needs Postgres)</small>
+						<div class="cmd-line"><code>sidefleet serve</code><button class="copy" data-copy="sidefleet serve" aria-label="Copy serve command"><svg><use href="#i-copy" /></svg></button></div>
+					</div>
+					<div class="cmd">
+						<small>3 · Connect the others, with the line the page shows you</small>
+						<div class="cmd-line"><code>sidefleet connect --control &lt;url&gt; --token &lt;t&gt;</code><button class="copy" data-copy="sidefleet connect --control <url> --token <t>" aria-label="Copy connect command"><svg><use href="#i-copy" /></svg></button></div>
+					</div>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── FAQ ───────────────────────── -->
+			<section class="cell faq reveal" id="faq" aria-labelledby="faq-title">
+				<h2 id="faq-title">Questions</h2>
+				<div class="qs">
+					<details><summary>Does it need API keys?</summary><p>Not for Claude Code or Codex: Sidefleet drives the sign-in already on each machine, so usage counts against that account's plan. opencode brings any other model through its own providers, like OpenRouter or a local Ollama.</p></details>
+					<details><summary>Where does my code go?</summary><p>Nowhere new. Agents run on your machines, in worktrees of checkouts that are already there. The control plane is yours too, and only sees the agent's narration and tool calls, with secrets redacted.</p></details>
+					<details><summary>Can I use it from my phone?</summary><p>Yes. The page works on any browser that can reach your control plane. Put it on Tailscale and it's reachable from your phone anywhere, without exposing it to the internet.</p></details>
+					<details><summary>My laptop went to sleep mid-task. Is the work lost?</summary><p>Not if the task has “Move if it drops” on: the worker pushes the task's own <code>sidefleet/…</code> branch as it goes, and another machine with the repo continues from the last pushed commit. Without it, the task stops with the machine.</p></details>
+					<details><summary>Which platforms does it run on?</summary><p>macOS (arm64 and x86_64) and Linux (x86_64 and arm64). The control plane needs Postgres; one Docker command sets it up.</p></details>
+					<details><summary>Can I switch agents halfway through a task?</summary><p>Yes: fork the thread from any message into another agent and model. The new agent gets the conversation so far as a transcript and starts from the files as they were at that point.</p></details>
+					<details><summary>Is it OK to run my subscription this way?</summary><p>Sidefleet drives your own sign-ins, headless. Check the terms of your subscriptions for automated or unattended use, and never share or resell access to an account through it.</p></details>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
+			<!-- ───────────────────────── Closing ───────────────────────── -->
+			<section class="cell closing reveal" aria-labelledby="closing-title">
+				<img class="closing-mark" src="brand/mark-animated.svg" width="112" height="112" alt="" />
+				<h2 id="closing-title">Put your machines to work</h2>
+				<p>Your desk Mac, a Mac mini, a VPS. One page to run agents on all of them.</p>
+				<div class="ctas center">
+					<a class="btn btn-dark" href="#install">Install Sidefleet</a>
+					<a class="btn btn-light" href="https://github.com/foodaka/side-fleet"><svg><use href="#i-github" /></svg>Star on GitHub</a>
+				</div>
+			</section>
+
+			<footer class="cell foot">
+				<div class="foot-brand">
+					<a class="brand" href="#top"><svg><use href="#logo" /></svg>Sidefleet</a>
+					<p>Coding agents on your own machines, from anywhere.</p>
+				</div>
+				<div class="foot-cols">
+					<div><h3>Product</h3><a href="#how">How it works</a><a href="#fleet">Fleet</a><a href="#security">Security</a><a href="#faq">Questions</a></div>
+					<div><h3>Docs</h3><a href="https://github.com/foodaka/side-fleet#readme">README</a><a href="https://github.com/foodaka/side-fleet/blob/main/HOSTING.md">Hosting</a><a href="https://github.com/foodaka/side-fleet/blob/main/docs/API.md">API</a></div>
+					<div><h3>Project</h3><a href="https://github.com/foodaka/side-fleet">GitHub</a><a href="https://github.com/foodaka/side-fleet/blob/main/LICENSE">MIT License</a></div>
+				</div>
+				<p class="copyright">© 2026 Mark Hinschberger</p>
+			</footer>
+		</div>
+		<div class="arc" data-fibres="arc" aria-hidden="true"></div>
+	</main>
+</body>
+</html>

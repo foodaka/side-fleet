@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://sidefleet.xyz/sitemap.xml
+Sitemap: https://www.sidefleet.xyz/sitemap.xml

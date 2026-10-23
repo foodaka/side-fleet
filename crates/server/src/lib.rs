@@ -35,7 +35,7 @@ pub struct Config {
     pub host_worker: Option<String>,
     /// GitHub sign-in; turns on multi-tenant mode.
     pub github: Option<GithubOAuth>,
-    /// Public address of this control plane (`https://app.sidefleet.io`), used for
+    /// Public address of this control plane (`https://app.sidefleet.xyz`), used for
     /// OAuth redirects, connect commands and secure cookies. Taken from the
     /// request's Host header when unset.
     pub public_url: Option<String>,

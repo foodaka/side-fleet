@@ -1,11 +1,11 @@
-# Fly.io deployment of the hosted control plane (app.sidefleet.io). See HOSTED.md.
+# Fly.io deployment of the hosted control plane (app.sidefleet.xyz). See HOSTED.md.
 #
 # One-time setup:
 #   fly apps create sidefleet
 #   fly mpg create --name sidefleet-db --region iad       # managed Postgres
 #   fly mpg attach sidefleet-db --app sidefleet           # sets DATABASE_URL
 #   fly secrets set SIDEFLEET_GITHUB_CLIENT_ID=... SIDEFLEET_GITHUB_CLIENT_SECRET=...
-#   fly certs add app.sidefleet.io                        # TLS, then point DNS at the app
+#   fly certs add app.sidefleet.xyz                       # TLS, then point DNS at the app
 # Deploy:
 #   fly deploy --build-arg SIDEFLEET_GIT_SHA=$(git rev-parse --short=9 HEAD)
 
@@ -18,7 +18,7 @@ kill_timeout = "10s"
   dockerfile = "Dockerfile"
 
 [env]
-  SIDEFLEET_PUBLIC_URL = "https://app.sidefleet.io"
+  SIDEFLEET_PUBLIC_URL = "https://app.sidefleet.xyz"
   SIDEFLEET_BIND = "0.0.0.0:8080"
   RUST_LOG = "sidefleet=info,sidefleet_server=info,tower_http=warn"
 

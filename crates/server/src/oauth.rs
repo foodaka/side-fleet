@@ -16,7 +16,7 @@ use crate::{tenancy, AppState};
 
 const STATE_COOKIE: &str = "sf_oauth_state";
 
-/// `https://app.sidefleet.io`, or `http://<Host header>` when no public URL is configured.
+/// `https://app.sidefleet.xyz`, or `http://<Host header>` when no public URL is configured.
 pub fn public_base(state: &AppState, headers: &HeaderMap) -> String {
     if let Some(u) = &state.config.public_url {
         return u.clone();

@@ -3,7 +3,7 @@
 Sidefleet has two halves. The **worker** (`sidefleet connect` / `sidefleet run`) runs on your
 machines, drives the Claude Code sign-in that is already there, and stays open source. The
 **control plane** (`sidefleet serve`: the web page, the API and Postgres) is what you either host
-yourself ([HOSTING.md](HOSTING.md)) or use as a service at `https://app.sidefleet.io`.
+yourself ([HOSTING.md](HOSTING.md)) or use as a service at `https://app.sidefleet.xyz`.
 
 This document is about the second option: how the hosted, multi-tenant control plane runs, what
 it stores, and how to try the multi-tenant mode locally.
@@ -45,7 +45,7 @@ unchanged; their data moves to the default org when migration `0014` runs.
 - **Worker tokens.** `POST /v1/orgs/:id/tokens {name}` returns `sfw_…` once; only its SHA-256 is
   stored. `GET` lists them (name, created, last used, revoked), `DELETE /v1/orgs/:id/tokens/:tid`
   revokes, and the next heartbeat with that token gets 401. Owners only (403 for members).
-- **Approve-on-the-page enrollment.** `sidefleet connect --control https://app.sidefleet.io` with
+- **Approve-on-the-page enrollment.** `sidefleet connect --control https://app.sidefleet.xyz` with
   no token calls `POST /v1/enroll` with the machine's name and a capability summary (OS, agents,
   repo *count*, no paths). It prints a link and a code like `K7QD-M2XP`, then polls
   `GET /v1/enroll/:id` with a secret only it holds. On a hosted control plane the request belongs to
@@ -100,13 +100,13 @@ fly apps create sidefleet
 fly mpg create --name sidefleet-db --region iad
 fly mpg attach sidefleet-db --app sidefleet          # sets DATABASE_URL
 fly secrets set SIDEFLEET_GITHUB_CLIENT_ID=… SIDEFLEET_GITHUB_CLIENT_SECRET=…
-fly certs add app.sidefleet.io                       # then point DNS at the app
+fly certs add app.sidefleet.xyz                      # then point DNS at the app
 fly deploy --build-arg SIDEFLEET_GIT_SHA=$(git rev-parse --short=9 HEAD)
 ```
 
 Create the GitHub OAuth app at github.com/settings/developers (or under the organisation that will
-own the service): homepage `https://app.sidefleet.io`, callback
-`https://app.sidefleet.io/auth/github/callback`.
+own the service): homepage `https://app.sidefleet.xyz`, callback
+`https://app.sidefleet.xyz/auth/github/callback`.
 
 Environment:
 
@@ -114,7 +114,7 @@ Environment:
 |---|---|
 | `DATABASE_URL` | Postgres 14 or newer. Migrations run on start. |
 | `SIDEFLEET_GITHUB_CLIENT_ID`, `SIDEFLEET_GITHUB_CLIENT_SECRET` | the OAuth app; turn on hosted mode (`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` also work) |
-| `SIDEFLEET_PUBLIC_URL` | `https://app.sidefleet.io`: OAuth redirect, connect commands, `Secure` cookies |
+| `SIDEFLEET_PUBLIC_URL` | `https://app.sidefleet.xyz`: OAuth redirect, connect commands, `Secure` cookies |
 | `SIDEFLEET_BIND` | `0.0.0.0:8080` in the container |
 | `SIDEFLEET_DEV_KEY`, `SIDEFLEET_WORKER_TOKENS` | optional on a hosted control plane; act in the default org (leave unset) |
 | `RUST_LOG` | log filter; logs never contain tokens, cookies or task text beyond ids |

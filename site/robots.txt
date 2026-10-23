@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://sidefleet.vercel.app/sitemap.xml
+Sitemap: https://sidefleet.xyz/sitemap.xml

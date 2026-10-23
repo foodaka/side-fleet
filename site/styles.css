@@ -458,7 +458,9 @@ h2 { font-size: clamp(32px, 3.6vw, 44px); line-height: 1.08; }
 .foot-cols h3 { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 12px; }
 .foot-cols a { display: block; font-size: 14px; color: var(--muted); padding: 4px 0; }
 .foot-cols a:hover { color: var(--ink); }
-.copyright { grid-column: 1 / -1; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 13px; color: var(--faint); }
+.copyright { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 13px; color: var(--faint); }
+.copyright a { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+.copyright a:hover { color: var(--ink); }
 .arc { position: relative; height: 340px; margin-top: -1px; }
 
 /* ───────── Responsive ───────── */

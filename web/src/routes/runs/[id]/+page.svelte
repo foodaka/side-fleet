@@ -176,32 +176,32 @@
 
 <div class="flex h-dvh flex-col max-md:h-[calc(100dvh-3.25rem)]">
 	<header class="border-b bg-background/80 backdrop-blur">
-		<div class="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 pt-5 pb-4">
+		<div class="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 pt-5 pb-4 max-md:gap-2 max-md:pt-3 max-md:pb-3">
 			{#if thread?.error}
 				<h1 class="text-xl font-medium">This run doesn't exist</h1>
 				<p class="text-[13px] text-muted-foreground">{thread.error}</p>
 			{:else if thread && root && latest}
 				<div class="flex items-start justify-between gap-4">
-					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight">{root.task}</h1>
+					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight max-md:line-clamp-2 max-md:text-[16px]">{root.task}</h1>
 					{#if live}
 						<Button variant="outline" size="sm" class="h-8 shrink-0 rounded-full border-err/40 text-err-ink hover:bg-err-soft" onclick={stop} disabled={stopping || latest.stop_requested}>
 							<Square class="size-3 fill-current" />{stopping || latest.stop_requested ? 'Stopping…' : 'Stop'}
 						</Button>
 					{/if}
 				</div>
-				<div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
+				<div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground max-md:-mx-4 max-md:flex-nowrap max-md:overflow-x-auto max-md:px-4 max-md:[scrollbar-width:none] max-md:[&>*]:shrink-0">
 					<StatusPill status={latest.status} extra={latest.status === 'running' ? duration(latest.started_at, null, fleet.now) : ''} />
 					{#if thread.machine}
 						<span class="inline-flex items-center gap-1.5"><StatusDot status={machineOnline ? 'online' : 'offline'} /><span class="text-foreground/80">{thread.machine}</span></span>
 					{/if}
-					<span class="font-mono text-[11.5px]">{repoLabel(root.repo)}</span>
+					<span class="font-mono text-[11.5px] max-md:hidden">{repoLabel(root.repo)}</span>
 					{#if thread.branch}
-						<span class="inline-flex items-center gap-1 rounded-md bg-muted py-0.5 pr-0.5 pl-1.5">
-							<GitBranch class="size-3" /><span class="font-mono text-[11.5px] text-foreground/80">{thread.branch}</span>
+						<span class="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-muted py-0.5 pr-0.5 pl-1.5">
+							<GitBranch class="size-3 shrink-0" /><span class="truncate font-mono text-[11.5px] text-foreground/80">{thread.branch}</span>
 							<CopyButton text={() => thread?.branch ?? ''} label="" class="h-5 bg-transparent px-1 text-muted-foreground hover:bg-accent hover:text-foreground" />
 						</span>
 					{/if}
-					{#if thread.runs.length > 1}<span class="tnum">{thread.runs.length} messages</span>{/if}
+					{#if thread.runs.length > 1}<span class="tnum max-md:hidden">{thread.runs.length} messages</span>{/if}
 					{#if root.forked_from}
 						<a href="#/runs/{root.forked_from}" class="inline-flex items-center gap-1 hover:text-foreground"><GitFork class="size-3" />Forked from <span class="max-w-[16rem] truncate text-foreground/80">{forkSource ?? 'another thread'}</span></a>
 					{/if}
@@ -252,7 +252,7 @@
 				{/if}
 			</ConversationContent>
 		</div>
-		<ConversationScrollButton />
+		<ConversationScrollButton class="size-10" aria-label="Scroll to the latest message" />
 	</Conversation>
 
 	{#if diffScopes.length}
@@ -261,7 +261,7 @@
 
 	{#if root}
 		<div class="border-t bg-background">
-			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4" onsubmit={send}>
+			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4 max-md:px-3 max-md:pt-2 max-md:pb-3" onsubmit={send}>
 				<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
 					{#if attachments.dragging}
 						<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images to attach them</div>
@@ -279,7 +279,7 @@
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
 					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
-					<div class="flex flex-wrap items-center gap-2 px-2.5 pb-2.5">
+					<div class="flex flex-wrap items-center gap-2 px-2.5 pb-2.5 max-sm:flex-nowrap max-sm:gap-1.5">
 						<AgentModelPicker
 							bind:agent
 							bind:model
@@ -290,8 +290,8 @@
 							onagent={(a) => (model = lastModel(a))}
 						/>
 						<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
-							<Select.Trigger size="sm" class="h-7 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent" aria-label="Permissions for this reply">
-								{perm ? permName(perm) : `Same permissions${latest?.permission_mode ? ` (${permName(latest.permission_mode)})` : ''}`}
+							<Select.Trigger size="sm" class="h-7 min-w-0 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent max-sm:[&>span]:truncate" aria-label="Permissions for this reply">
+								{#if perm}{permName(perm)}{:else if latest?.permission_mode}<span class="max-sm:hidden">Same permissions ({permName(latest.permission_mode)})</span><span class="sm:hidden">{permName(latest.permission_mode)}</span>{:else}Same permissions{/if}
 							</Select.Trigger>
 							<Select.Content>
 								<Select.Item value="" label="Same permissions">Same permissions</Select.Item>

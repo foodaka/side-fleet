@@ -246,6 +246,7 @@ h2 { font-size: clamp(32px, 3.6vw, 44px); line-height: 1.08; }
 /* Header row + steps */
 .head-row { display: flex; align-items: center; justify-content: space-between; gap: 48px; padding: 72px 64px; }
 .head-row h2 { max-width: 520px; }
+.head-row .eyebrow { display: block; margin-bottom: 14px; }
 .head-row p { max-width: 480px; color: var(--ink-2); font-size: 17px; }
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); padding: 48px 0; }
 .step { padding: 0 40px; display: flex; flex-direction: column; }

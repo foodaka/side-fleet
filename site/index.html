@@ -129,20 +129,23 @@
 
 			<!-- ───────────────────────── How it works ───────────────────────── -->
 			<section class="cell head-row reveal" id="how" aria-labelledby="how-title">
-				<h2 id="how-title">Three commands from a spare machine to a fleet</h2>
-				<p>No API keys for Claude or Codex: Sidefleet drives the sign-in already on each machine. No open ports: machines only ever call out to your control plane.</p>
+				<div>
+					<span class="eyebrow">Three steps</span>
+					<h2 id="how-title">Turn the computers you already have into a fleet of coding agents</h2>
+				</div>
+				<p>No API keys for Claude or Codex: Sidefleet uses the login already on each machine. No open ports: machines only ever call out to your control plane.</p>
 			</section>
 			<section class="cell steps reveal" aria-label="Steps">
 				<article class="step">
 					<div class="art term" data-type-on-view>
-						<div class="term-bar"><i></i><i></i><i></i><span>desk-mac</span></div>
+						<div class="term-bar"><i></i><i></i><i></i><span>spare-laptop</span></div>
 						<pre><span class="p">$</span> <span data-type="sidefleet serve"></span>
 <span class="o" data-after>Sidefleet control plane is running.
 
-  Open the page:     <u>http://100.84.2.7:7373/</u>
+  Open the page:     <u>http://spare-laptop:7373/</u>
   Connect a machine: sidefleet connect …</span></pre>
 					</div>
-					<h3><span class="n">1</span>Start the control plane</h3>
+					<h3><span class="n">1</span>Start Sidefleet on one machine</h3>
 					<p>The web page, the API and Postgres on one box. If it has an agent, it's your first worker too.</p>
 				</article>
 				<article class="step">
@@ -351,7 +354,7 @@
 					</div>
 				</div>
 				<figure class="shot-frame">
-					<div class="shot-bar"><i></i><i></i><i></i><span>sidefleet · 100.84.2.7:7373</span></div>
+					<div class="shot-bar"><i></i><i></i><i></i><span>sidefleet · spare-laptop:7373</span></div>
 					<div class="shot-stack">
 						<picture><source srcset="img/run-live-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="run-live" class="on" src="img/run-live.png" width="2720" height="1720" alt="A task running on a VPS, streamed live to the page" /></picture>
 						<picture><source srcset="img/run-thread-dark.png" media="(prefers-color-scheme: dark)" /><img data-shot="run-thread" src="img/run-thread.png" width="2720" height="1720" alt="A finished task with its changes, ready for a follow-up" loading="lazy" /></picture>
@@ -392,7 +395,7 @@
 			<section class="cell faq reveal" id="faq" aria-labelledby="faq-title">
 				<h2 id="faq-title">Questions</h2>
 				<div class="qs">
-					<details><summary>Does it need API keys?</summary><p>Not for Claude Code or Codex: Sidefleet drives the sign-in already on each machine, so usage counts against that account's plan. opencode brings any other model through its own providers, like OpenRouter or a local Ollama.</p></details>
+					<details><summary>Does it need API keys?</summary><p>Not for Claude Code or Codex: Sidefleet uses the login already on each machine, so usage counts against that account's plan. opencode brings any other model through its own providers, like OpenRouter or a local Ollama.</p></details>
 					<details><summary>Where does my code go?</summary><p>Nowhere new. Agents run on your machines, in worktrees of checkouts that are already there. The control plane is yours too, and only sees the agent's narration and tool calls, with secrets redacted.</p></details>
 					<details><summary>Can I use it from my phone?</summary><p>Yes. The page works on any browser that can reach your control plane. Put it on Tailscale and it's reachable from your phone anywhere, without exposing it to the internet.</p></details>
 					<details><summary>My laptop went to sleep mid-task. Is the work lost?</summary><p>Not if the task has “Move if it drops” on: the worker pushes the task's own <code>sidefleet/…</code> branch as it goes, and another machine with the repo continues from the last pushed commit. Without it, the task stops with the machine.</p></details>

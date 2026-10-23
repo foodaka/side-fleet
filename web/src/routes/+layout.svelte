@@ -12,7 +12,8 @@
 	import Logo from '#lib/sf/ui/Logo.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import Sidebar from '#lib/sf/ui/Sidebar.svelte';
-	import KeyGate from '#lib/sf/ui/KeyGate.svelte';
+	import SignIn from '#lib/sf/ui/SignIn.svelte';
+	import NewOrgDialog from '#lib/sf/ui/NewOrgDialog.svelte';
 	import RepoPicker from '#lib/sf/ui/RepoPicker.svelte';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { seen } from '#lib/sf/seen.svelte';
@@ -151,5 +152,6 @@
 	</div>
 </Tooltip.Provider>
 
-{#if fleet.needsKey}<KeyGate />{/if}
+{#if fleet.needsSignIn}<SignIn />{/if}
 <RepoPicker />
+<NewOrgDialog />

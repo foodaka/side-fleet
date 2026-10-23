@@ -1,0 +1,7 @@
+target
+web/node_modules
+web/.svelte-kit
+.git
+.env
+*.log
+.claude

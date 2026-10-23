@@ -1,5 +1,5 @@
-import { api, getKey, keyWorks, setKey, Unauthorized } from './api';
-import type { RunSummary, Setup, Worker } from './types';
+import { api, ApiError, currentKey, currentOrg, keyWorks, setKey, setOrg, Unauthorized } from './api';
+import type { AuthMethods, Enrollment, Me, RunSummary, Setup, Worker } from './types';
 import { telemetry } from './telemetry.svelte';
 import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
@@ -23,16 +23,31 @@ class Fleet {
 	archived = $state<RunSummary[] | null>(null);
 	/** A thread whose page should open the fork dialog for its latest message (asked from the sidebar). */
 	forkThread = $state<string | null>(null);
+	newOrgOpen = $state(false);
+	/** How this control plane lets people in; null until loaded. */
+	methods = $state<AuthMethods | null>(null);
+	/** Who is signed in and their orgs. */
+	me = $state<Me | null>(null);
+	/** Machines waiting for someone in this org to approve them. */
+	pending = $state<Enrollment[]>([]);
+	orgId = $state(currentOrg());
 
 	online = $derived(this.workers.filter((w) => w.online));
-	needsKey = $derived(this.conn === 'unauthorized');
+	needsSignIn = $derived(this.conn === 'unauthorized');
+	/** The org the page acts in. */
+	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
+	isOwner = $derived(this.org?.role === 'owner');
 
 	#timer: ReturnType<typeof setInterval> | undefined;
+	#asked = false;
 
 	start() {
 		if (this.#timer) return;
-		if (!getKey()) this.conn = 'unauthorized';
-		else void this.refresh();
+		void fetch('/v1/auth')
+			.then((r) => (r.ok ? r.json() : null))
+			.then((m) => (this.methods = m ?? { github: false, dev_key: true, hosted: false }))
+			.catch(() => (this.methods = { github: false, dev_key: true, hosted: false }));
+		void this.refresh();
 		this.#timer = setInterval(() => void this.refresh(), 5000);
 		setInterval(() => (this.now = Date.now()), 1000);
 		// Background tabs throttle timers; catch up the moment the tab is visible again.
@@ -44,16 +59,24 @@ class Fleet {
 		});
 	}
 
-	async refresh() {
-		if (this.conn === 'unauthorized' && !getKey()) return;
+	async refresh(retry = true) {
+		// Signed out: stop polling until a key is entered (GitHub sign-in reloads the page).
+		if (this.conn === 'unauthorized' && this.#asked && !currentKey()) return;
+		this.#asked = true;
 		try {
-			const [workers, runs, repos] = await Promise.all([
+			// Until signed in, ask once instead of firing every call into a 401.
+			if (this.conn !== 'ok') await api<Me>('/v1/me');
+			const [me, workers, runs, repos, pending] = await Promise.all([
+				api<Me>('/v1/me'),
 				api<Worker[]>('/v1/workers'),
 				api<RunSummary[]>('/v1/runs?limit=100'),
-				api<{ added: string[] }>('/v1/repos')
+				api<{ added: string[] }>('/v1/repos'),
+				api<Enrollment[]>('/v1/enrollments')
 			]);
+			this.me = me;
 			this.workers = workers;
 			this.runs = runs;
+			this.pending = pending;
 			telemetry.ingest(workers, runs);
 			this.added = new Set(repos.added);
 			void this.#migrateAdded(workers, repos.added);
@@ -61,6 +84,11 @@ class Fleet {
 			this.conn = 'ok';
 			this.loaded = true;
 		} catch (e) {
+			// The remembered org is gone (left it, or another account): fall back to the first one.
+			if (e instanceof ApiError && e.status === 403 && this.orgId && retry) {
+				this.switchOrg('');
+				return;
+			}
 			this.conn = e instanceof Unauthorized ? 'unauthorized' : 'unreachable';
 		}
 	}
@@ -90,6 +118,23 @@ class Fleet {
 		void this.refresh();
 	}
 
+	/** Act in another of the user's orgs: everything on the page is per org. */
+	switchOrg(id: string) {
+		setOrg(id);
+		this.orgId = id;
+		this.workers = [];
+		this.runs = [];
+		this.archived = null;
+		this.pending = [];
+		this.added = null;
+		this.setup = null;
+		this.#migrated = false;
+		this.loaded = false;
+		this.conn = 'connecting';
+		if (location.hash.startsWith('#/runs/')) location.hash = '#/runs';
+		void this.refresh(false);
+	}
+
 	async signIn(key: string): Promise<boolean> {
 		if (!(await keyWorks(key))) return false;
 		setKey(key);
@@ -99,8 +144,12 @@ class Fleet {
 		return true;
 	}
 
-	signOut() {
+	async signOut() {
+		if (this.me?.user) await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
 		setKey('');
+		setOrg('');
+		this.orgId = '';
+		this.me = null;
 		this.conn = 'unauthorized';
 	}
 
@@ -164,14 +213,18 @@ export const fleet = new Fleet();
 const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh';
 export const installCmd = INSTALL;
 
+/** The connect line. Without a static token (hosted orgs) the machine asks to join and is approved on Machines. */
 export function connectCmd(masked: boolean) {
 	const t = fleet.setup?.worker_token;
-	const tok = t ? (masked ? t.slice(0, 4) + '••••••••' : t) : '<worker token>';
+	if (!t) return `sidefleet connect --control ${location.origin}`;
+	const tok = masked ? t.slice(0, 4) + '••••••••' : t;
 	return `sidefleet connect --control ${location.origin} --token ${tok}`;
 }
 
 export function agentPrompt(masked: boolean) {
 	const t = fleet.setup?.worker_token;
-	const tok = t ? (masked ? t.slice(0, 4) + '••••••••' : t) : '<worker token>';
+	if (!t)
+		return `Read ${location.origin}/connect.md and follow it to connect this machine to Sidefleet. Control plane: ${location.origin}. There is no token: run connect without --token and tell me the code it prints so I can approve it on the Machines page.`;
+	const tok = masked ? t.slice(0, 4) + '••••••••' : t;
 	return `Read ${location.origin}/connect.md and follow it to connect this machine to Sidefleet. Control plane: ${location.origin}. Worker token: ${tok} (keep it out of logs and your summary).`;
 }

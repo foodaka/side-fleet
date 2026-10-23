@@ -3,8 +3,9 @@
 You are connecting this machine to a Sidefleet control plane at `{{ORIGIN}}`, so the person
 who runs it can start coding-agent tasks here from a web page. The worker runs the coding agents
 already set up on this machine (Claude Code, Codex and/or opencode) with their existing sign-ins,
-makes only outbound HTTP calls to that address, and needs no open ports. The user will give you a **worker token**. Treat it as a secret: never print
-it, never commit it, and keep it out of your final summary.
+makes only outbound HTTP calls to that address, and needs no open ports. The user may give you a **worker token**. Treat it as a secret: never print
+it, never commit it, and keep it out of your final summary. Without a token the machine asks to
+join and the user approves it on the Machines page.
 
 Do these steps in order and stop to ask if one fails.
 
@@ -36,6 +37,10 @@ PATH for the current shell: `export PATH="$HOME/.local/bin:$PATH"`.
 ```
 sidefleet connect --control {{ORIGIN}} --token <the token the user gave you>
 ```
+
+If the user gave you no token, run it without `--token`. It prints a link and a short code and
+waits up to ten minutes: tell the user to open that link (or {{ORIGIN}}/#/machines), check the code
+matches and press Approve. Run the command in a way that lets it keep waiting while you tell them.
 
 It finds git checkouts under the home folder by itself (three levels deep; pass `--repos <folder>`
 only if the user's projects live somewhere unusual). This checks the machine, registers it once, saves the settings to `~/.sidefleet/worker.env`

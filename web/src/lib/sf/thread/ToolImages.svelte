@@ -1,14 +1,14 @@
 <script lang="ts" module>
-	import { currentKey } from '../api';
+	import { authHeaders } from '../api';
 
 	// Object URLs by image id: images never change, so each is fetched once per page.
 	const cache = new Map<string, Promise<string>>();
 
-	/** `<img src>` cannot send the key, so fetch the bytes and show them from a blob URL. */
+	/** `<img src>` cannot send the key or org header, so fetch the bytes and show them from a blob URL. */
 	function load(id: string): Promise<string> {
 		let p = cache.get(id);
 		if (!p) {
-			p = fetch(`/v1/images/${id}`, { headers: { Authorization: 'Bearer ' + currentKey() } }).then(async (r) => {
+			p = fetch(`/v1/images/${id}`, { headers: authHeaders(), credentials: 'same-origin' }).then(async (r) => {
 				if (!r.ok) throw new Error(r.status === 404 ? 'Image not found' : `Could not load the image (${r.status})`);
 				return URL.createObjectURL(await r.blob());
 			});

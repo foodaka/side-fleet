@@ -11,7 +11,10 @@ Preview it:
 python3 -m http.server 8765 -d site
 ```
 
-Deploy by publishing this folder as-is (GitHub Pages, Render static site, any CDN).
+Live at https://sidefleet.xyz (Vercel project `sidefleet`, Stepracers team). Deploy from
+this folder with `vercel deploy --prod --scope stepracers --project sidefleet`; `vercel.json`
+sets caching and `.vercelignore` keeps the brand sources out. Vercel Web Analytics is on for
+the project, with events for the install, copy and GitHub clicks.
 
 ## Brand
 

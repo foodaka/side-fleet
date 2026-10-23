@@ -1,0 +1,5 @@
+# Sources for the brand assets; the site only serves what they produce.
+README.md
+brand/mark.py
+brand/render.mjs
+brand/og.html

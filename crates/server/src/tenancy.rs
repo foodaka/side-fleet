@@ -299,6 +299,154 @@ pub async fn token_org(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<U
     Ok(Some(row.get("org_id")))
 }
 
+// ---- API tokens ----
+
+/// What an API token may do. Browser sessions and the developer key are not limited.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Look: threads, their events and approvals, machines, repos.
+    Read,
+    /// Also start tasks, reply, stop, restore, fork, archive and open PRs; never with full access.
+    Tasks,
+    /// Also approve or deny tool calls and run with full access (`bypassPermissions`).
+    Full,
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Option<Scope> {
+        match s {
+            "read" => Some(Scope::Read),
+            "tasks" => Some(Scope::Tasks),
+            "full" => Some(Scope::Full),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Read => "read",
+            Scope::Tasks => "tasks",
+            Scope::Full => "full",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiToken {
+    pub id: Uuid,
+    pub name: String,
+    pub scope: Scope,
+    /// First characters of the value, to tell tokens apart; the rest is never shown again.
+    pub prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+fn row_to_api_token(r: &PgRow) -> ApiToken {
+    ApiToken {
+        id: r.get("id"),
+        name: r.get("name"),
+        scope: Scope::parse(r.get("scope")).unwrap_or(Scope::Read),
+        prefix: "sfa_".into(),
+        created_at: r.get("created_at"),
+        revoked_at: r.get("revoked_at"),
+        last_used_at: r.get("last_used_at"),
+    }
+}
+
+const API_TOKEN_COLS: &str = "id, name, scope, created_at, revoked_at, last_used_at";
+
+/// Mint an API token for `user` (none: the developer key) in `org`. Returns its record and the value, which is not stored.
+pub async fn create_api_token(pool: &PgPool, org: Uuid, user: Option<Uuid>, name: &str, scope: Scope) -> sqlx::Result<(ApiToken, String)> {
+    let value = format!("sfa_{}", random_hex(24));
+    let row = sqlx::query(&format!(
+        "INSERT INTO api_tokens (id, org_id, user_id, name, scope, token_hash) VALUES ($1, $2, $3, $4, $5, $6) RETURNING {API_TOKEN_COLS}"
+    ))
+    .bind(Uuid::new_v4())
+    .bind(org)
+    .bind(user)
+    .bind(name)
+    .bind(scope.as_str())
+    .bind(sha256_hex(&value))
+    .fetch_one(pool)
+    .await?;
+    let mut t = row_to_api_token(&row);
+    t.prefix = value[..8].to_string();
+    Ok((t, value))
+}
+
+/// The caller's own tokens in `org`, newest first.
+pub async fn list_api_tokens(pool: &PgPool, org: Uuid, user: Option<Uuid>) -> sqlx::Result<Vec<ApiToken>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {API_TOKEN_COLS} FROM api_tokens WHERE org_id = $1 AND user_id IS NOT DISTINCT FROM $2 ORDER BY created_at DESC"
+    ))
+    .bind(org)
+    .bind(user)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_api_token).collect())
+}
+
+/// Revoke one of the caller's tokens in `org`. It gets 401 on its next call.
+pub async fn revoke_api_token(pool: &PgPool, org: Uuid, user: Option<Uuid>, id: Uuid) -> sqlx::Result<Option<ApiToken>> {
+    let row = sqlx::query(&format!(
+        "UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, now())
+         WHERE id = $1 AND org_id = $2 AND user_id IS NOT DISTINCT FROM $3 RETURNING {API_TOKEN_COLS}"
+    ))
+    .bind(id)
+    .bind(org)
+    .bind(user)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_api_token))
+}
+
+/// A live API token, resolved to who it acts as.
+#[derive(Debug, Clone)]
+pub struct ApiTokenUse {
+    pub id: Uuid,
+    pub name: String,
+    pub scope: Scope,
+    /// None for a token minted with the developer key.
+    pub user: Option<User>,
+    pub org: OrgMembership,
+}
+
+/// Resolve a presented token: live (not revoked), and its user still a member
+/// of its org (the membership carries their current role). Records when it was last used.
+pub async fn api_token_use(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<ApiTokenUse>> {
+    let row = sqlx::query(
+        "SELECT t.id, t.name, t.scope, t.org_id, t.user_id, t.last_used_at, u.github_id, u.login, u.email
+         FROM api_tokens t LEFT JOIN users u ON u.id = t.user_id
+         WHERE t.token_hash = $1 AND t.revoked_at IS NULL",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let org_id: Uuid = row.get("org_id");
+    let user_id: Option<Uuid> = row.get("user_id");
+    let (user, org) = match user_id {
+        Some(uid) => {
+            let user = User { id: uid, github_id: row.get("github_id"), login: row.get("login"), email: row.get("email") };
+            match memberships(pool, uid).await?.into_iter().find(|m| m.id == org_id) {
+                Some(m) => (Some(user), m),
+                None => return Ok(None),
+            }
+        }
+        None if org_id == DEFAULT_ORG => (None, default_org(pool).await?),
+        None => return Ok(None),
+    };
+    let Some(scope) = Scope::parse(row.get("scope")) else { return Ok(None) };
+    let id: Uuid = row.get("id");
+    let last: Option<DateTime<Utc>> = row.get("last_used_at");
+    if last.is_none_or(|t| Utc::now() - t > Duration::minutes(1)) {
+        sqlx::query("UPDATE api_tokens SET last_used_at = now() WHERE id = $1").bind(id).execute(pool).await?;
+    }
+    Ok(Some(ApiTokenUse { id, name: row.get("name"), scope, user, org }))
+}
+
 // ---- enrollment ----
 
 #[derive(Debug, Clone, Serialize)]

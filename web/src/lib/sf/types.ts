@@ -159,6 +159,21 @@ export interface WorkerToken {
 	token?: string;
 }
 
+export type ApiScope = 'read' | 'tasks' | 'full';
+
+/** A personal token for scripts and chat agents (Hermes, OpenClaw, MCP clients): acts as its user in one org. */
+export interface ApiToken {
+	id: string;
+	name: string;
+	scope: ApiScope;
+	prefix: string;
+	created_at: string;
+	revoked_at: string | null;
+	last_used_at: string | null;
+	/** Only in the response that created it. */
+	token?: string;
+}
+
 export interface Enrollment {
 	id: string;
 	code: string;

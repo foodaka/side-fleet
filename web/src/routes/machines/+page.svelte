@@ -8,6 +8,7 @@
 	import FleetMap from '#lib/sf/ui/FleetMap.svelte';
 	import PendingMachines from '#lib/sf/ui/PendingMachines.svelte';
 	import WorkerTokens from '#lib/sf/ui/WorkerTokens.svelte';
+	import ApiTokens from '#lib/sf/ui/ApiTokens.svelte';
 
 	let hover = $state<string | null>(null);
 
@@ -55,6 +56,7 @@
 	{/if}
 
 	<WorkerTokens />
+	<ApiTokens />
 </section>
 
 <Dialog.Root bind:open={fleet.addMachineOpen}>

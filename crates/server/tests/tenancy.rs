@@ -653,3 +653,147 @@ async fn a_new_sign_up_sends_one_telegram_message() {
 
     env.teardown().await;
 }
+
+/// A script or chat agent using a personal API token.
+async fn with_token(env: &TestEnv, token: &str, m: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut r = Client::new().request(m, format!("{}{}", env.base_url, path)).bearer_auth(token);
+    if let Some(b) = body {
+        r = r.json(&b);
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status();
+    (s, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn api_tokens_act_as_their_user_in_one_org_within_their_scope() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let org = alice.org_id().await;
+    // Room for the handful of runs below.
+    sqlx::query("UPDATE orgs SET plan = 'pro' WHERE id = $1::uuid").bind(&org).execute(&env.pool).await.unwrap();
+    let run = |mode: Option<&str>| {
+        let mut b = json!({"task": "do it", "model": "claude-sonnet-5-5", "repo": "app"});
+        if let Some(m) = mode {
+            b["permission_mode"] = json!(m);
+        }
+        b
+    };
+
+    // Minted on the page; the value is in the 201 only.
+    let mint = |scope: &'static str| alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": format!("hermes {scope}"), "scope": scope})));
+    let (s, read) = mint("read").await;
+    assert_eq!(s, StatusCode::CREATED, "{read}");
+    let read_tok = read["token"].as_str().unwrap().to_string();
+    assert!(read_tok.starts_with("sfa_"));
+    assert_eq!(read["scope"], "read");
+    assert_eq!(read["prefix"], &read_tok[..8]);
+    let tasks_tok = mint("tasks").await.1["token"].as_str().unwrap().to_string();
+    let full_tok = mint("full").await.1["token"].as_str().unwrap().to_string();
+    assert_eq!(alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": "x", "scope": "admin"}))).await.0, StatusCode::BAD_REQUEST);
+    let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+    assert!(list.to_string().find(&read_tok).is_none(), "values are never listed");
+    let stored: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM api_tokens").fetch_all(&env.pool).await.unwrap();
+    assert!(!stored.contains(&read_tok), "only digests are stored");
+
+    // It is alice, in her org only.
+    let (s, me) = with_token(&env, &read_tok, Method::GET, "/v1/me", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(me["user"]["login"], "alice");
+    assert_eq!(me["orgs"].as_array().unwrap().len(), 1);
+    assert_eq!(me["orgs"][0]["id"], org.as_str());
+    assert_eq!(me["token"]["scope"], "read");
+
+    // read: looks, never acts.
+    assert_eq!(with_token(&env, &read_tok, Method::GET, "/v1/runs", None).await.0, StatusCode::OK);
+    assert_eq!(with_token(&env, &read_tok, Method::GET, "/v1/workers", None).await.0, StatusCode::OK);
+    assert_eq!(with_token(&env, &read_tok, Method::POST, "/v1/runs", Some(run(None))).await.0, StatusCode::FORBIDDEN);
+
+    // tasks: starts work in alice's org, but never with full access.
+    let (s, r) = with_token(&env, &tasks_tok, Method::POST, "/v1/runs", Some(run(Some("acceptEdits")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{r}");
+    let (_, threads) = alice.json(Method::GET, "/v1/runs", None).await;
+    assert!(threads.as_array().unwrap().iter().any(|t| t["id"] == r["id"]), "the page sees the token's run");
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, "/v1/runs", Some(run(Some("bypassPermissions")))).await.0, StatusCode::FORBIDDEN);
+    let rid = r["id"].as_str().unwrap();
+    let approve = format!("/v1/runs/{rid}/approvals/{}/approve", Uuid::new_v4());
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, &approve, None).await.0, StatusCode::FORBIDDEN);
+
+    // A thread alice started with full access: tasks can't continue it as is, only in a safer mode.
+    let (_, b) = alice.json(Method::POST, "/v1/runs", Some(run(Some("bypassPermissions")))).await;
+    let bid = b["id"].as_str().unwrap();
+    let reply = |mode: Option<&str>| {
+        let mut v = json!({"task": "and then"});
+        if let Some(m) = mode {
+            v["permission_mode"] = json!(m);
+        }
+        v
+    };
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/messages"), Some(reply(None))).await.0, StatusCode::FORBIDDEN);
+    let (s, v) = with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/messages"), Some(reply(Some("acceptEdits")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    // Forking it is the same.
+    assert_eq!(alice.json(Method::POST, &format!("/v1/runs/{bid}/stop"), None).await.0, StatusCode::OK);
+    let fork = |mode: Option<&str>| {
+        let mut v = json!({"task": "try another way", "model": "claude-sonnet-5-5"});
+        if let Some(m) = mode {
+            v["permission_mode"] = json!(m);
+        }
+        v
+    };
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/fork"), Some(fork(None))).await.0, StatusCode::FORBIDDEN);
+    let (s, v) = with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/fork"), Some(fork(Some("plan")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+
+    // full: may use full access and decide approvals.
+    let (s, v) = with_token(&env, &full_tok, Method::POST, "/v1/runs", Some(run(Some("bypassPermissions")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(with_token(&env, &full_tok, Method::POST, &approve, None).await.0, StatusCode::NOT_FOUND, "allowed, but no such approval");
+
+    // No token manages orgs, tokens, members or machines, or sees the setup (it carries a worker token).
+    for (m, p) in [
+        (Method::GET, "/v1/setup".to_string()),
+        (Method::GET, "/v1/api-tokens".to_string()),
+        (Method::GET, format!("/v1/orgs/{org}/tokens")),
+        (Method::GET, format!("/v1/orgs/{org}/members")),
+        (Method::GET, "/v1/enrollments".to_string()),
+    ] {
+        assert_eq!(with_token(&env, &full_tok, m.clone(), &p, None).await.0, StatusCode::FORBIDDEN, "{m} {p}");
+    }
+    assert_eq!(
+        with_token(&env, &full_tok, Method::POST, "/v1/api-tokens", Some(json!({"name": "more", "scope": "full"}))).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Pointing it at another org: 403.
+    let bob = Browser::login(&env, "bob").await;
+    let bob_org = bob.org_id().await;
+    let r = Client::new().get(format!("{}/v1/runs", env.base_url)).bearer_auth(&read_tok).header("x-sidefleet-org", &bob_org).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+    // Only its owner sees and revokes it.
+    let read_id = read["id"].as_str().unwrap();
+    assert_eq!(bob.json(Method::GET, "/v1/api-tokens", None).await.1, json!([]));
+    assert_eq!(bob.json(Method::DELETE, &format!("/v1/api-tokens/{read_id}"), None).await.0, StatusCode::NOT_FOUND);
+    let (s, v) = alice.json(Method::DELETE, &format!("/v1/api-tokens/{read_id}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["revoked_at"].is_string());
+    assert_eq!(with_token(&env, &read_tok, Method::GET, "/v1/runs", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(with_token(&env, "sfa_made_up", Method::GET, "/v1/runs", None).await.0, StatusCode::UNAUTHORIZED);
+
+    // Leaving the org ends its tokens there.
+    sqlx::query("DELETE FROM org_members WHERE org_id = $1::uuid").bind(&org).execute(&env.pool).await.unwrap();
+    assert_eq!(with_token(&env, &tasks_tok, Method::GET, "/v1/runs", None).await.0, StatusCode::UNAUTHORIZED);
+
+    // The developer key mints tokens for the default org.
+    let (s, v) = with_token(&env, DEV_KEY, Method::POST, "/v1/api-tokens", Some(json!({"name": "openclaw", "scope": "read"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let (s, me) = with_token(&env, v["token"].as_str().unwrap(), Method::GET, "/v1/me", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(me["user"], Value::Null);
+    assert_eq!(me["orgs"][0]["slug"], "default");
+    assert_eq!(with_token(&env, DEV_KEY, Method::GET, "/v1/api-tokens", None).await.1.as_array().unwrap().len(), 1);
+
+    env.teardown().await;
+}

@@ -83,6 +83,27 @@ Bearer `SIDEFLEET_DEV_KEY`, acting in the default org; or the `sf_session` cooki
 sign-in, acting in the org named by `X-Sidefleet-Org`, else the user's personal org. Every route
 is scoped to that org: another org's runs, images and machines read as 404.
 
+Or a personal API token (`Bearer sfa_…`), for a script or a chat agent such as Hermes or
+OpenClaw. It acts as the user who made it, in the org it was made in (another `X-Sidefleet-Org`
+answers `403`), and stops working when revoked or when that user leaves the org. Its scope limits
+what it can call; anything else answers `403`:
+
+| Scope | Can |
+|---|---|
+| `read` | `GET` runs, threads, events, approvals, images, workers and repos; `GET /v1/me` shows the token's name and scope |
+| `tasks` | also start runs, send messages, stop, restore, fork, open PRs and archive; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
+| `full` | also approve or deny tool calls, and use full access |
+
+No token manages orgs, members, worker or API tokens, enrollments or machines, or reads
+`/v1/setup`. Tokens are made on the Machines page, or with these routes (session cookie or
+developer key only; the developer key's tokens act in the default org):
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/api-tokens` | your tokens in this org, newest first; values are never listed |
+| `POST` | `/v1/api-tokens` `{name, scope}` | `201` with `token`, shown this once; only its SHA-256 is stored |
+| `DELETE` | `/v1/api-tokens/:id` | revoke; its next call gets `401` |
+
 | Method | Path | |
 |---|---|---|
 | `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?, images?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `ask` (Claude Code only; `400` with another agent), `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it); `images` is up to 8 `{media_type, data}` (base64 PNG, JPEG, GIF or WebP, 10 MB each) for the agent to look at; the run lists them as `images: [{id, media_type, bytes}]` |

@@ -68,6 +68,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers/{id}/update", post(request_update))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
+        .route("/v1/api-tokens", get(list_api_tokens).post(create_api_token))
+        .route("/v1/api-tokens/{id}", axum::routing::delete(revoke_api_token))
         .route("/v1/orgs", post(create_org))
         .route("/v1/orgs/{org}/tokens", get(list_tokens).post(create_token))
         .route("/v1/orgs/{org}/tokens/{id}", axum::routing::delete(revoke_token))
@@ -228,6 +230,7 @@ async fn create_run(
     }
     check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    check_full_access(&caller, mode)?;
     check_ask_agent(mode, agent)?;
     let isolation = match req.isolation.as_deref() {
         None | Some("") => "worktree",
@@ -308,6 +311,16 @@ fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
     }
 }
 
+/// Full access runs any command without asking, so an API token needs the `full` scope to
+/// start a run with it, or to continue (reply to, fork) a thread that runs with it.
+fn check_full_access(caller: &Caller, mode: Option<&str>) -> Result<(), ApiError> {
+    if mode == Some(FULL_ACCESS_MODE) && !caller.is_full() {
+        return Err(forbidden("full access (bypassPermissions) needs an API token with the full scope; choose another permission_mode"));
+    }
+    Ok(())
+}
+const FULL_ACCESS_MODE: &str = "bypassPermissions";
+
 /// "Ask me" relays Claude Code's permission prompts; the other agents have no such hook yet.
 fn check_ask_agent(mode: Option<&str>, agent: Agent) -> Result<(), ApiError> {
     if mode == Some(sidefleet_core::ASK_MODE) && agent != Agent::Claude {
@@ -351,9 +364,15 @@ async fn follow_up(
     if let Some(a) = agent {
         check_ask_agent(mode, a)?;
     }
-    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+    let Some(run) = db::get_run(&state.pool, caller.org_id(), id).await? else {
         return Err(not_found());
-    }
+    };
+    // Without a mode the reply keeps the thread's latest one.
+    let inherited = match mode {
+        Some(_) => None,
+        None => db::thread_runs(&state.pool, caller.org_id(), run.parent_id.unwrap_or(run.id)).await?.pop().and_then(|r| r.permission_mode),
+    };
+    check_full_access(&caller, mode.or(inherited.as_deref()))?;
     check_run_limit(&state, &caller).await?;
     match db::create_follow_up(&state.pool, caller.org_id(), id, task, agent, req.model.as_deref().map(str::trim), mode, &req.images).await? {
         FollowUpOutcome::Created(run, ev) => {
@@ -444,9 +463,11 @@ async fn fork_run(
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
     let new = db::NewFork { task, agent, model, permission_mode: mode, worker_id: worker, context_budget };
-    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+    let Some(target) = db::get_run(&state.pool, caller.org_id(), id).await? else {
         return Err(not_found());
-    }
+    };
+    // Without a mode the fork keeps the message's.
+    check_full_access(&caller, mode.or(target.permission_mode.as_deref()))?;
     check_run_limit(&state, &caller).await?;
     match db::create_fork(&state.pool, caller.org_id(), id, new).await? {
         ForkOutcome::Created(run, ev) => {
@@ -1026,14 +1047,20 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Respons
         Ok(None) => return Ok((StatusCode::UNAUTHORIZED, Json(json!({"error": "not signed in"}))).into_response()),
         Err(r) => return Ok(r),
     };
-    let (user, orgs) = match identity {
-        Identity::DevKey => (None, vec![tenancy::default_org(&state.pool).await?]),
+    let (user, orgs, token) = match identity {
+        Identity::DevKey => (None, vec![tenancy::default_org(&state.pool).await?], None),
         Identity::User(u) => {
             let orgs = tenancy::memberships(&state.pool, u.id).await?;
-            (Some(u), orgs)
+            (Some(u), orgs, None)
         }
+        // A token sees only its own org, and says what it may do.
+        Identity::ApiToken(t) => (t.user, vec![t.org], Some(json!({ "id": t.id, "name": t.name, "scope": t.scope }))),
     };
-    Ok(Json(json!({ "user": user, "orgs": orgs })).into_response())
+    let mut v = json!({ "user": user, "orgs": orgs });
+    if let Some(t) = token {
+        v["token"] = t;
+    }
+    Ok(Json(v).into_response())
 }
 
 /// The org named in a path (id or slug): the caller's current org, or another org they belong to.
@@ -1107,6 +1134,43 @@ async fn add_member(State(state): State<AppState>, Extension(caller): Extension<
         tenancy::AddMember::Added(u) => Ok(Json(json!({ "login": u.login, "role": role }))),
         tenancy::AddMember::NoSuchUser => Err(ApiError(StatusCode::NOT_FOUND, "no Sidefleet user with that GitHub login; they need to sign in once first".into())),
     }
+}
+
+// ---- API tokens ----
+
+/// The caller's own API tokens in the current org (the page or the developer key; a token
+/// can't reach these routes).
+async fn list_api_tokens(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(json!(tenancy::list_api_tokens(&state.pool, caller.org_id(), caller.user_id()).await?)))
+}
+
+#[derive(Deserialize)]
+struct ApiTokenReq {
+    name: String,
+    scope: String,
+}
+
+/// Mint an API token that acts as the caller in the current org. The value is in this response only.
+async fn create_api_token(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Json(req): Json<ApiTokenReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let name = check_name(&req.name, "token name")?;
+    let scope = tenancy::Scope::parse(req.scope.trim()).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "scope must be one of read, tasks, full".into()))?;
+    let (token, value) = tenancy::create_api_token(&state.pool, caller.org_id(), caller.user_id(), &name, scope).await?;
+    tracing::info!(org = %caller.org_id(), token = %token.id, scope = scope.as_str(), "API token created");
+    let mut v = json!(token);
+    v["token"] = json!(value);
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+async fn revoke_api_token(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let t = tenancy::revoke_api_token(&state.pool, caller.org_id(), caller.user_id(), id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
+    tracing::info!(org = %caller.org_id(), token = %id, "API token revoked");
+    Ok(Json(json!(t)))
 }
 
 async fn list_tokens(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

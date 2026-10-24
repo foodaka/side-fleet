@@ -68,7 +68,7 @@
 			</nav>
 			<div class="nav-end">
 				<a class="nav-gh" href="https://github.com/foodaka/side-fleet"><svg><use href="#i-github" /></svg><span>GitHub</span></a>
-				<a class="btn btn-dark btn-sm" href="#install">Install</a>
+				<a class="btn btn-dark btn-sm" href="https://app.sidefleet.xyz/auth/github/login">Start free</a>
 			</div>
 		</div>
 	</header>
@@ -93,10 +93,10 @@
 				<h1 id="hero-title">Your machines.<br />Your agents.<br />One page.</h1>
 				<p class="lede">Type a task on any device. A machine you own picks it up and runs <span class="chip"><svg><use href="#i-claude" /></svg>Claude&nbsp;Code</span>, <span class="chip"><svg><use href="#i-codex" /></svg>Codex</span> or <span class="chip"><svg><use href="#i-opencode" /></svg>opencode</span> in its own worktree, streaming every step back live.</p>
 				<div class="ctas">
-					<a class="btn btn-dark" href="#install">Install Sidefleet</a>
-					<a class="btn btn-light" href="https://github.com/foodaka/side-fleet"><svg><use href="#i-github" /></svg>View on GitHub</a>
+					<a class="btn btn-dark" href="https://app.sidefleet.xyz/auth/github/login"><svg><use href="#i-github" /></svg>Start free with GitHub</a>
+					<a class="btn btn-light" href="#install">Host it yourself</a>
 				</div>
-				<p class="fine">MIT licensed · One Rust binary · macOS and Linux</p>
+				<p class="fine">Free for 2 machines · Open-source worker · macOS and Linux</p>
 			</div>
 
 			<ul class="hero-nodes" aria-label="Example machines">
@@ -368,11 +368,36 @@
 
 			<div class="gap"></div>
 
+			<!-- ───────────────────────── Hosted ───────────────────────── -->
+			<section class="cell hosted reveal" id="hosted" aria-labelledby="hosted-title">
+				<div class="hosted-copy">
+					<span class="eyebrow">Hosted · Free for 2 machines</span>
+					<h2 id="hosted-title">Start in two minutes. No server to run.</h2>
+					<p>Sign in with GitHub and connect a machine. We run the page and the database; the agents and your code stay on your machines.</p>
+				</div>
+				<div class="install-cmds">
+					<div class="cmd">
+						<small>1 · Sign in</small>
+						<a class="btn btn-dark" href="https://app.sidefleet.xyz/auth/github/login"><svg><use href="#i-github" /></svg>Sign in with GitHub</a>
+					</div>
+					<div class="cmd">
+						<small>2 · Install on a machine with Claude Code, Codex or opencode</small>
+						<div class="cmd-line"><code>curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh" aria-label="Copy install command"><svg><use href="#i-copy" /></svg></button></div>
+					</div>
+					<div class="cmd">
+						<small>3 · Connect it, then approve the code it prints on the page</small>
+						<div class="cmd-line"><code>sidefleet connect --control https://app.sidefleet.xyz</code><button class="copy" data-copy="sidefleet connect --control https://app.sidefleet.xyz" aria-label="Copy connect command"><svg><use href="#i-copy" /></svg></button></div>
+					</div>
+				</div>
+			</section>
+
+			<div class="gap"></div>
+
 			<!-- ───────────────────────── Install ───────────────────────── -->
 			<section class="cell install reveal" id="install" aria-labelledby="install-title">
 				<div class="install-copy">
-					<h2 id="install-title">Free, open source, and yours</h2>
-					<p>Downloads a prebuilt <code>sidefleet</code> into <code>~/.local/bin</code> with no sudo, or builds from source when there's no release for your platform.</p>
+					<h2 id="install-title">Or host it yourself</h2>
+					<p>Everything is MIT licensed: run the page and Postgres on your own box, with no limits. The install line downloads a prebuilt <code>sidefleet</code> into <code>~/.local/bin</code> with no sudo, or builds from source when there's no release for your platform.</p>
 				</div>
 				<div class="install-cmds">
 					<div class="cmd">
@@ -392,33 +417,15 @@
 
 			<div class="gap"></div>
 
-			<!-- ───────────────────────── Hosted ───────────────────────── -->
-			<section class="cell hosted reveal" id="hosted" aria-labelledby="hosted-title">
-				<div class="hosted-copy">
-					<span class="eyebrow">Hosted · Early access</span>
-					<h2 id="hosted-title">Rather not run a server? We'll host it.</h2>
-					<p>Sign in with GitHub and connect your machines. There's no control plane or Postgres to keep running. The agents and your code still stay on your machines.</p>
-				</div>
-				<form class="ea" id="early-access" novalidate>
-					<label class="ea-f"><span>Email</span><input type="email" name="email" autocomplete="email" placeholder="you@example.com" required maxlength="254" /></label>
-					<label class="ea-f"><span>What would you run on it? <em>Optional</em></span><input type="text" name="note" maxlength="500" placeholder="Two Macs and a VPS, mostly Claude Code" /></label>
-					<label class="ea-hp" aria-hidden="true">Company <input type="text" name="company" tabindex="-1" autocomplete="off" /></label>
-					<button class="btn btn-dark" type="submit">Request early access</button>
-					<p class="ea-msg" role="status" aria-live="polite">One email when there's a spot for you. Nothing else.</p>
-				</form>
-			</section>
-
-			<div class="gap"></div>
-
 			<!-- ───────────────────────── FAQ ───────────────────────── -->
 			<section class="cell faq reveal" id="faq" aria-labelledby="faq-title">
 				<h2 id="faq-title">Questions</h2>
 				<div class="qs">
 					<details><summary>Does it need API keys?</summary><p>Not for Claude Code or Codex: Sidefleet uses the login already on each machine, so usage counts against that account's plan. opencode brings any other model through its own providers, like OpenRouter or a local Ollama.</p></details>
-					<details><summary>Where does my code go?</summary><p>Nowhere new. Agents run on your machines, in worktrees of checkouts that are already there. The control plane is yours too, and only sees the agent's narration and tool calls, with secrets redacted.</p></details>
+					<details><summary>Where does my code go?</summary><p>Nowhere new. Agents run on your machines, in worktrees of checkouts that are already there. The control plane, yours or the hosted one, only sees the agent's narration and tool calls, with secrets redacted.</p></details>
 					<details><summary>Can I use it from my phone?</summary><p>Yes. The page works on any browser that can reach your control plane. Put it on Tailscale and it's reachable from your phone anywhere, without exposing it to the internet.</p></details>
 					<details><summary>My laptop went to sleep mid-task. Is the work lost?</summary><p>Not if the task has “Move if it drops” on: the worker pushes the task's own <code>sidefleet/…</code> branch as it goes, and another machine with the repo continues from the last pushed commit. Without it, the task stops with the machine.</p></details>
-					<details><summary>Is there a hosted version?</summary><p>It's in early access: the control plane runs for you and you sign in with GitHub. The worker stays open source and runs on your machines, so your code doesn't move. <a href="#hosted">Request early access</a>.</p></details>
+					<details><summary>Is there a hosted version?</summary><p>Yes, at app.sidefleet.xyz: sign in with GitHub and connect up to 2 machines for free. The worker stays open source and runs on your machines, so your code doesn't move. <a href="https://app.sidefleet.xyz/auth/github/login">Start free</a>.</p></details>
 					<details><summary>Which platforms does it run on?</summary><p>macOS (arm64 and x86_64) and Linux (x86_64 and arm64). The control plane needs Postgres; one Docker command sets it up.</p></details>
 					<details><summary>Can I switch agents halfway through a task?</summary><p>Yes: fork the thread from any message into another agent and model. The new agent gets the conversation so far as a transcript and starts from the files as they were at that point.</p></details>
 					<details><summary>Is it OK to run my subscription this way?</summary><p>Sidefleet drives your own sign-ins, headless. Check the terms of your subscriptions for automated or unattended use, and never share or resell access to an account through it.</p></details>
@@ -433,8 +440,8 @@
 				<h2 id="closing-title">Put your machines to work</h2>
 				<p>Your desk Mac, a Mac mini, a VPS. One page to run agents on all of them.</p>
 				<div class="ctas center">
-					<a class="btn btn-dark" href="#install">Install Sidefleet</a>
-					<a class="btn btn-light" href="https://github.com/foodaka/side-fleet"><svg><use href="#i-github" /></svg>Star on GitHub</a>
+					<a class="btn btn-dark" href="https://app.sidefleet.xyz/auth/github/login"><svg><use href="#i-github" /></svg>Start free with GitHub</a>
+					<a class="btn btn-light" href="https://github.com/foodaka/side-fleet">Star on GitHub</a>
 				</div>
 			</section>
 

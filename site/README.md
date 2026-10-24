@@ -14,7 +14,7 @@ python3 -m http.server 8765 -d site
 Live at https://www.sidefleet.xyz (Vercel project `sidefleet`, Stepracers team). Deploy from
 this folder with `vercel deploy --prod --scope stepracers --project sidefleet`; `vercel.json`
 sets caching and `.vercelignore` keeps the brand sources out. Vercel Web Analytics is on for
-the project, with events for the install, copy and GitHub clicks.
+the project, with events for the sign-in, install, copy and GitHub clicks.
 
 ## Brand
 

@@ -3,7 +3,8 @@
 //! stand-in for GitHub's OAuth endpoints for the hosted mode.
 //! Requires Postgres; see README ("docker compose up -d").
 
-use crate::{AppState, Config, GithubOAuth};
+use crate::{AppState, Config, GithubOAuth, Telegram};
+use std::sync::{Arc, Mutex};
 use sqlx::{Connection, PgConnection, PgPool};
 
 pub const DEV_KEY: &str = "test-dev-key-0000";
@@ -59,6 +60,7 @@ impl TestEnv {
             host_worker: None,
             github: None,
             public_url: None,
+            telegram: None,
         };
         tweak(&mut config);
         let state = AppState::new(pool.clone(), config);
@@ -175,5 +177,34 @@ impl FakeGithub {
             token_url: format!("{base}/login/oauth/access_token"),
             api_url: base,
         }
+    }
+}
+
+/// Telegram's sendMessage, faked: records the bot token from the path and the
+/// JSON body of every message.
+pub struct FakeTelegram;
+
+/// Messages a [`FakeTelegram`] received, as (bot token, body).
+pub type SentMessages = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+impl FakeTelegram {
+    pub async fn start() -> (Telegram, SentMessages) {
+        use axum::{extract::{Json, Path, State}, routing::post, Router};
+        use serde_json::{json, Value};
+
+        let sent: SentMessages = Arc::default();
+        let app = Router::new()
+            .route("/{bot}/sendMessage", post(|State(sent): State<SentMessages>, Path(bot): Path<String>, Json(v): Json<Value>| async move {
+                let token = bot.strip_prefix("bot").unwrap_or_default().to_string();
+                sent.lock().unwrap().push((token, v));
+                Json(json!({ "ok": true }))
+            }))
+            .with_state(sent.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (Telegram { bot_token: "123:test".into(), chat_id: "42".into(), api_url: base }, sent)
     }
 }

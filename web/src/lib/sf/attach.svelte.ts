@@ -21,6 +21,9 @@ export class Attachments {
 	/** A file is being dragged over the page. */
 	dragging = $state(false);
 	#depth = 0;
+	/** Thumbnail keys. Not crypto.randomUUID: that only exists on https or localhost, and the
+	 * control plane is often reached over plain http (a Tailscale address). */
+	#next = 0;
 
 	add(files: Iterable<File>) {
 		const skipped: string[] = [];
@@ -29,7 +32,7 @@ export class Attachments {
 			else if (file.size > MAX_BYTES) skipped.push(`${file.name || 'That image'} is over 10 MB`);
 			else if (this.items.length >= MAX_IMAGES) skipped.push(`At most ${MAX_IMAGES} images per message`);
 			else if (this.items.reduce((n, a) => n + a.file.size, file.size) > MAX_TOTAL_BYTES) skipped.push('The images add up to more than 40 MB');
-			else this.items.push({ key: crypto.randomUUID(), file, url: URL.createObjectURL(file) });
+			else this.items.push({ key: String(this.#next++), file, url: URL.createObjectURL(file) });
 		}
 		if (skipped.length) toast.error(skipped.length === 1 ? 'Could not attach it' : `Could not attach ${skipped.length} files`, { description: [...new Set(skipped)].join('. ') });
 	}

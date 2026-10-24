@@ -60,6 +60,18 @@
 		}
 		requesting = false;
 	}
+
+	/** Forget an offline machine (frees a slot on the plan). It comes back if it connects again with a valid token. */
+	async function remove() {
+		if (!confirm(`Remove ${w.display_name}? It reappears if it connects again; revoke its token to keep it out.`)) return;
+		try {
+			await api(`/v1/workers/${encodeURIComponent(w.id)}`, { method: 'DELETE' });
+			toast(`Removed ${w.display_name}`);
+			await fleet.refresh();
+		} catch (e) {
+			toast.error('Could not remove the machine', { description: (e as Error).message });
+		}
+	}
 </script>
 
 <article
@@ -171,7 +183,9 @@
 		<span class="min-w-0 truncate text-muted-foreground" title={c.version}>
 			{#if build.sha}Sidefleet {build.version}, build <span class="font-mono">{build.sha}</span>{:else}Version unknown{/if}
 		</span>
-		{#if w.update_requested}
+		{#if !w.online}
+			<button type="button" class="shrink-0 text-muted-foreground hover:text-err-ink" onclick={remove}>Remove</button>
+		{:else if w.update_requested}
 			<span class="flex shrink-0 items-center gap-1.5 text-run-ink"><RefreshCw class="size-3.5 animate-spin [animation-duration:2.5s]" />Updating when idle</span>
 		{:else if w.outdated && w.online}
 			<Button size="sm" variant="outline" class="h-7 shrink-0 rounded-full border-queue/50 text-queue-ink" onclick={update} disabled={requesting}>Update to latest</Button>

@@ -2,6 +2,8 @@
 
 **Run coding agents on your own machines, from anywhere.**
 
+[Website](https://www.sidefleet.xyz) · [Install](#install) · [Quick start](#quick-start) · [API](docs/API.md)
+
 > [!NOTE]
 > Sidefleet is under active development: expect rough edges, and things may change between
 > versions.
@@ -9,7 +11,7 @@
 Type a task on a web page, pick an agent, a model and a repo, and a machine you own picks it up:
 your desk Mac, a Mac mini, a VPS. It runs Claude Code, Codex or opencode in its own git worktree
 and streams the agent's narration back live; reply to keep the conversation going. No API keys for
-Claude or Codex: it drives the sign-in already on that machine. opencode brings any other model
+Claude or Codex: it uses the login already on that machine. opencode brings any other model
 (Kimi, GLM, DeepSeek, Qwen through OpenRouter, or local ones). No open ports: machines only make
 outbound calls to your control plane. One Rust binary, macOS and Linux.
 
@@ -107,9 +109,9 @@ sidefleet serve
 ```
 Sidefleet control plane is running.
 
-  Open the page:        http://192.168.1.20:7373/
+  Open the page:        http://<this-machine>:7373/
   Developer key:        3f9c…
-  Connect a machine:    sidefleet connect --control http://192.168.1.20:7373 --token 7b2e…
+  Connect a machine:    sidefleet connect --control http://<this-machine>:7373 --token 7b2e…
 ```
 
 Keys are saved to `~/.sidefleet/server.env`. If the machine has a coding agent installed, `serve`
@@ -124,6 +126,15 @@ heartbeat lands.
 Across networks, put the control plane on [Tailscale](https://tailscale.com) and use its tailnet
 IP: no port forwarding, no public exposure. Running it on a VPS or a spare machine is covered in
 [HOSTING.md](HOSTING.md).
+
+**No token at hand?** `sidefleet connect --control <url>` without `--token` asks the control plane
+to let the machine in: it prints a link and a short code, and the machine joins once someone
+approves it under Pending machines on the Machines page (the request expires after ten minutes).
+
+**Hosted, multi-tenant mode.** Setting `SIDEFLEET_GITHUB_CLIENT_ID`,
+`SIDEFLEET_GITHUB_CLIENT_SECRET` and `SIDEFLEET_PUBLIC_URL` turns on GitHub sign-in, orgs, per-org
+worker tokens and plan limits. What it stores and how to deploy or try it locally:
+[HOSTED.md](HOSTED.md).
 
 ## Agents
 
@@ -152,6 +163,7 @@ sidefleet serve                       # control plane on :7373, plus a local wor
 sidefleet serve --no-worker           # control plane only
 sidefleet serve --install-service     # run serve as a background service
 sidefleet connect --control <url> --token <t>   # register this machine, install the service
+sidefleet connect --control <url>     # no token: wait for approval on the Machines page
 sidefleet connect … --name "Mac mini" --parallel 3 --permission-mode bypassPermissions
 sidefleet status                      # saved settings, service and process state, log path
 sidefleet disconnect                  # remove the service (settings kept)
@@ -186,6 +198,8 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
 - `crates/worker`: machine detection, control-plane client, process-group executor, worker loop.
 - `crates/cli`: the `sidefleet` binary.
 - `web/`: the web UI, SvelteKit + shadcn-svelte. See [web/README.md](web/README.md).
+- `site/`: the website at [www.sidefleet.xyz](https://www.sidefleet.xyz), one static page. See
+  [site/README.md](site/README.md).
 
 ## Known limitations
 
@@ -193,8 +207,11 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
   uses). Usage counts against those accounts' plans or bills. Check the terms that apply to your
   subscriptions for automated or unattended use, and never share or resell access to an account
   through it.
-- One shared developer key, no users or roles, no built-in TLS. Keep the control plane on a private
-  network (LAN or Tailscale), or put TLS in front of it.
+- Self-hosted, there is a single shared developer key and no TLS of its own. Keep that control
+  plane on a private network (LAN or Tailscale), or run the hosted mode behind TLS
+  ([HOSTED.md](HOSTED.md)).
+- The control plane runs as one process: live events fan out in memory, so it does not scale out
+  to several instances yet.
 - A thread keeps the agent it started with; to switch, fork it. A fork's agent gets a transcript
   of the messages, replies and tool calls (the newest 32 KB), not the original session, so it
   doesn't see tool output or the agent's thinking.

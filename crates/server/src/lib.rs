@@ -5,7 +5,10 @@ pub mod auth;
 pub mod db;
 pub mod events;
 pub mod fork;
+pub mod notify;
+pub mod oauth;
 pub mod routes;
+pub mod tenancy;
 pub mod test_support;
 
 use std::sync::Arc;
@@ -15,36 +18,115 @@ use sqlx::PgPool;
 pub use routes::router;
 
 /// Runtime configuration, normally read from the environment by `main`.
+///
+/// Single-tenant (self-hosting): `dev_key` and `worker_tokens` are set and
+/// everything happens in the default org. Hosted: `github` is set, people sign
+/// in and work in their own orgs; the key and static tokens are optional and,
+/// when present, still act in the default org.
 #[derive(Clone)]
 pub struct Config {
-    /// Bearer key for the developer API and the web page.
+    /// Bearer key for the developer API and the web page (empty: disabled).
     pub dev_key: String,
-    /// Accepted worker tokens (one per machine, or one shared).
+    /// Accepted static worker tokens (one per machine, or one shared); default org.
     pub worker_tokens: Vec<String>,
     /// Build of this control plane, shown on the page and sent to workers.
     pub build: String,
     /// Worker id of the machine hosting this control plane, when `serve` runs a
     /// built-in worker. The page puts it at the centre of the fleet map.
     pub host_worker: Option<String>,
+    /// GitHub sign-in; turns on multi-tenant mode.
+    pub github: Option<GithubOAuth>,
+    /// Public address of this control plane (`https://app.sidefleet.xyz`), used for
+    /// OAuth redirects, connect commands and secure cookies. Taken from the
+    /// request's Host header when unset.
+    pub public_url: Option<String>,
+    /// Telegram chat told about every new sign-up (hosted mode). Optional.
+    pub telegram: Option<Telegram>,
+}
+
+/// A GitHub OAuth app. The URLs are configurable so tests can stand in for GitHub.
+#[derive(Clone)]
+pub struct GithubOAuth {
+    pub client_id: String,
+    pub client_secret: String,
+    pub authorize_url: String,
+    pub token_url: String,
+    pub api_url: String,
+}
+
+impl GithubOAuth {
+    pub fn new(client_id: String, client_secret: String) -> Self {
+        Self {
+            client_id,
+            client_secret,
+            authorize_url: "https://github.com/login/oauth/authorize".into(),
+            token_url: "https://github.com/login/oauth/access_token".into(),
+            api_url: "https://api.github.com".into(),
+        }
+    }
+}
+
+/// A Telegram bot and the chat it posts to. The API URL is configurable so tests
+/// can stand in for Telegram.
+#[derive(Clone)]
+pub struct Telegram {
+    pub bot_token: String,
+    pub chat_id: String,
+    pub api_url: String,
+}
+
+impl Telegram {
+    pub fn new(bot_token: String, chat_id: String) -> Self {
+        Self { bot_token, chat_id, api_url: "https://api.telegram.org".into() }
+    }
+}
+
+fn env_nonempty(k: &str) -> Option<String> {
+    std::env::var(k).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let dev_key = std::env::var("SIDEFLEET_DEV_KEY")
-            .map_err(|_| anyhow::anyhow!("SIDEFLEET_DEV_KEY is not set"))?;
-        let tokens = std::env::var("SIDEFLEET_WORKER_TOKENS")
-            .or_else(|_| std::env::var("SIDEFLEET_WORKER_TOKEN"))
-            .map_err(|_| anyhow::anyhow!("SIDEFLEET_WORKER_TOKENS is not set"))?;
+        let github = match (
+            env_nonempty("SIDEFLEET_GITHUB_CLIENT_ID").or_else(|| env_nonempty("GITHUB_CLIENT_ID")),
+            env_nonempty("SIDEFLEET_GITHUB_CLIENT_SECRET").or_else(|| env_nonempty("GITHUB_CLIENT_SECRET")),
+        ) {
+            (Some(id), Some(secret)) => Some(GithubOAuth::new(id, secret)),
+            (None, None) => None,
+            _ => anyhow::bail!("set both SIDEFLEET_GITHUB_CLIENT_ID and SIDEFLEET_GITHUB_CLIENT_SECRET for GitHub sign-in"),
+        };
+        let telegram = match (env_nonempty("TELEGRAM_BOT_TOKEN"), env_nonempty("TELEGRAM_CHAT_ID")) {
+            (Some(token), Some(chat)) => Some(Telegram::new(token, chat)),
+            (None, None) => None,
+            _ => anyhow::bail!("set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for sign-up messages"),
+        };
+        let dev_key = env_nonempty("SIDEFLEET_DEV_KEY").unwrap_or_default();
+        let tokens = env_nonempty("SIDEFLEET_WORKER_TOKENS").or_else(|| env_nonempty("SIDEFLEET_WORKER_TOKEN")).unwrap_or_default();
         let worker_tokens: Vec<String> = tokens
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        anyhow::ensure!(!worker_tokens.is_empty(), "SIDEFLEET_WORKER_TOKENS is empty");
-        anyhow::ensure!(dev_key.len() >= 8, "SIDEFLEET_DEV_KEY must be at least 8 characters");
+        if github.is_none() {
+            // Single-tenant: the key and at least one token are how anyone gets in.
+            anyhow::ensure!(!dev_key.is_empty(), "SIDEFLEET_DEV_KEY is not set");
+            anyhow::ensure!(!worker_tokens.is_empty(), "SIDEFLEET_WORKER_TOKENS is not set");
+        }
+        anyhow::ensure!(dev_key.is_empty() || dev_key.len() >= 8, "SIDEFLEET_DEV_KEY must be at least 8 characters");
         let build = std::env::var("SIDEFLEET_BUILD").unwrap_or_else(|_| "dev".into());
-        let host_worker = std::env::var("SIDEFLEET_HOST_WORKER").ok().filter(|s| !s.is_empty());
-        Ok(Self { dev_key, worker_tokens, build, host_worker })
+        let host_worker = env_nonempty("SIDEFLEET_HOST_WORKER");
+        let public_url = env_nonempty("SIDEFLEET_PUBLIC_URL").map(|u| u.trim_end_matches('/').to_string());
+        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, telegram })
+    }
+
+    /// Hosted (multi-tenant) mode: people sign in and have their own orgs.
+    pub fn hosted(&self) -> bool {
+        self.github.is_some()
+    }
+
+    /// Cookies get `Secure` when the public address is HTTPS.
+    pub fn secure_cookies(&self) -> bool {
+        self.public_url.as_deref().is_some_and(|u| u.starts_with("https://"))
     }
 }
 

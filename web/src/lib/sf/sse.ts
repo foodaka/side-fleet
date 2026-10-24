@@ -1,9 +1,9 @@
-import { currentKey } from './api';
+import { authHeaders } from './api';
 import type { RunEvent } from './types';
 
 /**
  * Follow a run's event stream: replay from the start, then live. Uses fetch
- * (EventSource cannot send an Authorization header) and resumes with
+ * (EventSource cannot send the Authorization or org header) and resumes with
  * Last-Event-ID after a dropped connection. Resolves when the run ends.
  */
 export async function followRun(
@@ -16,7 +16,8 @@ export async function followRun(
 	while (!signal.aborted) {
 		try {
 			const r = await fetch(`/v1/runs/${runId}/events`, {
-				headers: { Authorization: 'Bearer ' + currentKey(), 'Last-Event-ID': String(lastSeq) },
+				headers: authHeaders(new Headers({ 'Last-Event-ID': String(lastSeq) })),
+				credentials: 'same-origin',
 				signal
 			});
 			if (!r.ok || !r.body) throw new Error('stream ' + r.status);

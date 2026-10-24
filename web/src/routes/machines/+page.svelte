@@ -6,6 +6,8 @@
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import MachineCard from '#lib/sf/ui/MachineCard.svelte';
 	import FleetMap from '#lib/sf/ui/FleetMap.svelte';
+	import PendingMachines from '#lib/sf/ui/PendingMachines.svelte';
+	import WorkerTokens from '#lib/sf/ui/WorkerTokens.svelte';
 
 	let hover = $state<string | null>(null);
 
@@ -13,6 +15,7 @@
 	const busy = $derived(fleet.runs.filter((r) => r.thread_status === 'running').length);
 	const slotsTotal = $derived(fleet.online.reduce((a, w) => a + (w.capabilities.slots?.parallel ?? 0), 0));
 	const outdated = $derived(fleet.workers.filter((w) => w.online && w.outdated && !w.update_requested).length);
+	const limits = $derived(fleet.org?.limits);
 </script>
 
 <svelte:head><title>Machines · Sidefleet</title></svelte:head>
@@ -24,12 +27,19 @@
 			<p class="mt-1 text-[13px] text-muted-foreground">
 				{`${fleet.online.length} of ${fleet.workers.length} online, ${busy} of ${slotsTotal} task slots busy.` + (outdated ? ` ${outdated} ${outdated === 1 ? 'runs' : 'run'} an older build than this control plane.` : '')}
 			</p>
+			{#if limits && fleet.org}
+				<p class="mt-0.5 text-xs text-muted-foreground">
+					{fleet.org.name} is on the {fleet.org.plan} plan: {fleet.workers.length} of {limits.machines} machines, up to {limits.parallel_runs} tasks queued or running at once.
+				</p>
+			{/if}
 		</div>
 		<div class="flex gap-2">
 			<Button variant="outline" class="h-8 rounded-full text-[13px]" onclick={() => (fleet.pickerOpen = true)}>Choose repos</Button>
 			<Button class="h-8 rounded-full text-[13px]" onclick={() => (fleet.addMachineOpen = true)}><Plus class="size-4" />Add machine</Button>
 		</div>
 	</header>
+
+	<PendingMachines />
 
 	{#if sorted.length}
 		<FleetMap bind:hover />
@@ -43,6 +53,8 @@
 			<AddMachine />
 		</div>
 	{/if}
+
+	<WorkerTokens />
 </section>
 
 <Dialog.Root bind:open={fleet.addMachineOpen}>

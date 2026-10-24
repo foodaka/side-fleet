@@ -1,7 +1,7 @@
 <script lang="ts">
 	// How to put a machine on the fleet. Used inline for onboarding and as a dialog on Machines.
 	import Command from './Command.svelte';
-	import { agentPrompt, connectCmd, installCmd } from '../state.svelte';
+	import { agentPrompt, connectCmd, fleet, installCmd } from '../state.svelte';
 	let { compact = false }: { compact?: boolean } = $props();
 	let mode = $state<'terminal' | 'agent'>('terminal');
 	const origin = location.origin;
@@ -21,7 +21,7 @@
 				<Command shown={installCmd} />
 			</li>
 			<li class="flex flex-col gap-2">
-				<span class="text-[13px]"><span class="tnum mr-2 text-muted-foreground">2</span>Connect it. It checks which agents are installed and signed in, finds your git checkouts, and stays connected after a reboot.</span>
+				<span class="text-[13px]"><span class="tnum mr-2 text-muted-foreground">2</span>Connect it. It checks which agents are installed and signed in, finds your git checkouts, and stays connected after a reboot.{#if !fleet.setup?.worker_token}{' '}It prints a link and a code: approve the machine on the Machines page.{/if}</span>
 				<Command shown={connectCmd(true)} copy={connectCmd(false)} />
 			</li>
 		</ol>

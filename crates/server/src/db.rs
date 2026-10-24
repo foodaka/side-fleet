@@ -51,17 +51,18 @@ fn row_to_event(r: &PgRow) -> RunEvent {
     }
 }
 
-pub async fn set_update_requested(pool: &PgPool, id: &str, value: bool) -> sqlx::Result<bool> {
-    let res = sqlx::query("UPDATE workers SET update_requested = $2 WHERE id = $1")
+pub async fn set_update_requested(pool: &PgPool, org: Uuid, id: &str, value: bool) -> sqlx::Result<bool> {
+    let res = sqlx::query("UPDATE workers SET update_requested = $2 WHERE id = $1 AND org_id = $3")
         .bind(id)
         .bind(value)
+        .bind(org)
         .execute(pool)
         .await?;
     Ok(res.rows_affected() == 1)
 }
 
-pub async fn update_requested(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT update_requested FROM workers WHERE id = $1").bind(id).fetch_optional(pool).await?;
+pub async fn update_requested(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT update_requested FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await?;
     Ok(row.map(|r| r.get::<bool, _>("update_requested")).unwrap_or(false))
 }
 
@@ -99,9 +100,11 @@ async fn append_event_locked(
     Ok(row_to_event(&row))
 }
 
-async fn lock_run(tx: &mut Transaction<'_, Postgres>, run_id: Uuid) -> sqlx::Result<Option<Run>> {
-    let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1 FOR UPDATE"))
+/// Lock a run row. With `org`, a run of another org is treated as missing.
+async fn lock_run(tx: &mut Transaction<'_, Postgres>, org: Option<Uuid>, run_id: Uuid) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1 AND ($2::uuid IS NULL OR org_id = $2) FOR UPDATE"))
         .bind(run_id)
+        .bind(org)
         .fetch_optional(&mut **tx)
         .await?;
     Ok(row.as_ref().map(row_to_run))
@@ -124,13 +127,13 @@ pub struct NewRun<'a> {
     pub images: &'a [ImageUpload],
 }
 
-pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
+pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
     let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id, failover, images } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images, org_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -142,6 +145,7 @@ pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, Ru
     .bind(agent.as_str())
     .bind(failover)
     .bind(json!([]))
+    .bind(org)
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
@@ -152,13 +156,14 @@ pub async fn create_run(pool: &PgPool, new: NewRun<'_>) -> sqlx::Result<(Run, Ru
 }
 
 /// Archive or unarchive the thread `run_id` belongs to. Returns its root, or None if there is no such run.
-pub async fn set_archived(pool: &PgPool, run_id: Uuid, archived: bool) -> sqlx::Result<Option<Run>> {
+pub async fn set_archived(pool: &PgPool, org: Uuid, run_id: Uuid, archived: bool) -> sqlx::Result<Option<Run>> {
     let row = sqlx::query(&format!(
         "UPDATE runs SET archived_at = CASE WHEN $2 THEN COALESCE(archived_at, now()) END
-         WHERE id = (SELECT COALESCE(parent_id, id) FROM runs WHERE id = $1) RETURNING {RUN_COLS}"
+         WHERE id = (SELECT COALESCE(parent_id, id) FROM runs WHERE id = $1 AND org_id = $3) RETURNING {RUN_COLS}"
     ))
     .bind(run_id)
     .bind(archived)
+    .bind(org)
     .fetch_optional(pool)
     .await?;
     Ok(row.as_ref().map(row_to_run))
@@ -202,8 +207,10 @@ pub fn session_for(thread: &[Run], agent: Agent, worker: Option<&str>) -> Option
 /// agents: the new one starts a session of its own in the same worktree, with
 /// a transcript of the thread so far (written at claim time, once the messages
 /// before it have finished).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_follow_up(
     pool: &PgPool,
+    org: Uuid,
     run_id: Uuid,
     task: &str,
     agent: Option<Agent>,
@@ -211,11 +218,11 @@ pub async fn create_follow_up(
     permission_mode: Option<&str>,
     images: &[ImageUpload],
 ) -> sqlx::Result<FollowUpOutcome> {
-    let Some(any) = get_run(pool, run_id).await? else {
+    let Some(any) = get_run(pool, org, run_id).await? else {
         return Ok(FollowUpOutcome::NotFound);
     };
     let root_id = any.parent_id.unwrap_or(any.id);
-    let thread = thread_runs(pool, root_id).await?;
+    let thread = thread_runs(pool, org, root_id).await?;
     let Some(latest) = thread.last().cloned() else {
         return Ok(FollowUpOutcome::NotFound);
     };
@@ -241,7 +248,7 @@ pub async fn create_follow_up(
     let machine = thread.iter().rev().find_map(|r| r.worker_id.clone());
     if agent != latest.agent {
         if let Some(w) = &machine {
-            if !worker_has_agent(pool, w, agent).await? {
+            if !worker_has_agent(pool, org, w, agent).await? {
                 return Ok(FollowUpOutcome::AgentMissing(w.clone()));
             }
         }
@@ -252,8 +259,8 @@ pub async fn create_follow_up(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover, images)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover, images, org_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -267,6 +274,7 @@ pub async fn create_follow_up(
     .bind(agent.as_str())
     .bind(latest.failover)
     .bind(json!([]))
+    .bind(org)
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
@@ -294,8 +302,8 @@ fn default_model(agent: Agent) -> &'static str {
 }
 
 /// Whether a machine can run `agent`. Workers from before multi-agent support report no agents and run Claude Code.
-async fn worker_has_agent(pool: &PgPool, worker: &str, agent: Agent) -> sqlx::Result<bool> {
-    let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1").bind(worker).fetch_optional(pool).await?;
+async fn worker_has_agent(pool: &PgPool, org: Uuid, worker: &str, agent: Agent) -> sqlx::Result<bool> {
+    let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1 AND org_id = $2").bind(worker).bind(org).fetch_optional(pool).await?;
     let caps: Option<Capabilities> = caps.and_then(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).ok());
     Ok(caps.is_some_and(|c| {
         let a = c.agents.runnable();
@@ -317,12 +325,12 @@ pub enum RestoreOutcome {
 /// Queue a restore run that puts the thread's worktree back to how it was
 /// before `run_id` started. It runs on the machine holding the snapshot and
 /// keeps the thread's session, so the next message continues the conversation.
-pub async fn create_restore(pool: &PgPool, run_id: Uuid) -> sqlx::Result<RestoreOutcome> {
-    let Some(target) = get_run(pool, run_id).await? else {
+pub async fn create_restore(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Result<RestoreOutcome> {
+    let Some(target) = get_run(pool, org, run_id).await? else {
         return Ok(RestoreOutcome::NotFound);
     };
     let root_id = target.parent_id.unwrap_or(target.id);
-    let thread = thread_runs(pool, root_id).await?;
+    let thread = thread_runs(pool, org, root_id).await?;
     let Some(latest) = thread.last().cloned() else {
         return Ok(RestoreOutcome::NotFound);
     };
@@ -342,8 +350,8 @@ pub async fn create_restore(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Restore
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, session_id, pinned_worker_id, permission_mode, isolation, agent, kind, restore_to)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 'worktree', $9, 'restore', $10) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, session_id, pinned_worker_id, permission_mode, isolation, agent, kind, restore_to, org_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 'worktree', $9, 'restore', $10, $11) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(&task)
@@ -355,6 +363,7 @@ pub async fn create_restore(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Restore
     .bind(&latest.permission_mode)
     .bind(latest.agent.as_str())
     .bind(&before)
+    .bind(org)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -400,14 +409,14 @@ pub enum ForkOutcome {
 /// Start a new thread from `run_id`: its worktree begins with the files as they
 /// were after that message (on the machine that has them), and the agent gets
 /// the conversation up to it as a transcript.
-pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx::Result<ForkOutcome> {
-    let Some(target) = get_run(pool, run_id).await? else {
+pub async fn create_fork(pool: &PgPool, org: Uuid, run_id: Uuid, new: NewFork<'_>) -> sqlx::Result<ForkOutcome> {
+    let Some(target) = get_run(pool, org, run_id).await? else {
         return Ok(ForkOutcome::NotFound);
     };
     if !target.status.is_terminal() {
         return Ok(ForkOutcome::NotFinished(target));
     }
-    let thread = thread_runs(pool, target.parent_id.unwrap_or(target.id)).await?;
+    let thread = thread_runs(pool, org, target.parent_id.unwrap_or(target.id)).await?;
     let upto = thread.iter().position(|r| r.id == run_id).map(|i| i + 1).unwrap_or(thread.len());
     let mut history = Vec::with_capacity(upto);
     for r in thread.into_iter().take(upto) {
@@ -421,7 +430,7 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
     let files_on = target.worker_id.as_deref().filter(|_| fork_commit.is_some());
     let pinned = match new.worker_id.or(files_on) {
         Some(w) => {
-            if !worker_has_agent(pool, w, new.agent).await? {
+            if !worker_has_agent(pool, org, w, new.agent).await? {
                 return Ok(ForkOutcome::AgentMissing(w.to_string()));
             }
             Some(w.to_string())
@@ -433,8 +442,8 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, forked_from, fork_commit, context)
-         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, forked_from, fork_commit, context, org_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10, $11) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(new.task)
@@ -446,6 +455,7 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
     .bind(run_id)
     .bind(&fork_commit)
     .bind(&context)
+    .bind(org)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -455,19 +465,22 @@ pub async fn create_fork(pool: &PgPool, run_id: Uuid, new: NewFork<'_>) -> sqlx:
 }
 
 /// All runs of a thread, root first, in order.
-pub async fn thread_runs(pool: &PgPool, root_id: Uuid) -> sqlx::Result<Vec<Run>> {
+pub async fn thread_runs(pool: &PgPool, org: Uuid, root_id: Uuid) -> sqlx::Result<Vec<Run>> {
     let rows = sqlx::query(&format!(
-        "SELECT {RUN_COLS} FROM runs WHERE id = $1 OR parent_id = $1 ORDER BY created_at"
+        "SELECT {RUN_COLS} FROM runs WHERE (id = $1 OR parent_id = $1) AND org_id = $2 ORDER BY created_at"
     ))
     .bind(root_id)
+    .bind(org)
     .fetch_all(pool)
     .await?;
     Ok(rows.iter().map(row_to_run).collect())
 }
 
-pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
-    let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1"))
+/// A run of `org`; runs of other orgs read as missing.
+pub async fn get_run(pool: &PgPool, org: Uuid, id: Uuid) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1 AND org_id = $2"))
         .bind(id)
+        .bind(org)
         .fetch_optional(pool)
         .await?;
     Ok(row.as_ref().map(row_to_run))
@@ -475,17 +488,18 @@ pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
 
 /// Root runs (threads), newest activity first, with thread status (the running
 /// message if any, else the latest) and follow-up count.
-pub async fn list_runs(pool: &PgPool, limit: i64, archived: bool) -> sqlx::Result<Vec<RunSummary>> {
+pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> sqlx::Result<Vec<RunSummary>> {
     let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
     let rows = sqlx::query(&format!(
         "SELECT {cols},
                 (SELECT count(*) FROM runs f WHERE f.parent_id = r.id) AS follow_ups,
                 (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1) AS thread_status,
                 (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at
-         FROM runs r WHERE r.parent_id IS NULL AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
+         FROM runs r WHERE r.parent_id IS NULL AND r.org_id = $3 AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
     ))
     .bind(limit)
     .bind(archived)
+    .bind(org)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -529,12 +543,13 @@ pub enum AppendOutcome {
 
 pub async fn append_events(
     pool: &PgPool,
+    org: Uuid,
     run_id: Uuid,
     worker_id: &str,
     events: &[sidefleet_core::NewEvent],
 ) -> sqlx::Result<AppendOutcome> {
     let mut tx = pool.begin().await?;
-    let Some(run) = lock_run(&mut tx, run_id).await? else {
+    let Some(run) = lock_run(&mut tx, Some(org), run_id).await? else {
         return Ok(AppendOutcome::NotFound);
     };
     if run.worker_id.as_deref() != Some(worker_id) {
@@ -624,18 +639,22 @@ async fn attach_uploads(tx: &mut Transaction<'_, Postgres>, run_id: Uuid, images
     Ok(refs)
 }
 
-/// An image's media type and bytes.
-pub async fn get_image(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<(String, Vec<u8>)>> {
-    let row = sqlx::query("SELECT media_type, data FROM run_images WHERE id = $1").bind(id).fetch_optional(pool).await?;
+/// An image's media type and bytes, if its run belongs to `org`.
+pub async fn get_image(pool: &PgPool, org: Uuid, id: Uuid) -> sqlx::Result<Option<(String, Vec<u8>)>> {
+    let row = sqlx::query("SELECT i.media_type, i.data FROM run_images i JOIN runs r ON r.id = i.run_id WHERE i.id = $1 AND r.org_id = $2")
+        .bind(id)
+        .bind(org)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|r| (r.get("media_type"), r.get("data"))))
 }
 
 /// Request a stop. A queued run becomes `stopped` immediately; a running run
 /// gets `stop_requested` set for the worker to act on. Returns the run and any
 /// status event to broadcast.
-pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(Run, Option<RunEvent>)>> {
+pub async fn request_stop(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Result<Option<(Run, Option<RunEvent>)>> {
     let mut tx = pool.begin().await?;
-    let Some(run) = lock_run(&mut tx, run_id).await? else {
+    let Some(run) = lock_run(&mut tx, Some(org), run_id).await? else {
         return Ok(None);
     };
     let out = match run.status {
@@ -656,8 +675,9 @@ pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(R
         RunStatus::Running => {
             // If nobody can act on the stop (worker offline or gone), finish it here.
             let worker_online: bool = match &run.worker_id {
-                Some(w) => sqlx::query("SELECT (last_heartbeat_at > now() - interval '45 seconds') AS online FROM workers WHERE id = $1")
+                Some(w) => sqlx::query("SELECT (last_heartbeat_at > now() - interval '45 seconds') AS online FROM workers WHERE id = $1 AND org_id = $2")
                     .bind(w)
+                    .bind(org)
                     .fetch_optional(&mut *tx)
                     .await?
                     .map(|r| r.get::<bool, _>("online"))
@@ -699,14 +719,15 @@ pub async fn request_stop(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<(R
 /// SQL condition: worker `w` could run queued run `r` now. It is online, has
 /// the repo (by identity or path name) and the agent, has not hit that agent's
 /// usage limit, and is not the machine that lost the run (failover). Workers from before multi-agent support report no
-/// agents and run Claude Code.
-const CAN_RUN: &str = "w.last_heartbeat_at > now() - interval '45 seconds'
+/// agents and run Claude Code. Only machines of the run's own org count.
+const CAN_RUN: &str = "w.org_id = r.org_id
+      AND w.last_heartbeat_at > now() - interval '45 seconds'
       AND NOT (w.id = ANY(r.excluded_worker_ids))
       AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(w.capabilities->'repos', '[]'::jsonb)) AS info(repo)
                   WHERE info.repo->>'name' = r.repo OR info.repo->>'id' = r.repo)
       AND (w.capabilities->'agents' ? r.agent
            OR (r.agent = 'claude' AND COALESCE(w.capabilities->'agents', '{}'::jsonb) - 'ollama' = '{}'::jsonb))
-      AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = w.id AND l.agent = r.agent AND l.until > now())";
+      AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.org_id = w.org_id AND l.worker_id = w.id AND l.agent = r.agent AND l.until > now())";
 
 /// How long a new run waits for the least busy machine before any machine that
 /// can run it may take it (that machine may have the repo busy, or be slow to poll).
@@ -719,7 +740,8 @@ pub struct Claimed {
     pub failed: Vec<RunEvent>,
 }
 
-/// Atomically claim the oldest queued run for one of `repos`.
+/// Atomically claim the oldest queued run of `org` for one of `repos`, unless
+/// the org already has `max_running` runs in progress (its plan's parallel limit).
 ///
 /// Least busy first: claims are pulled, so the first machine to ask would win.
 /// When `slots` says how loaded the asking machine is, an unpinned run younger
@@ -732,21 +754,25 @@ pub struct Claimed {
 /// message it replaces), and only by the machine that ran the thread last (where
 /// the session lives); one queued behind a busy run resumes the latest session
 /// there. A moved run itself is exempt: it starts afresh on another machine.
+#[allow(clippy::too_many_arguments)]
 pub async fn claim_run(
     pool: &PgPool,
+    org: Uuid,
     worker_id: &str,
     repos: &[String],
     busy_repos: &[String],
     agents: &[String],
     slots: Option<&Slots>,
     kinds: &[String],
+    max_running: Option<i64>,
 ) -> sqlx::Result<Claimed> {
     let free = slots.map(|s| s.parallel.saturating_sub(s.active) as i32);
     if let Some(s) = slots {
-        sqlx::query("UPDATE workers SET slots_parallel = $2, slots_active = $3 WHERE id = $1")
+        sqlx::query("UPDATE workers SET slots_parallel = $2, slots_active = $3 WHERE id = $1 AND org_id = $4")
             .bind(worker_id)
             .bind(s.parallel as i32)
             .bind(s.active as i32)
+            .bind(org)
             .execute(pool)
             .await?;
     }
@@ -754,10 +780,23 @@ pub async fn claim_run(
     // Each pass either claims a run, finds none, or fails one unresumable message and looks again.
     for _ in 0..=MAX_QUEUED_MESSAGES {
         let mut tx = pool.begin().await?;
+        if let Some(max) = max_running {
+            // Serialise claims within the org so two workers cannot both take the last slot.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))").bind(org.to_string()).execute(&mut *tx).await?;
+            let running: i64 = sqlx::query("SELECT count(*) AS n FROM runs WHERE org_id = $1 AND status = 'running'")
+                .bind(org)
+                .fetch_one(&mut *tx)
+                .await?
+                .get("n");
+            if running >= max {
+                tx.commit().await?;
+                return Ok(Claimed { run: None, failed });
+            }
+        }
         let row = sqlx::query(&format!(
             "UPDATE runs SET status = 'running', worker_id = $1, started_at = now()
              WHERE id = (
-                SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.repo = ANY($2)
+                SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.org_id = $9 AND r.repo = ANY($2)
                   AND NOT (r.repo = ANY($3))
                   AND COALESCE(r.pinned_worker_id,
                         (SELECT p.worker_id FROM runs p
@@ -775,7 +814,7 @@ pub async fn claim_run(
                   AND r.agent = ANY($4)
                   AND r.kind = ANY($8)
                   AND (r.forked_from IS NULL OR 'fork' = ANY($8))
-                  AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
+                  AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.org_id = $9 AND l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
                   AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
                        OR (r.parent_id IS NOT NULL AND r.moved_from IS NULL)
                        OR r.created_at < now() - make_interval(secs => $6)
@@ -793,6 +832,7 @@ pub async fn claim_run(
         .bind(LEAST_BUSY_GRACE_SECS as f64)
         .bind(EXCLUSION_GRACE_SECS as f64)
         .bind(kinds)
+        .bind(org)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
@@ -805,7 +845,7 @@ pub async fn claim_run(
             // A message that waited behind another, or one that switches agents: continue this agent's
             // latest session on this machine, or hand it a transcript when another agent spoke since.
             // (A run moved to another machine is created after the messages waiting behind it.)
-            let earlier: Vec<Run> = thread_runs(pool, root)
+            let earlier: Vec<Run> = thread_runs(pool, org, root)
                 .await?
                 .into_iter()
                 .filter(|r| r.id != run.id && (r.created_at < run.created_at || r.moved_from.is_some()))
@@ -860,8 +900,9 @@ pub async fn claim_run(
             }
         }
         // One slot fewer free here until the next heartbeat or claim says otherwise.
-        sqlx::query("UPDATE workers SET slots_active = slots_active + 1 WHERE id = $1 AND slots_active IS NOT NULL")
+        sqlx::query("UPDATE workers SET slots_active = slots_active + 1 WHERE id = $1 AND org_id = $2 AND slots_active IS NOT NULL")
             .bind(worker_id)
+            .bind(org)
             .execute(&mut *tx)
             .await?;
         let ev = append_event_locked(
@@ -890,8 +931,10 @@ pub enum FinishOutcome {
 /// How long a machine is left alone after a usage limit with no reset time.
 const DEFAULT_LIMIT_SECS: i64 = 3600;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn finish_run(
     pool: &PgPool,
+    org: Uuid,
     run_id: Uuid,
     worker_id: &str,
     status: RunStatus,
@@ -900,7 +943,7 @@ pub async fn finish_run(
 ) -> sqlx::Result<FinishOutcome> {
     debug_assert!(status.is_terminal());
     let mut tx = pool.begin().await?;
-    let Some(run) = lock_run(&mut tx, run_id).await? else {
+    let Some(run) = lock_run(&mut tx, Some(org), run_id).await? else {
         return Ok(FinishOutcome::NotFound);
     };
     if run.worker_id.as_deref() != Some(worker_id) {
@@ -918,12 +961,13 @@ pub async fn finish_run(
             .filter(|t| *t > now && *t < now + chrono::Duration::days(8))
             .unwrap_or(now + chrono::Duration::seconds(DEFAULT_LIMIT_SECS));
         sqlx::query(
-            "INSERT INTO worker_limits (worker_id, agent, until) VALUES ($1, $2, $3)
-             ON CONFLICT (worker_id, agent) DO UPDATE SET until = EXCLUDED.until",
+            "INSERT INTO worker_limits (worker_id, agent, until, org_id) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (org_id, worker_id, agent) DO UPDATE SET until = EXCLUDED.until",
         )
         .bind(worker_id)
         .bind(run.agent.as_str())
         .bind(until)
+        .bind(org)
         .execute(&mut *tx)
         .await?;
         events.push(
@@ -980,17 +1024,18 @@ pub async fn finish_run(
 /// worker lost them (restart, crash). Mark them finished so stops and replies
 /// are not left waiting forever. A run that had a stop pending becomes
 /// `stopped`; a failover run is moved to another machine; otherwise `failed`.
-pub async fn reconcile_worker_runs(pool: &PgPool, worker_id: &str, active: &[Uuid]) -> sqlx::Result<Vec<RunEvent>> {
-    let rows = sqlx::query("SELECT id FROM runs WHERE status = 'running' AND worker_id = $1 AND NOT (id = ANY($2))")
+pub async fn reconcile_worker_runs(pool: &PgPool, org: Uuid, worker_id: &str, active: &[Uuid]) -> sqlx::Result<Vec<RunEvent>> {
+    let rows = sqlx::query("SELECT id FROM runs WHERE status = 'running' AND worker_id = $1 AND org_id = $3 AND NOT (id = ANY($2))")
         .bind(worker_id)
         .bind(active)
+        .bind(org)
         .fetch_all(pool)
         .await?;
     let mut out = Vec::new();
     for row in rows {
         let id: Uuid = row.get("id");
         let mut tx = pool.begin().await?;
-        let Some(run) = lock_run(&mut tx, id).await? else { continue };
+        let Some(run) = lock_run(&mut tx, Some(org), id).await? else { continue };
         if run.status != RunStatus::Running || active.contains(&id) {
             continue;
         }
@@ -1018,7 +1063,7 @@ pub async fn reconcile_worker_runs(pool: &PgPool, worker_id: &str, active: &[Uui
 /// failover run is moved to another machine instead.
 pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<Vec<RunEvent>> {
     let rows = sqlx::query(
-        "SELECT r.id FROM runs r JOIN workers w ON w.id = r.worker_id
+        "SELECT r.id FROM runs r JOIN workers w ON w.id = r.worker_id AND w.org_id = r.org_id
          WHERE r.status = 'running' AND w.last_heartbeat_at < now() - make_interval(secs => $1)",
     )
     .bind(stale_secs as f64)
@@ -1028,7 +1073,7 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
     for row in rows {
         let id: Uuid = row.get("id");
         let mut tx = pool.begin().await?;
-        let Some(run) = lock_run(&mut tx, id).await? else { continue };
+        let Some(run) = lock_run(&mut tx, None, id).await? else { continue };
         if run.status != RunStatus::Running {
             continue;
         }
@@ -1105,8 +1150,9 @@ async fn move_lost_run(
     let new_id = Uuid::new_v4();
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, parent_id, permission_mode, isolation, agent,
-                           failover, moved_from, resume_from_branch, excluded_worker_ids, images)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, true, $9, $10, ARRAY[$11], $12) RETURNING {RUN_COLS}"
+                           failover, moved_from, resume_from_branch, excluded_worker_ids, images, org_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, true, $9, $10, ARRAY[$11], $12,
+                 (SELECT org_id FROM runs WHERE id = $9)) RETURNING {RUN_COLS}"
     ))
     .bind(new_id)
     .bind(&task)
@@ -1213,15 +1259,16 @@ fn clip(s: &str, max: usize) -> String {
 
 pub async fn upsert_worker(
     pool: &PgPool,
+    org: Uuid,
     id: &str,
     display_name: &str,
     token_hash: &str,
     caps: &Capabilities,
 ) -> sqlx::Result<Worker> {
     let row = sqlx::query(
-        "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active)
-         VALUES ($1, $2, $3, $4, now(), $5, $6)
-         ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name,
+        "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active, org_id)
+         VALUES ($1, $2, $3, $4, now(), $5, $6, $7)
+         ON CONFLICT (org_id, id) DO UPDATE SET display_name = EXCLUDED.display_name,
             token_hash = EXCLUDED.token_hash, capabilities = EXCLUDED.capabilities,
             last_heartbeat_at = now(), update_requested = false,
             slots_parallel = EXCLUDED.slots_parallel, slots_active = EXCLUDED.slots_active
@@ -1233,6 +1280,7 @@ pub async fn upsert_worker(
     .bind(serde_json::to_value(caps).unwrap_or(Value::Null))
     .bind(caps.slots.as_ref().map(|s| s.parallel as i32))
     .bind(caps.slots.as_ref().map(|s| s.active as i32))
+    .bind(org)
     .fetch_one(pool)
     .await?;
     Ok(row_to_worker(&row))
@@ -1241,6 +1289,7 @@ pub async fn upsert_worker(
 /// Returns false when the worker is unknown or registered with a different token.
 pub async fn heartbeat(
     pool: &PgPool,
+    org: Uuid,
     id: &str,
     token_hash: &str,
     caps: &Capabilities,
@@ -1248,44 +1297,79 @@ pub async fn heartbeat(
     let res = sqlx::query(
         "UPDATE workers SET capabilities = $3, last_heartbeat_at = now(),
             slots_parallel = $4, slots_active = $5
-         WHERE id = $1 AND token_hash = $2",
+         WHERE id = $1 AND token_hash = $2 AND org_id = $6",
     )
     .bind(id)
     .bind(token_hash)
     .bind(serde_json::to_value(caps).unwrap_or(Value::Null))
     .bind(caps.slots.as_ref().map(|s| s.parallel as i32))
     .bind(caps.slots.as_ref().map(|s| s.active as i32))
+    .bind(org)
     .execute(pool)
     .await?;
     Ok(res.rows_affected() == 1)
 }
 
-pub async fn worker_owns_token(pool: &PgPool, id: &str, token_hash: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1 AND token_hash = $2")
+pub async fn worker_owns_token(pool: &PgPool, org: Uuid, id: &str, token_hash: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1 AND token_hash = $2 AND org_id = $3")
         .bind(id)
         .bind(token_hash)
+        .bind(org)
         .fetch_optional(pool)
         .await?;
     Ok(row.is_some())
 }
 
-pub async fn worker_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1").bind(id).fetch_optional(pool).await?;
+pub async fn worker_exists(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await?;
     Ok(row.is_some())
 }
 
-pub async fn list_workers(pool: &PgPool) -> sqlx::Result<Vec<Worker>> {
+pub async fn count_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
+    Ok(sqlx::query("SELECT count(*) AS n FROM workers WHERE org_id = $1").bind(org).fetch_one(pool).await?.get("n"))
+}
+
+/// Forget a machine. Its runs stay (without a machine); a worker still holding a
+/// valid token re-registers on its next heartbeat.
+pub async fn delete_worker(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE runs SET worker_id = NULL WHERE org_id = $1 AND worker_id = $2 AND status <> 'running'")
+        .bind(org)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let busy = sqlx::query("SELECT 1 AS ok FROM runs WHERE org_id = $1 AND worker_id = $2").bind(org).bind(id).fetch_optional(&mut *tx).await?;
+    if busy.is_some() {
+        // A run is still in progress there; keep the machine until it ends.
+        return Ok(false);
+    }
+    let res = sqlx::query("DELETE FROM workers WHERE org_id = $1 AND id = $2").bind(org).bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Queued plus running runs, for the plan's parallel limit.
+pub async fn count_active_runs(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
+    Ok(sqlx::query("SELECT count(*) AS n FROM runs WHERE org_id = $1 AND status IN ('queued', 'running')")
+        .bind(org)
+        .fetch_one(pool)
+        .await?
+        .get("n"))
+}
+
+pub async fn list_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<Vec<Worker>> {
     let rows = sqlx::query(
-        "SELECT id, display_name, capabilities, last_heartbeat_at, update_requested FROM workers ORDER BY display_name",
+        "SELECT id, display_name, capabilities, last_heartbeat_at, update_requested FROM workers WHERE org_id = $1 ORDER BY display_name",
     )
+    .bind(org)
     .fetch_all(pool)
     .await?;
     Ok(rows.iter().map(row_to_worker).collect())
 }
 
 /// Agents each machine may not use until their usage limit resets: worker id -> agent -> until.
-pub async fn active_limits(pool: &PgPool) -> sqlx::Result<std::collections::HashMap<String, serde_json::Map<String, Value>>> {
-    let rows = sqlx::query("SELECT worker_id, agent, until FROM worker_limits WHERE until > now()").fetch_all(pool).await?;
+pub async fn active_limits(pool: &PgPool, org: Uuid) -> sqlx::Result<std::collections::HashMap<String, serde_json::Map<String, Value>>> {
+    let rows = sqlx::query("SELECT worker_id, agent, until FROM worker_limits WHERE org_id = $1 AND until > now()").bind(org).fetch_all(pool).await?;
     let mut out: std::collections::HashMap<String, serde_json::Map<String, Value>> = Default::default();
     for r in rows {
         let until: DateTime<Utc> = r.get("until");
@@ -1298,17 +1382,18 @@ pub fn is_online(last_heartbeat_at: DateTime<Utc>) -> bool {
     Utc::now().signed_duration_since(last_heartbeat_at).num_seconds() < 45
 }
 
-pub async fn list_added_repos(pool: &PgPool) -> sqlx::Result<Vec<String>> {
-    let rows = sqlx::query("SELECT name FROM added_repos ORDER BY name").fetch_all(pool).await?;
+pub async fn list_added_repos(pool: &PgPool, org: Uuid) -> sqlx::Result<Vec<String>> {
+    let rows = sqlx::query("SELECT name FROM added_repos WHERE org_id = $1 ORDER BY name").bind(org).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| r.get("name")).collect())
 }
 
 /// Replace the whole added set in one transaction.
-pub async fn set_added_repos(pool: &PgPool, names: &[String]) -> sqlx::Result<()> {
+pub async fn set_added_repos(pool: &PgPool, org: Uuid, names: &[String]) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM added_repos WHERE NOT (name = ANY($1))").bind(names).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO added_repos (name) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING")
+    sqlx::query("DELETE FROM added_repos WHERE org_id = $2 AND NOT (name = ANY($1))").bind(names).bind(org).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO added_repos (org_id, name) SELECT $2, unnest($1::text[]) ON CONFLICT DO NOTHING")
         .bind(names)
+        .bind(org)
         .execute(&mut *tx)
         .await?;
     tx.commit().await

@@ -1,5 +1,6 @@
-//! HTTP surface. Developer routes are protected by `SIDEFLEET_DEV_KEY`, worker
-//! routes by `SIDEFLEET_WORKER_TOKENS`. `/` serves the single-page UI.
+//! HTTP surface. Developer routes take the developer key or a session cookie and
+//! act in the caller's current org; worker routes take a static or per-org
+//! worker token and act in that token's org. `/` serves the single-page UI.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -27,8 +28,10 @@ use tokio::sync::broadcast::error::RecvError;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
-use crate::auth::{self, WorkerTokenHash};
+use crate::auth::{self, Caller, Identity, WorkerAuth};
 use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, RestoreOutcome};
+use crate::oauth::{self, public_base};
+use crate::tenancy::{self, Decide, NewEnrollment, Poll, DEFAULT_ORG};
 use crate::AppState;
 
 /// The web app, built from `web/` with `pnpm build` and committed so a source
@@ -56,9 +59,18 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/images/{id}", get(get_image))
         .route("/v1/workers", get(list_workers))
+        .route("/v1/workers/{id}", axum::routing::delete(delete_worker))
         .route("/v1/workers/{id}/update", post(request_update))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
+        .route("/v1/orgs", post(create_org))
+        .route("/v1/orgs/{org}/tokens", get(list_tokens).post(create_token))
+        .route("/v1/orgs/{org}/tokens/{id}", axum::routing::delete(revoke_token))
+        .route("/v1/orgs/{org}/members", get(list_members).post(add_member))
+        .route("/v1/enrollments", get(list_enrollments))
+        .route("/v1/enrollments/lookup", post(lookup_enrollment))
+        .route("/v1/enrollments/{id}/approve", post(approve_enrollment))
+        .route("/v1/enrollments/{id}/deny", post(deny_enrollment))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()
@@ -69,7 +81,7 @@ pub fn router(state: AppState) -> Router {
         // Events can carry screenshots (base64), well past axum's 2 MB default.
         .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/worker/runs/{id}/control", get(run_control))
-        .route("/v1/worker/images/{id}", get(get_image))
+        .route("/v1/worker/images/{id}", get(worker_get_image))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_worker));
 
@@ -77,8 +89,21 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/_app/{*path}", get(web_asset))
         .route("/robots.txt", get(|| web_file("robots.txt")))
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/favicon.ico", get(|| web_file("favicon.ico")))
+        .route("/apple-touch-icon.png", get(|| web_file("apple-touch-icon.png")))
+        .route("/icon-192.png", get(|| web_file("icon-192.png")))
+        .route("/icon-512.png", get(|| web_file("icon-512.png")))
+        .route("/maskable-512.png", get(|| web_file("maskable-512.png")))
+        .route("/manifest.webmanifest", get(|| web_file("manifest.webmanifest")))
+        .route("/healthz", get(healthz))
         .route("/connect.md", get(connect_md))
+        .route("/auth/github/login", get(oauth::login))
+        .route("/auth/github/callback", get(oauth::callback))
+        .route("/auth/logout", post(oauth::logout))
+        .route("/v1/auth", get(auth_methods))
+        .route("/v1/me", get(me))
+        .route("/v1/enroll", post(enroll))
+        .route("/v1/enroll/{id}", get(enroll_poll))
         .merge(dev)
         .merge(worker)
         .layer(CorsLayer::permissive())
@@ -115,12 +140,19 @@ async fn web_file(path: &str) -> Response {
 /// Instructions an agent on another machine can read to set itself up as a
 /// worker. Contains no secrets, so it is public; the token travels in the
 /// prompt the user pastes, never in this document.
-async fn connect_md(headers: HeaderMap) -> ([(axum::http::HeaderName, &'static str); 1], String) {
-    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:7373");
+async fn connect_md(State(state): State<AppState>, headers: HeaderMap) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     (
         [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-        CONNECT_MD.replace("{{ORIGIN}}", &format!("http://{host}")),
+        CONNECT_MD.replace("{{ORIGIN}}", &public_base(&state, &headers)),
     )
+}
+
+/// Liveness plus a database round trip, for the platform's health check.
+async fn healthz(State(state): State<AppState>) -> Response {
+    match tokio::time::timeout(Duration::from_secs(3), sqlx::query("SELECT 1").execute(&state.pool)).await {
+        Ok(Ok(_)) => "ok".into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
+    }
 }
 
 // ---- errors ----
@@ -144,10 +176,30 @@ fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "run not found".into())
 }
 
+fn forbidden(msg: &str) -> ApiError {
+    ApiError(StatusCode::FORBIDDEN, msg.into())
+}
+
+/// 402: the org's plan does not allow this.
+fn over_limit(caller_plan: &str, what: String) -> ApiError {
+    ApiError(StatusCode::PAYMENT_REQUIRED, format!("{what} on the {caller_plan} plan. Upgrade the org's plan or free one up."))
+}
+
+/// Refuse a new run when the org already has as many in flight as its plan allows.
+async fn check_run_limit(state: &AppState, caller: &Caller) -> Result<(), ApiError> {
+    if let Some(l) = caller.org.limits {
+        if db::count_active_runs(&state.pool, caller.org_id()).await? >= l.parallel_runs {
+            return Err(over_limit(&caller.org.plan, format!("{} runs can be queued or running at once", l.parallel_runs)));
+        }
+    }
+    Ok(())
+}
+
 // ---- developer API ----
 
 async fn create_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<CreateRunRequest>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
     let task = req.task.trim();
@@ -173,11 +225,12 @@ async fn create_run(
     };
     let worker = match req.worker_id.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
+        Some(w) if db::worker_exists(&state.pool, caller.org_id(), w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
     let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover, images: &req.images };
-    let (run, ev) = db::create_run(&state.pool, new).await?;
+    check_run_limit(&state, &caller).await?;
+    let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -207,9 +260,10 @@ fn default_limit() -> i64 {
 
 async fn list_runs(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<RunSummary>>, ApiError> {
-    Ok(Json(db::list_runs(&state.pool, q.limit.clamp(1, 500), q.archived).await?))
+    Ok(Json(db::list_runs(&state.pool, caller.org_id(), q.limit.clamp(1, 500), q.archived).await?))
 }
 
 /// Attached images must be raster images the agents can read, and not too many or too large.
@@ -246,10 +300,11 @@ fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
 /// All runs of the thread this run belongs to, root first.
 async fn get_thread(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Run>>, ApiError> {
-    let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
-    Ok(Json(db::thread_runs(&state.pool, run.parent_id.unwrap_or(run.id)).await?))
+    let run = db::get_run(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
+    Ok(Json(db::thread_runs(&state.pool, caller.org_id(), run.parent_id.unwrap_or(run.id)).await?))
 }
 
 /// Continue the conversation: queue a run that resumes the thread's session, with the same agent
@@ -257,6 +312,7 @@ async fn get_thread(
 /// While an earlier message runs, the new one waits behind it (stop that one to send this now).
 async fn follow_up(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
     Json(req): Json<FollowUpRequest>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
@@ -273,7 +329,11 @@ async fn follow_up(
     };
     check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    match db::create_follow_up(&state.pool, id, task, agent, req.model.as_deref().map(str::trim), mode, &req.images).await? {
+    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+        return Err(not_found());
+    }
+    check_run_limit(&state, &caller).await?;
+    match db::create_follow_up(&state.pool, caller.org_id(), id, task, agent, req.model.as_deref().map(str::trim), mode, &req.images).await? {
         FollowUpOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");
@@ -293,9 +353,14 @@ async fn follow_up(
 /// Put the thread's files back to how they were before this run started.
 async fn restore_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
-    match db::create_restore(&state.pool, id).await? {
+    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+        return Err(not_found());
+    }
+    check_run_limit(&state, &caller).await?;
+    match db::create_restore(&state.pool, caller.org_id(), id).await? {
         RestoreOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, restores = %id, "restore queued");
@@ -311,6 +376,7 @@ async fn restore_run(
 /// Fork the thread at this message into a new thread, with any agent and model.
 async fn fork_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
     Json(req): Json<ForkRequest>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
@@ -328,11 +394,15 @@ async fn fork_run(
     let context_budget = crate::fork::budget(task);
     let worker = match req.worker_id.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(w) if db::worker_exists(&state.pool, w).await? => Some(w),
+        Some(w) if db::worker_exists(&state.pool, caller.org_id(), w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
     let new = db::NewFork { task, agent, model, permission_mode: mode, worker_id: worker, context_budget };
-    match db::create_fork(&state.pool, id, new).await? {
+    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+        return Err(not_found());
+    }
+    check_run_limit(&state, &caller).await?;
+    match db::create_fork(&state.pool, caller.org_id(), id, new).await? {
         ForkOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, forked_from = %id, agent = %run.agent, model = %run.model, "fork queued");
@@ -349,14 +419,25 @@ async fn fork_run(
 
 async fn get_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Run>, ApiError> {
-    db::get_run(&state.pool, id).await?.map(Json).ok_or_else(not_found)
+    db::get_run(&state.pool, caller.org_id(), id).await?.map(Json).ok_or_else(not_found)
 }
 
 /// An image from a tool result. Fetched by the page with its key, never embedded by URL.
-async fn get_image(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
-    let (media_type, data) = db::get_image(&state.pool, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "image not found".into()))?;
+async fn get_image(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    image_response(&state, caller.org_id(), id).await
+}
+
+/// An image attached to a message, for the worker that runs it.
+async fn worker_get_image(State(state): State<AppState>, Extension(auth): Extension<WorkerAuth>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    image_response(&state, auth.org, id).await
+}
+
+/// An image of `org`'s runs; other orgs' images read as missing.
+async fn image_response(state: &AppState, org: Uuid, id: Uuid) -> Result<Response, ApiError> {
+    let (media_type, data) = db::get_image(&state.pool, org, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "image not found".into()))?;
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, media_type),
@@ -370,9 +451,10 @@ async fn get_image(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resul
 
 async fn stop_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Run>, ApiError> {
-    let (run, ev) = db::request_stop(&state.pool, id).await?.ok_or_else(not_found)?;
+    let (run, ev) = db::request_stop(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
     if let Some(ev) = ev {
         state.events.publish(ev);
     }
@@ -380,23 +462,27 @@ async fn stop_run(
     Ok(Json(run))
 }
 
-/// What the page needs to show a copy-paste "connect a machine" command.
-/// Only the developer key holder can read it; it hands out the first worker token.
-async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
-    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:7373");
+/// What the page needs to show a copy-paste "connect a machine" command. In
+/// the default org it hands out the first static worker token; other orgs
+/// connect machines by approving them on the page or with a token they create.
+async fn setup(State(state): State<AppState>, Extension(caller): Extension<Caller>, headers: HeaderMap) -> Json<serde_json::Value> {
+    let default = caller.org_id() == DEFAULT_ORG;
+    let static_tokens = if default { state.config.worker_tokens.as_slice() } else { &[] };
     Json(json!({
-        "control_url": format!("http://{host}"),
-        "worker_token": state.config.worker_tokens.first().cloned().unwrap_or_default(),
-        "worker_token_count": state.config.worker_tokens.len(),
+        "control_url": public_base(&state, &headers),
+        "worker_token": static_tokens.first().cloned().unwrap_or_default(),
+        "worker_token_count": static_tokens.len(),
         "version": env!("CARGO_PKG_VERSION"),
         "build": state.config.build,
-        "host_worker": state.config.host_worker,
+        "host_worker": if default { state.config.host_worker.clone() } else { None },
+        "hosted": state.config.hosted(),
     }))
 }
 
-async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let workers = db::list_workers(&state.pool).await?;
-    let mut limits = db::active_limits(&state.pool).await?;
+async fn list_workers(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = caller.org_id();
+    let workers = db::list_workers(&state.pool, org).await?;
+    let mut limits = db::active_limits(&state.pool, org).await?;
     let mut out = Vec::with_capacity(workers.len());
     for w in workers {
         let online = db::is_online(w.last_heartbeat_at);
@@ -404,7 +490,7 @@ async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::
         v["online"] = json!(online);
         // Agents whose usage limit this machine hit: agent -> when it resets.
         v["limited_until"] = json!(limits.remove(&w.id).unwrap_or_default());
-        v["update_requested"] = json!(db::update_requested(&state.pool, &w.id).await?);
+        v["update_requested"] = json!(db::update_requested(&state.pool, org, &w.id).await?);
         v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
         out.push(v);
     }
@@ -412,10 +498,23 @@ async fn list_workers(State(state): State<AppState>) -> Result<Json<serde_json::
 }
 
 /// Ask a machine to update itself and restart when it is idle.
-async fn request_update(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
-    if db::set_update_requested(&state.pool, &id, true).await? {
+async fn request_update(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    if db::set_update_requested(&state.pool, caller.org_id(), &id, true).await? {
         tracing::info!(worker = %id, "update requested");
         Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()))
+    }
+}
+
+/// Forget a machine (frees a slot on the plan). It reappears if it heart-beats
+/// again with a valid token; revoke its token to keep it out.
+async fn delete_worker(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    if db::delete_worker(&state.pool, caller.org_id(), &id).await? {
+        tracing::info!(worker = %id, "machine removed");
+        Ok(StatusCode::NO_CONTENT)
+    } else if db::worker_exists(&state.pool, caller.org_id(), &id).await? {
+        Err(ApiError(StatusCode::CONFLICT, "a task is still running on this machine; stop it first".into()))
     } else {
         Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()))
     }
@@ -424,10 +523,11 @@ async fn request_update(State(state): State<AppState>, Path(id): Path<String>) -
 /// Hide a thread from the list (or bring it back). Any run of the thread may be named.
 async fn archive_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
     Json(req): Json<ArchiveRequest>,
 ) -> Result<Json<Run>, ApiError> {
-    let root = db::set_archived(&state.pool, id, req.archived).await?.ok_or_else(not_found)?;
+    let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
     Ok(Json(root))
 }
@@ -440,13 +540,13 @@ struct UpdateAck {
 /// The worker is about to update: clear the flag so it is not asked again.
 async fn update_ack(
     State(state): State<AppState>,
-    Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
+    Extension(w): Extension<WorkerAuth>,
     Json(req): Json<UpdateAck>,
 ) -> Result<StatusCode, ApiError> {
-    if !db::worker_owns_token(&state.pool, &req.id, &hash).await? {
+    if !db::worker_owns_token(&state.pool, w.org, &req.id, &w.token_hash).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
     }
-    db::set_update_requested(&state.pool, &req.id, false).await?;
+    db::set_update_requested(&state.pool, w.org, &req.id, false).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -456,12 +556,13 @@ struct AddedRepos {
 }
 
 /// The repos the developer chose to show in the composer (out of everything the machines report).
-async fn get_added_repos(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(json!({ "added": db::list_added_repos(&state.pool).await? })))
+async fn get_added_repos(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(json!({ "added": db::list_added_repos(&state.pool, caller.org_id()).await? })))
 }
 
 async fn put_added_repos(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<AddedRepos>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut names: Vec<String> = req.added.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
@@ -470,7 +571,7 @@ async fn put_added_repos(
     if names.len() > 1000 || names.iter().any(|n| n.len() > 512) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "too many or too long repo names".into()));
     }
-    db::set_added_repos(&state.pool, &names).await?;
+    db::set_added_repos(&state.pool, caller.org_id(), &names).await?;
     Ok(Json(json!({ "added": names })))
 }
 
@@ -485,11 +586,12 @@ struct EventsQuery {
 /// Ends with an `end` event once the run reaches a terminal status.
 async fn run_events_sse(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
     Query(q): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
+    let run = db::get_run(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
     let from = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
@@ -600,15 +702,23 @@ fn to_sse(ev: &RunEvent) -> Event {
 
 async fn register_worker(
     State(state): State<AppState>,
-    Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
+    Extension(auth): Extension<WorkerAuth>,
     Json(req): Json<RegisterWorkerRequest>,
 ) -> Result<Json<sidefleet_core::Worker>, ApiError> {
     if req.id.trim().is_empty() || req.id.len() > 128 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "worker id must be 1-128 chars".into()));
     }
-    let w = db::upsert_worker(&state.pool, &req.id, &req.display_name, &hash, &req.capabilities).await?;
-    tracing::info!(worker = %w.id, repos = w.capabilities.repos.len(), "worker registered");
-    for ev in db::reconcile_worker_runs(&state.pool, &req.id, &req.active_runs).await? {
+    if let Some(l) = tenancy::org_limits(&state.pool, auth.org).await? {
+        if !db::worker_exists(&state.pool, auth.org, &req.id).await? && db::count_workers(&state.pool, auth.org).await? >= l.machines {
+            return Err(ApiError(
+                StatusCode::PAYMENT_REQUIRED,
+                format!("this org's plan allows {} machines; remove one on the Machines page or upgrade", l.machines),
+            ));
+        }
+    }
+    let w = db::upsert_worker(&state.pool, auth.org, &req.id, &req.display_name, &auth.token_hash, &req.capabilities).await?;
+    tracing::info!(worker = %w.id, org = %auth.org, repos = w.capabilities.repos.len(), "worker registered");
+    for ev in db::reconcile_worker_runs(&state.pool, auth.org, &req.id, &req.active_runs).await? {
         tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run lost by worker restart; marked finished");
         state.events.publish(ev);
     }
@@ -617,17 +727,17 @@ async fn register_worker(
 
 async fn heartbeat(
     State(state): State<AppState>,
-    Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
+    Extension(auth): Extension<WorkerAuth>,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
-    if db::heartbeat(&state.pool, &req.id, &hash, &req.capabilities).await? {
-        for ev in db::reconcile_worker_runs(&state.pool, &req.id, &req.active_runs).await? {
+    if db::heartbeat(&state.pool, auth.org, &req.id, &auth.token_hash, &req.capabilities).await? {
+        for ev in db::reconcile_worker_runs(&state.pool, auth.org, &req.id, &req.active_runs).await? {
             tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run no longer executing on its worker; marked finished");
             state.events.publish(ev);
         }
         Ok(Json(HeartbeatResponse {
             server_version: state.config.build.clone(),
-            update_requested: db::update_requested(&state.pool, &req.id).await?,
+            update_requested: db::update_requested(&state.pool, auth.org, &req.id).await?,
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
@@ -637,10 +747,10 @@ async fn heartbeat(
 
 async fn claim_run(
     State(state): State<AppState>,
-    Extension(WorkerTokenHash(hash)): Extension<WorkerTokenHash>,
+    Extension(auth): Extension<WorkerAuth>,
     Json(req): Json<ClaimRequest>,
 ) -> Result<Response, ApiError> {
-    if !db::worker_owns_token(&state.pool, &req.worker_id, &hash).await? {
+    if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
     }
     if req.repos.is_empty() {
@@ -650,7 +760,9 @@ async fn claim_run(
     let agents = if req.agents.is_empty() { vec![Agent::Claude.as_str().to_string()] } else { req.agents.clone() };
     // Workers from before restores and forks only run plain agent runs.
     let kinds = if req.kinds.is_empty() { vec!["agent".to_string()] } else { req.kinds.clone() };
-    let claimed = db::claim_run(&state.pool, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds).await?;
+    let max_running = tenancy::org_limits(&state.pool, auth.org).await?.map(|l| l.parallel_runs);
+    let claimed =
+        db::claim_run(&state.pool, auth.org, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds, max_running).await?;
     for ev in claimed.failed {
         tracing::warn!(run_id = %ev.run_id, "queued message had no session to continue; failed");
         state.events.publish(ev);
@@ -672,6 +784,7 @@ struct WorkerQuery {
 
 async fn post_events(
     State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
     Path(id): Path<Uuid>,
     Query(q): Query<WorkerQuery>,
     Json(req): Json<PostEventsRequest>,
@@ -679,7 +792,7 @@ async fn post_events(
     if req.events.len() > 1000 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "too many events in one batch".into()));
     }
-    match db::append_events(&state.pool, id, &q.worker_id, &req.events).await? {
+    match db::append_events(&state.pool, auth.org, id, &q.worker_id, &req.events).await? {
         AppendOutcome::Appended(stored, run) => {
             for ev in stored {
                 state.events.publish(ev);
@@ -696,9 +809,10 @@ async fn post_events(
 
 async fn run_control(
     State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RunControl>, ApiError> {
-    let run = db::get_run(&state.pool, id).await?.ok_or_else(not_found)?;
+    let run = db::get_run(&state.pool, auth.org, id).await?.ok_or_else(not_found)?;
     Ok(Json(RunControl {
         status: run.status,
         stop_requested: run.stop_requested || run.status.is_terminal(),
@@ -707,6 +821,7 @@ async fn run_control(
 
 async fn finish_run(
     State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
     Path(id): Path<Uuid>,
     Query(q): Query<WorkerQuery>,
     Json(req): Json<FinishRunRequest>,
@@ -714,7 +829,7 @@ async fn finish_run(
     if !req.status.is_terminal() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "finish status must be terminal".into()));
     }
-    match db::finish_run(&state.pool, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
+    match db::finish_run(&state.pool, auth.org, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
         FinishOutcome::Finished(run, evs) => {
             for ev in evs {
                 state.events.publish(ev);
@@ -735,5 +850,239 @@ async fn finish_run(
         FinishOutcome::NotFound => Err(not_found()),
         FinishOutcome::NotOwner => Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into())),
         FinishOutcome::AlreadyFinished(run) => Ok(Json(run)),
+    }
+}
+
+// ---- sign-in, orgs, tokens ----
+
+/// Public: which ways of signing in this control plane offers.
+async fn auth_methods(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "github": state.config.github.is_some(),
+        "dev_key": !state.config.dev_key.is_empty(),
+        "hosted": state.config.hosted(),
+    }))
+}
+
+/// The signed-in user (null for the developer key) and the orgs they can act in.
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let identity = match auth::identify(&state, &headers).await {
+        Ok(Some(i)) => i,
+        Ok(None) => return Ok((StatusCode::UNAUTHORIZED, Json(json!({"error": "not signed in"}))).into_response()),
+        Err(r) => return Ok(r),
+    };
+    let (user, orgs) = match identity {
+        Identity::DevKey => (None, vec![tenancy::default_org(&state.pool).await?]),
+        Identity::User(u) => {
+            let orgs = tenancy::memberships(&state.pool, u.id).await?;
+            (Some(u), orgs)
+        }
+    };
+    Ok(Json(json!({ "user": user, "orgs": orgs })).into_response())
+}
+
+/// The org named in a path (id or slug): the caller's current org, or another org they belong to.
+async fn path_org(state: &AppState, caller: &Caller, org: &str) -> Result<tenancy::OrgMembership, ApiError> {
+    if caller.org.id.to_string() == org || caller.org.slug == org {
+        return Ok(caller.org.clone());
+    }
+    if let Some(u) = &caller.user {
+        if let Some(m) = tenancy::memberships(&state.pool, u.id).await?.into_iter().find(|m| m.id.to_string() == org || m.slug == org) {
+            return Ok(m);
+        }
+    }
+    Err(ApiError(StatusCode::NOT_FOUND, "org not found".into()))
+}
+
+async fn owned_org(state: &AppState, caller: &Caller, org: &str) -> Result<tenancy::OrgMembership, ApiError> {
+    let m = path_org(state, caller, org).await?;
+    if m.role != "owner" {
+        return Err(forbidden("only an owner of this org can do that"));
+    }
+    Ok(m)
+}
+
+#[derive(Deserialize)]
+struct NameReq {
+    name: String,
+}
+
+fn check_name(name: &str, what: &str) -> Result<String, ApiError> {
+    let n = name.trim();
+    if n.is_empty() || n.chars().count() > 80 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("{what} must be 1-80 characters")));
+    }
+    Ok(n.to_string())
+}
+
+/// A team org, owned by the caller.
+async fn create_org(State(state): State<AppState>, Extension(caller): Extension<Caller>, Json(req): Json<NameReq>) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let Some(user) = &caller.user else {
+        return Err(forbidden("sign in with GitHub to create orgs"));
+    };
+    let name = check_name(&req.name, "org name")?;
+    let id = tenancy::create_org(&state.pool, &name, user.id).await?;
+    let org = tenancy::memberships(&state.pool, user.id).await?.into_iter().find(|m| m.id == id);
+    Ok((StatusCode::CREATED, Json(json!(org))))
+}
+
+async fn list_members(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = path_org(&state, &caller, &org).await?;
+    Ok(Json(json!(tenancy::list_members(&state.pool, org.id).await?)))
+}
+
+#[derive(Deserialize)]
+struct AddMemberReq {
+    login: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+/// Add someone who has signed in at least once, by GitHub login. Owners only.
+async fn add_member(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>, Json(req): Json<AddMemberReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = owned_org(&state, &caller, &org).await?;
+    if org.id == DEFAULT_ORG {
+        return Err(forbidden("the default org belongs to whoever holds the developer key"));
+    }
+    let role = req.role.as_deref().unwrap_or("member");
+    if !["owner", "member"].contains(&role) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "role must be owner or member".into()));
+    }
+    match tenancy::add_member(&state.pool, org.id, req.login.trim(), role).await? {
+        tenancy::AddMember::Added(u) => Ok(Json(json!({ "login": u.login, "role": role }))),
+        tenancy::AddMember::NoSuchUser => Err(ApiError(StatusCode::NOT_FOUND, "no Sidefleet user with that GitHub login; they need to sign in once first".into())),
+    }
+}
+
+async fn list_tokens(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = owned_org(&state, &caller, &org).await?;
+    Ok(Json(json!(tenancy::list_tokens(&state.pool, org.id).await?)))
+}
+
+/// Mint a worker token. The value is in this response only.
+async fn create_token(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(org): Path<String>,
+    Json(req): Json<NameReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let org = owned_org(&state, &caller, &org).await?;
+    let name = check_name(&req.name, "token name")?;
+    let (token, value) = tenancy::create_token(&state.pool, org.id, &name).await?;
+    tracing::info!(org = %org.id, token = %token.id, "worker token created");
+    let mut v = json!(token);
+    v["token"] = json!(value);
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+async fn revoke_token(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path((org, id)): Path<(String, Uuid)>) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = owned_org(&state, &caller, &org).await?;
+    let t = tenancy::revoke_token(&state.pool, org.id, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
+    tracing::info!(org = %org.id, token = %id, "worker token revoked");
+    Ok(Json(json!(t)))
+}
+
+// ---- machine enrollment ----
+
+#[derive(Deserialize)]
+struct EnrollReq {
+    worker_id: String,
+    machine_name: String,
+    #[serde(default)]
+    capabilities: sidefleet_core::Capabilities,
+}
+
+/// Public: `sidefleet connect` without a token asks to join. The response holds
+/// a code to show the person, and a secret only the waiting connect knows.
+async fn enroll(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<EnrollReq>) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let worker_id = req.worker_id.trim();
+    let name = req.machine_name.trim();
+    if worker_id.is_empty() || worker_id.len() > 128 || name.is_empty() || name.len() > 128 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "worker_id and machine_name must be 1-128 characters".into()));
+    }
+    // Self-hosted: there is one org, so the request waits on its Machines page.
+    // Hosted: whoever approves it with the code chooses the org.
+    let org = if state.config.hosted() { None } else { Some(DEFAULT_ORG) };
+    match tenancy::create_enrollment(&state.pool, org, name, worker_id, &req.capabilities).await? {
+        NewEnrollment::Created(e, secret) => {
+            tracing::info!(enrollment = %e.id, machine = %e.machine_name, "machine asked to join");
+            let base = public_base(&state, &headers);
+            Ok((
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": e.id,
+                    "code": e.code,
+                    "secret": secret,
+                    "expires_at": e.expires_at,
+                    "approve_url": format!("{base}/#/machines?code={}", e.code),
+                    "poll_interval_secs": 2,
+                })),
+            ))
+        }
+        NewEnrollment::TooMany => Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "too many machines are waiting for approval; try again in a few minutes".into())),
+    }
+}
+
+/// Public, authenticated by the enrollment secret: pending (202), approved with
+/// the token (200, once), denied (403), expired or already collected (410).
+async fn enroll_poll(State(state): State<AppState>, Path(id): Path<Uuid>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let secret = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    Ok(match tenancy::poll_enrollment(&state.pool, id, secret).await? {
+        Poll::Pending(e) => (StatusCode::ACCEPTED, Json(json!({"status": "pending", "code": e.code, "expires_at": e.expires_at}))).into_response(),
+        Poll::Approved { token, org } => {
+            tracing::info!(enrollment = %id, org = %org.id, "machine approved; token collected");
+            Json(json!({"status": "approved", "token": token, "org": {"id": org.id, "name": org.name, "slug": org.slug}})).into_response()
+        }
+        Poll::Denied => (StatusCode::FORBIDDEN, Json(json!({"status": "denied", "error": "the request to join was denied"}))).into_response(),
+        Poll::Expired => (StatusCode::GONE, Json(json!({"status": "expired", "error": "the request expired before anyone approved it"}))).into_response(),
+        Poll::Collected => (StatusCode::GONE, Json(json!({"status": "collected", "error": "the token for this request was already handed out"}))).into_response(),
+        Poll::NotFound => return Err(ApiError(StatusCode::NOT_FOUND, "unknown enrollment".into())),
+    })
+}
+
+async fn list_enrollments(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(json!(tenancy::pending_enrollments(&state.pool, caller.org_id()).await?)))
+}
+
+#[derive(Deserialize)]
+struct CodeReq {
+    #[serde(default)]
+    code: Option<String>,
+}
+
+/// Find a waiting machine by the code its terminal shows.
+async fn lookup_enrollment(State(state): State<AppState>, Extension(caller): Extension<Caller>, Json(req): Json<CodeReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let code = req.code.unwrap_or_default();
+    let e = tenancy::enrollment_by_code(&state.pool, caller.org_id(), &code).await?;
+    e.map(|e| Json(json!(e))).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no machine is waiting with that code (it may have expired)".into()))
+}
+
+async fn approve_enrollment(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>, Json(req): Json<CodeReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(l) = caller.org.limits {
+        if db::count_workers(&state.pool, caller.org_id()).await? >= l.machines {
+            return Err(over_limit(&caller.org.plan, format!("{} machines are allowed", l.machines)));
+        }
+    }
+    decide(&state, &caller, id, req.code.as_deref(), true).await
+}
+
+async fn deny_enrollment(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>, Json(req): Json<CodeReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    decide(&state, &caller, id, req.code.as_deref(), false).await
+}
+
+async fn decide(state: &AppState, caller: &Caller, id: Uuid, code: Option<&str>, approve: bool) -> Result<Json<serde_json::Value>, ApiError> {
+    match tenancy::decide_enrollment(&state.pool, caller.org_id(), caller.user_id(), id, code, approve).await? {
+        Decide::Done(e) => {
+            tracing::info!(enrollment = %id, org = %caller.org_id(), approved = approve, machine = %e.machine_name, "enrollment decided");
+            Ok(Json(json!(e)))
+        }
+        Decide::NotFound => Err(ApiError(StatusCode::NOT_FOUND, "no machine is waiting with that id and code".into())),
+        Decide::Expired => Err(ApiError(StatusCode::GONE, "the request expired; run `sidefleet connect` again on that machine".into())),
+        Decide::AlreadyDecided(s) => Err(ApiError(StatusCode::CONFLICT, format!("this request was already {s}"))),
     }
 }

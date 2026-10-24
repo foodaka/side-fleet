@@ -1,0 +1,58 @@
+# Render deployment of the hosted control plane (app.sidefleet.xyz). See HOSTED.md.
+#
+# One-time setup: New > Blueprint in the Render dashboard, pick this repo, and enter the two
+# GitHub OAuth values when prompted. Then add app.sidefleet.xyz under the service's Custom
+# Domains and point a CNAME at the onrender.com address it shows.
+#
+# Region and database name can't change after creation.
+
+services:
+  - type: web
+    name: sidefleet
+    runtime: docker
+    region: virginia
+    plan: starter
+    # Run one instance: live events fan out in-process (see HOSTED.md).
+    numInstances: 1
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    # Only rebuild for changes that reach the binary (not the site, docs or web sources;
+    # the built web app is committed under crates/server/web-dist).
+    buildFilter:
+      paths:
+        - crates/**
+        - Cargo.toml
+        - Cargo.lock
+        - Dockerfile
+        - render.yaml
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sidefleet-db
+          property: connectionString
+      - key: SIDEFLEET_PUBLIC_URL
+        value: https://app.sidefleet.xyz
+      - key: SIDEFLEET_BIND
+        value: 0.0.0.0:8080
+      - key: PORT
+        value: "8080"
+      - key: RUST_LOG
+        value: sidefleet=info,sidefleet_server=info,tower_http=warn
+      - key: SIDEFLEET_GITHUB_CLIENT_ID
+        sync: false
+      - key: SIDEFLEET_GITHUB_CLIENT_SECRET
+        sync: false
+      # Optional: a Telegram message for every new sign-up. Set both or neither.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+databases:
+  - name: sidefleet-db
+    region: virginia
+    plan: 0.1c-256mb
+    databaseName: sidefleet
+    user: sidefleet
+    # Only the service above (over Render's private network) may connect.
+    ipAllowList: []

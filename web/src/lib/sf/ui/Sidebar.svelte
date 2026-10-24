@@ -7,6 +7,7 @@
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
 	import RunList from './RunList.svelte';
+	import OrgSwitcher from './OrgSwitcher.svelte';
 	import { fleet } from '../state.svelte';
 	import { parseBuild } from '../format';
 
@@ -69,6 +70,7 @@
 	</div>
 
 	<div class="flex flex-col gap-2 px-3">
+		<OrgSwitcher />
 		<a
 			href="#/"
 			aria-current={path === '/' ? 'page' : undefined}
@@ -130,7 +132,14 @@
 				</DropdownMenu.RadioGroup>
 				<DropdownMenu.Separator />
 				<DropdownMenu.Item onclick={() => (fleet.pickerOpen = true)}>Choose repos…</DropdownMenu.Item>
-				<DropdownMenu.Item onclick={() => fleet.signOut()}>Change developer key…</DropdownMenu.Item>
+				{#if fleet.me?.user}
+					<DropdownMenu.Separator />
+					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Signed in as {fleet.me.user.login}</DropdownMenu.Label>
+					<DropdownMenu.Item onclick={() => (fleet.newOrgOpen = true)}>New org…</DropdownMenu.Item>
+					<DropdownMenu.Item onclick={() => fleet.signOut()}>Sign out</DropdownMenu.Item>
+				{:else}
+					<DropdownMenu.Item onclick={() => fleet.signOut()}>Change developer key…</DropdownMenu.Item>
+				{/if}
 				{#if build.sha}
 					<DropdownMenu.Separator />
 					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Control plane {build.version}, build <span class="font-mono">{build.sha}</span> from {build.date}</DropdownMenu.Label>

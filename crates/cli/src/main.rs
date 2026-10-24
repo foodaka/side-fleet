@@ -78,9 +78,10 @@ enum Cmd {
         /// Control plane address, e.g. http://100.64.0.1:7373
         #[arg(long, env = "SIDEFLEET_CONTROL")]
         control: String,
-        /// Worker token (shown by `sidefleet serve` and on the Machines page).
+        /// Worker token (shown by `sidefleet serve` and on the Machines page). Without
+        /// one, the machine asks to join and waits until someone approves it on the page.
         #[arg(long, env = "SIDEFLEET_TOKEN", hide_env_values = true)]
-        token: String,
+        token: Option<String>,
         /// Folder with your git checkouts (default: your home folder, scanned 3 levels deep; hidden and build folders skipped).
         #[arg(long, env = "SIDEFLEET_REPOS", default_value = "~")]
         repos: String,
@@ -165,8 +166,13 @@ enum Cmd {
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
+/// `~/.sidefleet`, or `SIDEFLEET_CONFIG_DIR` to keep a second worker's settings apart
+/// (for example a test worker next to the one the service runs).
 fn config_dir() -> PathBuf {
-    home().join(".sidefleet")
+    match std::env::var_os("SIDEFLEET_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        Some(d) => expand_home(&d.to_string_lossy()),
+        None => home().join(".sidefleet"),
+    }
 }
 fn worker_env_path() -> PathBuf {
     config_dir().join("worker.env")
@@ -345,8 +351,12 @@ struct ServeOpts {
 
 async fn serve(opts: ServeOpts) -> Result<()> {
     let ServeOpts { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel } = opts;
+    // Hosted (GitHub sign-in configured): people sign in and bring their own
+    // tokens, so nothing is generated; a key or static tokens given are still honoured.
+    let hosted = ["SIDEFLEET_GITHUB_CLIENT_ID", "GITHUB_CLIENT_ID"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
     // First run: generate keys and keep them so the next start reuses them.
     let (dev_key, worker_tokens, generated) = match (dev_key, worker_tokens) {
+        (d, w) if hosted => (d.unwrap_or_default(), w.unwrap_or_default(), false),
         (Some(d), Some(w)) => (d, w, false),
         (d, w) => {
             let d = d.unwrap_or_else(random_token);
@@ -359,12 +369,14 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     std::env::set_var("SIDEFLEET_WORKER_TOKENS", &worker_tokens);
     std::env::set_var("SIDEFLEET_BUILD", version_string());
     // Tell the page which machine hosts the control plane (when it runs a worker too).
-    let builtin_worker = !no_worker && ["claude", "codex", "opencode"].iter().any(|b| which(b)) && repos.is_dir();
+    // The built-in worker uses a static token, so a hosted control plane without one has none.
+    let builtin_worker = !no_worker && !worker_tokens.is_empty() && ["claude", "codex", "opencode"].iter().any(|b| which(b)) && repos.is_dir();
     if builtin_worker {
         std::env::set_var("SIDEFLEET_HOST_WORKER", default_worker_id());
     }
     let config = Config::from_env()?;
-    let first_token = config.worker_tokens[0].clone();
+    let first_token = config.worker_tokens.first().cloned().unwrap_or_default();
+    let public_url = config.public_url.clone();
 
     let pool = match connect_and_migrate(&database_url).await {
         Ok(p) => p,
@@ -397,15 +409,27 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     println!();
     println!("Sidefleet control plane {} is running.", version_string());
     println!();
-    println!("  Open the page:        http://{ip}:{port}/   (or http://localhost:{port}/ here)");
-    println!("  Developer key:        {dev_key}");
-    println!();
-    println!("  Connect a machine:    sidefleet connect --control http://{ip}:{port} --token {first_token}");
+    if hosted {
+        let url = public_url.unwrap_or_else(|| format!("http://{ip}:{port}"));
+        println!("  Hosted mode: people sign in with GitHub and work in their own orgs.");
+        println!("  Open the page:        {url}/");
+        println!("  Connect a machine:    sidefleet connect --control {url}   (then approve it on the Machines page)");
+        if !dev_key.is_empty() {
+            println!("  The developer key from SIDEFLEET_DEV_KEY also works; it acts in the default org.");
+        }
+    } else {
+        println!("  Open the page:        http://{ip}:{port}/   (or http://localhost:{port}/ here)");
+        println!("  Developer key:        {dev_key}");
+        println!();
+        println!("  Connect a machine:    sidefleet connect --control http://{ip}:{port} --token {first_token}");
+        println!("                   or:  sidefleet connect --control http://{ip}:{port}   and approve it on the Machines page");
+    }
     println!();
     if generated {
         println!("  Keys were generated and saved to {}", server_env_path().display());
     }
     match ts {
+        _ if hosted => {}
         Some(_) => println!("  That is this machine's Tailscale address, reachable from your other devices on the tailnet. On the same LAN http://{lan}:{port} also works."),
         None => println!("  Other machines must be able to reach this address (same LAN). For access from anywhere, install Tailscale on both ends and restart serve."),
     }
@@ -419,6 +443,8 @@ async fn serve(opts: ServeOpts) -> Result<()> {
         .collect();
     if no_worker {
         println!("  Built-in worker: off (--no-worker).");
+    } else if worker_tokens.is_empty() {
+        println!("  Built-in worker: off (no static worker token in hosted mode).");
     } else if agents.is_empty() {
         println!("  Built-in worker: off, no coding agent found here (claude, codex or opencode). Connect machines that have one.");
     } else if !repos.is_dir() {
@@ -486,7 +512,50 @@ async fn shutdown_signal() {
 
 // ---- connect / service ----
 
-async fn connect(control: String, token: String, repos: String, name: Option<String>, permission_mode: String, no_service: bool, parallel: usize) -> Result<()> {
+/// True when `token` is the one saved by an earlier `connect` to a different
+/// control plane (saved settings are loaded into the environment at start).
+fn token_saved_for_another_control(control: &str, token: &str) -> bool {
+    let saved_token = std::env::var("SIDEFLEET_TOKEN").ok();
+    let saved_control = std::env::var("SIDEFLEET_CONTROL").ok().map(|c| c.trim_end_matches('/').to_string());
+    saved_token.as_deref() == Some(token) && saved_control.is_some_and(|c| c != control)
+}
+
+/// No token: ask the control plane to let this machine in, show the code and
+/// the page to approve it on, and wait (up to ten minutes) for the token.
+async fn wait_for_approval(control: &str, id: &str, display: &str, caps: &sidefleet_core::Capabilities) -> Result<String> {
+    use sidefleet_worker::client::{enroll, enroll_status, EnrollStatus};
+    let e = enroll(control, id, display, caps).await.map_err(|err| {
+        anyhow::anyhow!("could not ask {control} to approve this machine: {err:#}\nIs `sidefleet serve` running there and reachable from here?")
+    })?;
+    println!();
+    println!("This machine needs to be approved. Open:");
+    println!();
+    println!("    {}", e.approve_url);
+    println!();
+    println!("  and approve \"{display}\" with code  {}  (check that the page shows the same code).", e.code);
+    println!("Waiting for approval (the request expires in 10 minutes)…");
+    let mut failures = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(e.poll_interval_secs.clamp(1, 30))).await;
+        match enroll_status(control, &e).await {
+            Ok(EnrollStatus::Pending) => failures = 0,
+            Ok(EnrollStatus::Approved { token, org }) => {
+                println!("  Approved{}.", if org.is_empty() { String::new() } else { format!(" into \"{org}\"") });
+                return Ok(token);
+            }
+            Ok(EnrollStatus::Denied) => bail!("the request was denied on the Machines page"),
+            Ok(EnrollStatus::Expired) => bail!("nobody approved the request within 10 minutes; run `sidefleet connect` again"),
+            Err(err) => {
+                failures += 1;
+                if failures >= 15 {
+                    return Err(err.context("lost contact with the control plane while waiting for approval"));
+                }
+            }
+        }
+    }
+}
+
+async fn connect(control: String, token: Option<String>, repos: String, name: Option<String>, permission_mode: String, no_service: bool, parallel: usize) -> Result<()> {
     let control = control.trim_end_matches('/').to_string();
     let repos_root = expand_home(&repos);
     if !repos_root.is_dir() {
@@ -531,6 +600,11 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
         println!("  (none found; if your projects live somewhere unusual, pass --repos <folder>)");
     }
 
+    let token = match token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        Some(t) if !token_saved_for_another_control(&control, &t) => t,
+        _ => wait_for_approval(&control, &id, &display, &caps).await?,
+    };
+
     println!("Registering with {control}…");
     let client = sidefleet_worker::client::ControlClient::new(&control, &token, &id)?;
     match client.register(&display, &caps, &[]).await {
@@ -539,6 +613,9 @@ async fn connect(control: String, token: String, repos: String, name: Option<Str
             let msg = format!("{e:#}");
             if msg.contains("401") {
                 bail!("the control plane rejected this token. Copy it from the Machines page or from where `sidefleet serve` printed it.");
+            }
+            if msg.contains("402") {
+                bail!("the control plane refused this machine: {msg}");
             }
             bail!("could not reach the control plane at {control}: {msg}\nIs `sidefleet serve` running there, and is this address reachable from this machine (same LAN or Tailscale)?");
         }

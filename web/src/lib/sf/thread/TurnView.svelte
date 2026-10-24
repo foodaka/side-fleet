@@ -17,6 +17,7 @@
 	let {
 		turn,
 		first,
+		prev,
 		live,
 		waiting = false,
 		onsendnow,
@@ -26,6 +27,8 @@
 	}: {
 		turn: Turn;
 		first: boolean;
+		/** The thread's previous non-restore turn, to tell what this one changed. */
+		prev?: Turn;
 		live: boolean;
 		/** A message queued behind one that is still running. */
 		waiting?: boolean;
@@ -73,6 +76,12 @@
 		}
 		return out;
 	});
+	// A follow-up only says where it runs when that differs from the turn before; the header
+	// already names the thread's machine and branch.
+	const switched = $derived(!!prev && (run.agent !== prev.run.agent || run.model !== prev.run.model));
+	const relocated = $derived(
+		!prev || !run.parent_id || turn.machine !== prev.machine || (!!turn.branch && !!prev.branch && turn.branch !== prev.branch)
+	);
 	const meta = $derived(
 		[run.parent_id ? null : clock(run.created_at), run.permission_mode ? permName(run.permission_mode) : null, !run.parent_id && run.isolation === 'checkout' ? 'In place' : null].filter(Boolean)
 	);
@@ -108,11 +117,13 @@
 	{/if}
 
 	<div class="flex flex-col gap-1.5">
-		{#if !waiting && !isRestore && (turn.machine || turn.activity === 'queued')}
+		{#if !waiting && !isRestore && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
 			<Collapsible.Root class="group/setup">
-				<Collapsible.Trigger class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+				<Collapsible.Trigger class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-left text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
 						Waiting for {run.pinned_worker_id ?? `${run.moved_from ? 'another' : 'a'} machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}…
+					{:else if !relocated}
+						<span>Switched to {agentModel(run.agent, run.model)}</span>
 					{:else}
 						{run.parent_id ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
 						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}

@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { fleet } from '../state.svelte';
 	import { seen } from '../seen.svelte';
+	import { inbox, reasonTone } from '../inbox.svelte';
 	import { ago, dayGroup, duration, repoLabel } from '../format';
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
@@ -64,7 +65,8 @@
 
 {#snippet row(r: RunSummary, detail: boolean)}
 	{@const on = r.id === activeId}
-	{@const unread = !on && seen.unread(r)}
+	{@const waiting = on ? undefined : inbox.byId.get(r.id)}
+	{@const unread = !on && (!!waiting || seen.unread(r))}
 	{@const other = r.repo !== homeRepo}
 	<div class="group/row relative">
 	<a
@@ -93,7 +95,9 @@
 				<span class="truncate font-mono text-[11px] text-faint">{repoLabel(r.repo)}</span>
 			{/if}
 		</span>
-		{#if unread}
+		{#if waiting}
+			<span class="mt-[5px] size-2 shrink-0 rounded-full {reasonTone(waiting.reason)} ring-2 ring-sidebar group-hover/row:invisible" role="img" aria-label="Waiting on you: {waiting.label}" title={waiting.label}></span>
+		{:else if unread}
 			<span class="mt-[6px] size-1.5 shrink-0 rounded-full bg-foreground group-hover/row:invisible" aria-label="New"></span>
 		{:else if !detail}
 			<span class="tnum shrink-0 text-[11px] text-faint group-hover:text-muted-foreground group-hover/row:invisible">{ago(r.last_activity_at, fleet.now)}</span>

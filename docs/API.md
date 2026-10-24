@@ -103,11 +103,31 @@ is scoped to that org: another org's runs, images and machines read as 404.
 | `GET` | `/v1/enrollments` | machines waiting for approval in this org |
 | `POST` | `/v1/enrollments/lookup` `{code}` | find a waiting machine by the code it printed |
 | `POST` | `/v1/enrollments/:id/approve` `{code?}`, `/deny` | approve (mints a per-machine token) or deny; `402` over the plan's machine limit |
+| `GET` | `/v1/inbox` | `{items: [{id, run_id, title, repo, agent, reason, label, detail?, since}]}`: tasks waiting on the caller, newest first (see below) |
+| `GET` | `/v1/inbox/events` | SSE: an `inbox` event with the same `{items}` at once and whenever the list changes |
+| `POST` | `/v1/inbox/:id/dismiss` | `204`: mark the task seen (any run id of the thread); the page does this when it opens a task |
+| `POST` | `/v1/inbox/dismiss-all` | `204`: everything waiting now counts as seen |
+| `GET` | `/v1/push` | `{available, public_key}`: whether this control plane can send web push, and its VAPID public key (base64url) |
+| `POST` | `/v1/push/subscriptions` `{endpoint, keys: {p256dh, auth}}` | `201`: notify this browser (`PushSubscription.toJSON()`); the endpoint must be a browser push service; `409` without a VAPID key |
+| `DELETE` | `/v1/push/subscriptions` `{endpoint}` | `204`: stop notifying it |
+
+**The inbox.** A task (thread) waits on you when its latest message has one of these `reason`s:
+`finished` (succeeded; waiting for a reply), `failed`, `usage_limit` (failed on the machine's
+usage limit, or queued again until another machine takes it; `detail` says when it resets),
+`machine_lost` (failed because its machine stopped responding, or moved and waiting for another
+machine) or `approval_needed` (reserved for tool approvals). Running, queued replies, stopped
+tasks, finished restores and archived tasks are not listed. `since` is when it started waiting; it
+stays listed until the caller opens or dismisses it after that, or replies. "Seen" is kept per
+viewer: each signed-in user has their own, and the developer key is one shared viewer. Tasks from
+the last 30 days are considered. With `SIDEFLEET_VAPID_PRIVATE_KEY` set, each subscribed browser
+of someone who can see the task and has not seen it gets a web push about 10 s after it starts
+waiting (not if it was picked up or opened in the meantime), holding `{id, title, reason, label,
+url}`: the title's first line and the reason, never agent output.
 
 Plan limits answer `402` (machines; runs queued or running at once, for new tasks, messages,
 restores and forks); owner-only actions answer `403` for members.
 
-Public: `GET /` (the page), `GET /connect.md` (instructions for an agent), `GET /healthz` (checks
+Public: `GET /` (the page), `GET /service-worker.js` (shows push notifications), `GET /connect.md` (instructions for an agent), `GET /healthz` (checks
 the database), `GET /v1/auth` (which sign-in methods are on), `GET /v1/me` (the signed-in user and
 their orgs; `401` when signed out), `GET /auth/github/login` and `/auth/github/callback`,
 `POST /auth/logout`, `POST /v1/enroll` and `GET /v1/enroll/:id` (a machine asking to join, and

@@ -15,6 +15,8 @@
 	import SignIn from '#lib/sf/ui/SignIn.svelte';
 	import NewOrgDialog from '#lib/sf/ui/NewOrgDialog.svelte';
 	import RepoPicker from '#lib/sf/ui/RepoPicker.svelte';
+	import InboxBell from '#lib/sf/ui/InboxBell.svelte';
+	import { inbox } from '#lib/sf/inbox.svelte';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { seen } from '#lib/sf/seen.svelte';
 	import type { LayoutProps } from './$types';
@@ -33,6 +35,18 @@
 		const id = /^\/runs\/([^/?#]+)/.exec(path)?.[1];
 		const r = id && fleet.runs.find((r) => r.id === id);
 		if (r) untrack(() => seen.mark(r));
+	});
+
+	// The "waiting on you" inbox follows whoever is signed in, in the org the page acts in.
+	const inboxKey = $derived(fleet.loaded && !fleet.needsSignIn ? fleet.orgId || '-' : null);
+	$effect(() => {
+		if (inboxKey) untrack(() => inbox.connect());
+		else untrack(() => inbox.disconnect());
+	});
+	// Looking at a task that waits on you counts as seeing it (not while the tab is in the background).
+	$effect(() => {
+		const id = /^\/runs\/([^/?#]+)/.exec(path)?.[1];
+		if (id && inbox.visible && inbox.byId.has(id)) untrack(() => void inbox.dismiss(id));
 	});
 
 	// Desktop: the sidebar can be tucked away to a slim rail; the choice sticks.
@@ -87,6 +101,7 @@
 					</Tooltip.Trigger>
 					<Tooltip.Content side="right">New task</Tooltip.Content>
 				</Tooltip.Root>
+				<InboxBell side="right" class="mt-1 size-8" />
 				{#if running}
 					<button type="button" onclick={toggle} class="tnum mt-2 flex items-center gap-1 rounded-full bg-run-soft px-1.5 py-0.5 text-[11px] font-medium text-run-ink" title="{running} running">
 						<StatusDot status="running" />{running}
@@ -129,7 +144,8 @@
 				{#if running}<StatusDot status="running" class="absolute top-2 right-1.5" />{/if}
 			</button>
 			<a href="#/" class="flex items-center gap-2 text-[15px] font-semibold tracking-tight"><Logo />Sidefleet</a>
-			<a href="#/" class="mi-hover ml-auto grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="New task"><Plus size={18} /></a>
+			<InboxBell align="end" class="ml-auto size-9" />
+			<a href="#/" class="mi-hover grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="New task"><Plus size={18} /></a>
 		</header>
 		<DialogPrimitive.Root bind:open={drawer}>
 			<DialogPrimitive.Portal>

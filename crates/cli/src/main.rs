@@ -205,6 +205,13 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add lines to a private file, creating it if needed.
+fn append_private(path: &Path, lines: &str) -> Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let sep = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+    write_private(path, &format!("{existing}{sep}{lines}"))
+}
+
 fn random_token() -> String {
     let mut b = [0u8; 20];
     rand::thread_rng().fill_bytes(&mut b);
@@ -367,6 +374,15 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     };
     std::env::set_var("SIDEFLEET_DEV_KEY", &dev_key);
     std::env::set_var("SIDEFLEET_WORKER_TOKENS", &worker_tokens);
+    // Web push needs a VAPID key pair that outlives restarts (browsers subscribe to its public half).
+    if std::env::var("SIDEFLEET_VAPID_PRIVATE_KEY").map_or(true, |v| v.trim().is_empty()) {
+        let k = sidefleet_server::push::generate_private_key();
+        if let Err(e) = append_private(&server_env_path(), &format!("SIDEFLEET_VAPID_PRIVATE_KEY={k}\n")) {
+            // Push still works until the next restart; browsers then need to turn it on again.
+            eprintln!("Could not save the web push key ({e:#}); set SIDEFLEET_VAPID_PRIVATE_KEY to keep one.");
+        }
+        std::env::set_var("SIDEFLEET_VAPID_PRIVATE_KEY", &k);
+    }
     std::env::set_var("SIDEFLEET_BUILD", version_string());
     // Tell the page which machine hosts the control plane (when it runs a worker too).
     // The built-in worker uses a static token, so a hosted control plane without one has none.

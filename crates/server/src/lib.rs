@@ -1,12 +1,15 @@
 //! Sidefleet control plane: Axum + Postgres. Exposed as a library so tests
 //! (and the worker's end-to-end tests) can spin up the exact router in-process.
 
+pub mod attention;
 pub mod auth;
 pub mod db;
 pub mod events;
 pub mod fork;
+pub mod inbox;
 pub mod notify;
 pub mod oauth;
+pub mod push;
 pub mod routes;
 pub mod tenancy;
 pub mod test_support;
@@ -40,6 +43,8 @@ pub struct Config {
     /// OAuth redirects, connect commands and secure cookies. Taken from the
     /// request's Host header when unset.
     pub public_url: Option<String>,
+    /// Web push identity (`SIDEFLEET_VAPID_PRIVATE_KEY`); push is off without it.
+    pub vapid: Option<push::Vapid>,
     /// Telegram chat told about every new sign-up (hosted mode). Optional.
     pub telegram: Option<Telegram>,
 }
@@ -116,7 +121,16 @@ impl Config {
         let build = std::env::var("SIDEFLEET_BUILD").unwrap_or_else(|_| "dev".into());
         let host_worker = env_nonempty("SIDEFLEET_HOST_WORKER");
         let public_url = env_nonempty("SIDEFLEET_PUBLIC_URL").map(|u| u.trim_end_matches('/').to_string());
-        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, telegram })
+        let vapid = match env_nonempty("SIDEFLEET_VAPID_PRIVATE_KEY") {
+            Some(k) => {
+                let subject = env_nonempty("SIDEFLEET_VAPID_SUBJECT")
+                    .or_else(|| public_url.clone().filter(|u| u.starts_with("https://")))
+                    .unwrap_or_else(|| push::DEFAULT_SUBJECT.into());
+                Some(push::Vapid::from_private_key(&k, &subject)?)
+            }
+            None => None,
+        };
+        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, vapid, telegram })
     }
 
     /// Hosted (multi-tenant) mode: people sign in and have their own orgs.
@@ -135,11 +149,17 @@ pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
     pub events: events::EventBus,
+    pub inbox: inbox::Inbox,
 }
 
 impl AppState {
+    /// Also starts the inbox's watcher when called inside a Tokio runtime.
     pub fn new(pool: PgPool, config: Config) -> Self {
-        Self { pool, config: Arc::new(config), events: events::EventBus::default() }
+        let state = Self { pool, config: Arc::new(config), events: events::EventBus::default(), inbox: inbox::Inbox::default() };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(inbox::watch(state.clone()));
+        }
+        state
     }
 }
 

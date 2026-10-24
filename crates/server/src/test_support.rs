@@ -60,6 +60,7 @@ impl TestEnv {
             host_worker: None,
             github: None,
             public_url: None,
+            vapid: None,
             telegram: None,
         };
         tweak(&mut config);

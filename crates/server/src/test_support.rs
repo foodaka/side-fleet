@@ -61,6 +61,7 @@ impl TestEnv {
             github: None,
             public_url: None,
             telegram: None,
+            vapid: None,
         };
         tweak(&mut config);
         let state = AppState::new(pool.clone(), config);

@@ -54,6 +54,14 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   and the message waits its turn, or press Send now to interrupt. Screenshots and other images the
   agent opens show inline, so you can ask for one from your phone. Drop, paste or attach images to a
   task or reply and the agent gets them too.
+- **Waiting on you**: a bell lists every task that needs you, with why and for how long: finished
+  and waiting for a reply, failed, paused on a usage limit, or its machine dropped. Each such task
+  also gets a marker in the sidebar. A task leaves the list when you open it, reply or dismiss it,
+  and what you have seen is kept on the control plane, so it is the same on your phone and laptop.
+  Turn on "Notify me" for a push notification when a task starts waiting; it carries only the
+  task's title and the reason, never agent output. Browsers only allow push on HTTPS pages or
+  `localhost` (on iPhone, add the page to the Home Screen first). `serve` creates the VAPID key for
+  it in `~/.sidefleet/server.env`; elsewhere set `SIDEFLEET_VAPID_PRIVATE_KEY`.
 - **Permission modes**: read and edit files (default), full access for unattended commands, read
   only for questions, or "Ask me": Claude Code edits files on its own and asks you on the page
   (phone included) before anything else, such as a shell command, and waits for Approve or Deny.

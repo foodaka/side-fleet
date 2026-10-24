@@ -8,12 +8,31 @@ use sidefleet_core::RunEvent;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EventBus {
     inner: Arc<Mutex<HashMap<Uuid, broadcast::Sender<RunEvent>>>>,
+    /// Every published event's run and kind, for listeners across runs (the inbox).
+    all: broadcast::Sender<Touched>,
+}
+
+/// A run got an event of this kind (the payload stays with the run's own subscribers).
+#[derive(Debug, Clone)]
+pub struct Touched {
+    pub run_id: Uuid,
+    pub kind: String,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self { inner: Arc::default(), all: broadcast::channel(1024).0 }
+    }
 }
 
 impl EventBus {
+    pub fn subscribe_all(&self) -> broadcast::Receiver<Touched> {
+        self.all.subscribe()
+    }
+
     pub fn subscribe(&self, run_id: Uuid) -> broadcast::Receiver<RunEvent> {
         let mut map = self.inner.lock().unwrap();
         map.entry(run_id)
@@ -22,6 +41,7 @@ impl EventBus {
     }
 
     pub fn publish(&self, ev: RunEvent) {
+        let _ = self.all.send(Touched { run_id: ev.run_id, kind: ev.kind.clone() });
         let terminal = ev.kind == "status"
             && ev
                 .payload

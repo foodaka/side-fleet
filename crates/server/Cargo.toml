@@ -31,6 +31,8 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+p256.workspace = true
+web-push-native.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true

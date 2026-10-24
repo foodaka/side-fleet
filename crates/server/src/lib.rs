@@ -7,6 +7,7 @@ pub mod db;
 pub mod events;
 pub mod fork;
 pub mod inbox;
+pub mod notify;
 pub mod oauth;
 pub mod push;
 pub mod routes;
@@ -44,6 +45,8 @@ pub struct Config {
     pub public_url: Option<String>,
     /// Web push identity (`SIDEFLEET_VAPID_PRIVATE_KEY`); push is off without it.
     pub vapid: Option<push::Vapid>,
+    /// Telegram chat told about every new sign-up (hosted mode). Optional.
+    pub telegram: Option<Telegram>,
 }
 
 /// A GitHub OAuth app. The URLs are configurable so tests can stand in for GitHub.
@@ -68,6 +71,21 @@ impl GithubOAuth {
     }
 }
 
+/// A Telegram bot and the chat it posts to. The API URL is configurable so tests
+/// can stand in for Telegram.
+#[derive(Clone)]
+pub struct Telegram {
+    pub bot_token: String,
+    pub chat_id: String,
+    pub api_url: String,
+}
+
+impl Telegram {
+    pub fn new(bot_token: String, chat_id: String) -> Self {
+        Self { bot_token, chat_id, api_url: "https://api.telegram.org".into() }
+    }
+}
+
 fn env_nonempty(k: &str) -> Option<String> {
     std::env::var(k).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -81,6 +99,11 @@ impl Config {
             (Some(id), Some(secret)) => Some(GithubOAuth::new(id, secret)),
             (None, None) => None,
             _ => anyhow::bail!("set both SIDEFLEET_GITHUB_CLIENT_ID and SIDEFLEET_GITHUB_CLIENT_SECRET for GitHub sign-in"),
+        };
+        let telegram = match (env_nonempty("TELEGRAM_BOT_TOKEN"), env_nonempty("TELEGRAM_CHAT_ID")) {
+            (Some(token), Some(chat)) => Some(Telegram::new(token, chat)),
+            (None, None) => None,
+            _ => anyhow::bail!("set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for sign-up messages"),
         };
         let dev_key = env_nonempty("SIDEFLEET_DEV_KEY").unwrap_or_default();
         let tokens = env_nonempty("SIDEFLEET_WORKER_TOKENS").or_else(|| env_nonempty("SIDEFLEET_WORKER_TOKEN")).unwrap_or_default();
@@ -107,7 +130,7 @@ impl Config {
             }
             None => None,
         };
-        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, vapid })
+        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, vapid, telegram })
     }
 
     /// Hosted (multi-tenant) mode: people sign in and have their own orgs.

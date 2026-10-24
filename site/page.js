@@ -512,50 +512,12 @@
 	document.addEventListener('click', (e) => {
 		const el = e.target.closest('a, [data-copy]');
 		if (!el) return;
-		const where = el.closest('header') ? 'nav' : el.closest('.hero') ? 'hero' : el.closest('.closing') ? 'closing' : el.closest('footer') ? 'footer' : 'page';
+		const where = el.closest('header') ? 'nav' : el.closest('.hero') ? 'hero' : el.closest('.hosted') ? 'hosted' : el.closest('.closing') ? 'closing' : el.closest('footer') ? 'footer' : 'page';
 		if (el.dataset.copy) window.va('event', { name: 'Copy command', data: { command: el.dataset.copy.split(' ')[0] === 'curl' ? 'install' : el.dataset.copy.split(' ')[1] } });
 		else if (el.getAttribute('href') === '#install') window.va('event', { name: 'Install click', data: { where } });
+		else if (el.hostname === 'app.sidefleet.xyz') window.va('event', { name: 'Sign in click', data: { where } });
 		else if (el.hostname === 'github.com') window.va('event', { name: 'GitHub click', data: { where } });
 	});
-
-	/* ───────── Early access ───────── */
-	// Posts to /api/early-access, which forwards the request to Telegram.
-	const ea = $('#early-access');
-	if (ea) {
-		const msg = $('.ea-msg', ea);
-		const email = ea.elements.email;
-		ea.addEventListener('submit', async (e) => {
-			e.preventDefault();
-			const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim());
-			email.setAttribute('aria-invalid', String(!ok));
-			msg.classList.toggle('err', !ok);
-			if (!ok) {
-				msg.textContent = 'Enter a valid email address.';
-				return email.focus();
-			}
-			const btn = $('button', ea);
-			btn.disabled = true;
-			btn.textContent = 'Sending…';
-			msg.classList.remove('err');
-			try {
-				const r = await fetch('/api/early-access', {
-					method: 'POST',
-					headers: { 'content-type': 'application/json' },
-					body: JSON.stringify({ email: email.value, note: ea.elements.note.value, company: ea.elements.company.value }),
-				});
-				const data = await r.json().catch(() => ({}));
-				if (!r.ok) throw new Error(data.error || 'Something went wrong. Try again in a minute.');
-				ea.classList.add('done');
-				msg.textContent = "You're on the list. We'll email you when there's a spot.";
-				window.va?.('event', { name: 'Early access request' });
-			} catch (err) {
-				msg.classList.add('err');
-				msg.textContent = err.message;
-				btn.disabled = false;
-				btn.textContent = 'Request early access';
-			}
-		});
-	}
 
 	/* ───────── Copy ───────── */
 	$$('[data-copy]').forEach((b) =>

@@ -11,7 +11,7 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
@@ -28,7 +28,9 @@
 	const modelKey = (a: AgentId) => (a === 'claude' ? 'sidefleet_model' : `sidefleet_model_${a}`);
 	const initialModel = (a: AgentId) => {
 		const m = load(modelKey(a));
-		return a === 'claude' ? (MODELS.some((x) => x.id === m) ? m : 'claude-sonnet-5-5') : m;
+		// A remembered full id (`claude-opus-5-5`, from before the aliases) becomes its alias.
+		const alias = MODELS.find((x) => m === x.id || m.startsWith(`claude-${x.id}-`));
+		return a === 'claude' ? (alias?.id ?? defaultModel(a)) : m;
 	};
 	let model = $state(initialModel(savedAgent));
 	let machine = $state(load('sidefleet_machine'));

@@ -9,7 +9,7 @@ installing Sidefleet from source needs only Rust. Node is needed only to change 
 pnpm install
 pnpm dev        # http://localhost:5173, proxies /v1 to `sidefleet serve` on 127.0.0.1:7373
 pnpm check      # type-check
-pnpm build      # writes ../crates/server/web-dist (commit it)
+pnpm build      # writes ../crates/server/web-dist (don't commit it; CI rebuilds it on main)
 ```
 
 Point the dev server at another control plane with `SIDEFLEET_DEV_API=http://host:port pnpm dev`.

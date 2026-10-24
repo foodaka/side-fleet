@@ -20,6 +20,8 @@ jobs:
       DATABASE_URL: postgres://sidefleet:sidefleet@localhost:5432/sidefleet
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -34,12 +36,13 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web check
-      - name: Embedded web app is up to date
+      - name: Pull request leaves web-dist alone
+        if: github.event_name == 'pull_request'
         run: |
-          pnpm --dir web build
-          git status --porcelain crates/server/web-dist
-          git diff --quiet --exit-code -- crates/server/web-dist && test -z "$(git status --porcelain crates/server/web-dist)" || {
-            echo "::error::crates/server/web-dist is stale. Run 'pnpm build' in web/ and commit the result."; exit 1; }
+          # HEAD is the PR merged into its base, so HEAD^1 is the base.
+          git diff --quiet HEAD^1 HEAD -- crates/server/web-dist || {
+            echo "::error::Don't commit crates/server/web-dist; the web-dist workflow rebuilds it on main. Drop it with: git checkout \$(git merge-base origin/main HEAD) -- crates/server/web-dist && git commit"; exit 1; }
+      - run: pnpm --dir web build
       - run: cargo build --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked

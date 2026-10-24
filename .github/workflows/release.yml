@@ -20,6 +20,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # Build the web app from the tagged source rather than trust that main's web-dist
+      # workflow already ran for this commit.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm --dir web install --frozen-lockfile && pnpm --dir web build
       - run: cargo build --release --locked -p sidefleet --target ${{ matrix.target }}
       - run: tar -C target/${{ matrix.target }}/release -czf sidefleet-${{ matrix.target }}.tar.gz sidefleet
       - uses: softprops/action-gh-release@v2

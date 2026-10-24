@@ -296,7 +296,7 @@ pub async fn create_follow_up(
 /// The model a switch to `agent` uses when none is given (the web's default too).
 fn default_model(agent: Agent) -> &'static str {
     match agent {
-        Agent::Claude => "claude-sonnet-5-5",
+        Agent::Claude => "sonnet",
         Agent::Codex | Agent::Opencode => "",
     }
 }

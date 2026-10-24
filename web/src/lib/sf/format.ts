@@ -8,27 +8,35 @@ export const AGENTS: { id: AgentId; name: string; hint: string }[] = [
 
 export const agentName = (id: string | null | undefined) => AGENTS.find((a) => a.id === id)?.name ?? 'Claude Code';
 
-/** Claude Code's models; Codex and opencode offer whatever each machine reports. */
+/** Claude Code's model aliases, each the latest version the machine's Claude Code knows; Codex and opencode offer whatever each machine reports. */
 export const MODELS = [
-	{ id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', hint: 'Balanced' },
-	{ id: 'claude-opus-5-5', name: 'Opus 5.5', hint: 'Most capable' },
-	{ id: 'claude-haiku-5-5', name: 'Haiku 5.5', hint: 'Fastest' }
+	{ id: 'sonnet', name: 'Sonnet', hint: 'Balanced' },
+	{ id: 'opus', name: 'Opus', hint: 'Most capable' },
+	{ id: 'fable', name: 'Fable', hint: 'Newest family' },
+	{ id: 'haiku', name: 'Haiku', hint: 'Fastest' }
 ] as const;
 
-/** How a model reads: `Sonnet 5.5`, `gpt-6-luna`, `moonshotai/kimi-k2` (opencode's provider prefix dropped). */
+/** A full Claude model id (`claude-sonnet-5-5`): what Claude Code reports running, and what tasks from before the aliases stored. */
+const claudeId = /^claude-[a-z0-9-]+$/;
+
+/** How a model reads: `Sonnet`, `Sonnet 5.5`, `gpt-6-luna`, `moonshotai/kimi-k2` (opencode's provider prefix dropped). */
 export function modelName(id: string, agent?: string | null) {
 	if (!id) return 'default model';
 	const claude = MODELS.find((m) => m.id === id);
 	if (claude) return claude.name;
+	const full = /^claude-([a-z]+)-(\d+)-(\d+)$/.exec(id);
+	if (full) return `${full[1][0].toUpperCase()}${full[1].slice(1)} ${full[2]}.${full[3]}`;
 	return agent === 'opencode' && id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
 }
 
-/** Claude Code takes one of its models; Codex and opencode any id that can't pass as a flag (empty: the machine's default). */
+/** Claude Code takes one of its aliases or a full id; Codex and opencode any id that can't pass as a flag (empty: the machine's default). */
 export const modelValid = (agent: AgentId, model: string) =>
-	agent === 'claude' ? MODELS.some((m) => m.id === model) : /^[A-Za-z0-9._:/@+-]*$/.test(model) && !model.startsWith('-');
+	agent === 'claude'
+		? MODELS.some((m) => m.id === model) || claudeId.test(model)
+		: /^[A-Za-z0-9._:/@+-]*$/.test(model) && !model.startsWith('-');
 
 /** Default model for an agent: Sonnet for Claude Code, the machine's default otherwise. */
-export const defaultModel = (agent: AgentId) => (agent === 'claude' ? 'claude-sonnet-5-5' : '');
+export const defaultModel = (agent: AgentId) => (agent === 'claude' ? 'sonnet' : '');
 
 /** `Claude Code · Sonnet 5.5`, `opencode · moonshotai/kimi-k2`. */
 export const agentModel = (agent: string | null | undefined, model: string) => `${agentName(agent)} · ${modelName(model, agent)}`;

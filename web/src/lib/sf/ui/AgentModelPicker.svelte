@@ -1,6 +1,6 @@
 <script lang="ts">
 	// The agent menu and, next to it, the model control that suits that agent:
-	// Claude's three models, the machine's Codex models, or a searchable field for opencode.
+	// Claude's model aliases, the machine's Codex models, or a searchable field for opencode.
 	import * as Select from '#lib/components/ui/select';
 	import { AGENTS, MODELS, agentName, modelName, modelValid } from '../format';
 	import type { AgentId } from '../types';

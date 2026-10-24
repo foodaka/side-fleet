@@ -15,6 +15,7 @@
 	import SignIn from '#lib/sf/ui/SignIn.svelte';
 	import NewOrgDialog from '#lib/sf/ui/NewOrgDialog.svelte';
 	import RepoPicker from '#lib/sf/ui/RepoPicker.svelte';
+	import FeedbackDialog from '#lib/sf/ui/FeedbackDialog.svelte';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { seen } from '#lib/sf/seen.svelte';
 	import type { LayoutProps } from './$types';
@@ -155,3 +156,4 @@
 {#if fleet.needsSignIn}<SignIn />{/if}
 <RepoPicker />
 <NewOrgDialog />
+<FeedbackDialog />

@@ -24,6 +24,7 @@ class Fleet {
 	/** A thread whose page should open the fork dialog for its latest message (asked from the sidebar). */
 	forkThread = $state<string | null>(null);
 	newOrgOpen = $state(false);
+	feedbackOpen = $state(false);
 	/** How this control plane lets people in; null until loaded. */
 	methods = $state<AuthMethods | null>(null);
 	/** Who is signed in and their orgs. */

@@ -23,8 +23,17 @@ pub enum Agent {
 
 pub const AGENTS: &[Agent] = &[Agent::Claude, Agent::Codex, Agent::Opencode];
 
-/// Models Claude Code tasks may use.
-pub const CLAUDE_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+/// Claude Code's model aliases: each runs the latest version of that model the
+/// machine's Claude Code knows, so a new version needs no Sidefleet change.
+pub const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "fable", "haiku"];
+
+/// A full Claude model id (`claude-sonnet-5-5`), as tasks from before the aliases stored.
+fn is_claude_model_id(model: &str) -> bool {
+    model.len() <= 100
+        && model.strip_prefix("claude-").is_some_and(|rest| {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
 
 impl Agent {
     pub fn as_str(&self) -> &'static str {
@@ -52,13 +61,14 @@ impl Agent {
         self.as_str()
     }
 
-    /// Check a model id for this agent. Claude Code takes one of [`CLAUDE_MODELS`];
+    /// Check a model id for this agent. Claude Code takes one of [`CLAUDE_MODELS`]
+    /// or a full `claude-…` id;
     /// Codex and opencode take whatever the machine offers (`gpt-6-luna`,
     /// `openrouter/moonshotai/kimi-k2`), or empty for the machine's default.
     pub fn check_model(&self, model: &str) -> Result<(), String> {
         match self {
-            Agent::Claude if CLAUDE_MODELS.contains(&model) => Ok(()),
-            Agent::Claude => Err(format!("model must be one of {}", CLAUDE_MODELS.join(", "))),
+            Agent::Claude if CLAUDE_MODELS.contains(&model) || is_claude_model_id(model) => Ok(()),
+            Agent::Claude => Err(format!("model must be one of {} or a full claude-… id", CLAUDE_MODELS.join(", "))),
             Agent::Codex | Agent::Opencode if model.is_empty() => Ok(()),
             Agent::Codex | Agent::Opencode => {
                 let ok = model.len() <= 200
@@ -199,7 +209,12 @@ mod tests {
 
     #[test]
     fn checks_models_per_agent() {
-        assert!(Agent::Claude.check_model("claude-sonnet-5-5").is_ok());
+        assert!(Agent::Claude.check_model("sonnet").is_ok());
+        assert!(Agent::Claude.check_model("fable").is_ok());
+        assert!(Agent::Claude.check_model("claude-sonnet-5-5").is_ok(), "full ids from older tasks still work");
+        assert!(Agent::Claude.check_model("claude-").is_err());
+        assert!(Agent::Claude.check_model("claude-sonnet; rm -rf").is_err());
+        assert!(Agent::Claude.check_model("Sonnet").is_err());
         assert!(Agent::Claude.check_model("gpt-6-luna").is_err());
         assert!(Agent::Claude.check_model("").is_err());
         assert!(Agent::Codex.check_model("").is_ok(), "empty means the machine's default");

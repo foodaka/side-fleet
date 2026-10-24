@@ -5,6 +5,9 @@
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
+	import Cpu from '@lucide/svelte/icons/cpu';
+	import MemoryStick from '@lucide/svelte/icons/memory-stick';
+	import HardDrive from '@lucide/svelte/icons/hard-drive';
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
@@ -63,6 +66,8 @@
 	const models = $derived(machineModels(pinned ? [pinned] : machines, agent));
 	const modelOk = $derived(modelValid(agent, model));
 	const canRun = $derived(!!task.trim() && !!repo && machines.length > 0 && modelOk && !busy);
+	/** Live load of the machine the task lands on; only when there is one, not "whichever is free first". */
+	const stats = $derived(pinned || machines.length === 1 ? target?.capabilities.system : undefined);
 	/** Why the chosen machine may fail the task, if it can tell. */
 	const warning = $derived.by(() => {
 		const a = target?.capabilities.agents;
@@ -285,6 +290,13 @@
 					{#if iso === 'worktree' && failover}<br />If that machine drops, the task moves to another one; its branch is pushed to origin as it goes.{/if}
 				{/if}
 			</p>
+			{#if stats}
+				<div class="tnum -mt-1 flex flex-wrap justify-center gap-1.5 text-xs text-muted-foreground" aria-label="{target?.display_name} right now">
+					<span class="inline-flex h-6 items-center gap-1.5 rounded-full border bg-card px-2.5" title="CPU busy, {stats.cpu_cores} cores"><Cpu class="size-3.5" />{Math.round(stats.cpu_percent)}% of {stats.cpu_cores} cores</span>
+					<span class="inline-flex h-6 items-center gap-1.5 rounded-full border bg-card px-2.5" title="Memory in use"><MemoryStick class="size-3.5" />{(stats.mem_used_mb / 1024).toFixed(1)} / {Math.round(stats.mem_total_mb / 1024)} GB</span>
+					<span class="inline-flex h-6 items-center gap-1.5 rounded-full border bg-card px-2.5" title="Free disk where the repos live"><HardDrive class="size-3.5" />{Math.round(stats.disk_free_gb).toLocaleString()} GB free</span>
+				</div>
+			{/if}
 		</form>
 
 		{#if recent.length}

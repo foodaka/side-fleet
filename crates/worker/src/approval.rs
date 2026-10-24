@@ -333,7 +333,9 @@ mod tests {
         assert_eq!(answer(2), json!({"behavior": "allow", "updatedInput": {"command": "ls"}}));
         assert_eq!(answer(3), json!({"behavior": "deny", "message": "not on the page"}));
         assert_eq!(replies.len(), 5, "no reply to the notification: {text}");
-        assert_eq!(asked.lock().unwrap()[0].tool_use_id.as_deref(), Some("toolu_1"));
+        // The two calls are relayed side by side, so either may arrive first.
+        let bash = asked.lock().unwrap().iter().find(|a| a.tool_name == "Bash").cloned().expect("the Bash call was asked about");
+        assert_eq!(bash.tool_use_id.as_deref(), Some("toolu_1"));
 
         drop(bridge);
         assert!(!dir.exists(), "the socket folder is removed with the bridge");

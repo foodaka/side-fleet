@@ -48,6 +48,7 @@
 	--run: #8b5cf6;  --run-soft: #f1eafb; --run-ink: #5b3aa8;
 	--queue: #f08a2e; --queue-soft: #fdf1e6; --queue-ink: #94470a;
 	--ok: #13a05a;    --ok-soft: #e6f6ee;  --ok-ink: #0b6b3a;
+	--merged-ink: #7c3aed; /* a merged pull request, as GitHub colours it */
 	--err: #e5484d;   --err-soft: #fdecec; --err-ink: #a32323;
 	--off: #b4b2a9;
 
@@ -97,6 +98,7 @@
 	--run: #a78bfa;  --run-soft: #2a2238; --run-ink: #c9b5fb;
 	--queue: #f5a25a; --queue-soft: #33261a; --queue-ink: #f7c08a;
 	--ok: #3ccf86;    --ok-soft: #17291f;  --ok-ink: #7fe0ae;
+	--merged-ink: #b794f6;
 	--err: #f2555a;   --err-soft: #331b1c; --err-ink: #f8a0a3;
 	--off: #5b5a55;
 
@@ -120,6 +122,7 @@
 	--color-ok: var(--ok); --color-ok-soft: var(--ok-soft); --color-ok-ink: var(--ok-ink);
 	--color-err: var(--err); --color-err-soft: var(--err-soft); --color-err-ink: var(--err-ink);
 	--color-off: var(--off);
+	--color-merged-ink: var(--merged-ink);
 	--color-diff-add: var(--diff-add); --color-diff-add-ink: var(--diff-add-ink);
 	--color-diff-del: var(--diff-del); --color-diff-del-ink: var(--diff-del-ink);
 	--font-sans: 'Inter Variable', sans-serif;

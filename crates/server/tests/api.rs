@@ -1727,3 +1727,79 @@ async fn ask_me_is_for_claude_code() {
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn pull_requests_are_opened_on_the_threads_machine_and_kept_on_the_thread() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let open = |id: Uuid| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/pr")).send();
+    let claim_pr = || {
+        api.worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": "w", "repos": ["r"], "busy_repos": [], "agents": ["claude"], "kinds": ["agent", "restore", "fork", "pr"]}))
+            .send()
+    };
+
+    let (_, body) = api.create_run("Fix the login bug\n\nIt loops forever.", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(open(id).await.unwrap().status(), StatusCode::CONFLICT, "busy while queued");
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", id, json!([{"kind": "agent_init", "payload": {"session_id": "s1"}}])).await;
+    api.finish("w", id, "succeeded", json!({})).await;
+
+    // Queued on the thread's machine, titled after the task; only a worker that says it can, gets it.
+    let r = open(id).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let pid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let run = api.get_run(pid).await;
+    assert_eq!((run.kind.as_str(), run.parent_id, run.pinned_worker_id.as_deref()), ("pr", Some(id), Some("w")));
+    assert!(run.context.as_deref().unwrap().starts_with("Fix the login bug\n\n"));
+    assert!(api.claim("w", &["r"]).await.is_none(), "older worker must not run it as a task");
+    assert_eq!(claim_pr().await.unwrap().json::<Run>().await.unwrap().id, pid);
+
+    let report = |state: &str| {
+        api.worker(reqwest::Method::POST, "/v1/worker/prs")
+            .json(&json!({"worker_id": "w", "prs": [{"thread": id, "pr": {"url": "https://github.com/o/r/pull/7", "number": 7, "state": state}}]}))
+            .send()
+    };
+    assert_eq!(report("open").await.unwrap().status(), StatusCode::NO_CONTENT);
+    api.finish("w", pid, "succeeded", json!({})).await;
+    let listed = |runs: Vec<Value>| runs.into_iter().find(|r| r["id"] == json!(id)).unwrap()["pr"].clone();
+    let runs: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed(runs), json!({"url": "https://github.com/o/r/pull/7", "number": 7, "state": "open"}));
+    assert_eq!(api.get_run(pid).await.task, "Open a pull request");
+
+    // The machine is asked to look again once it's due, not on every heartbeat.
+    let hb = || async {
+        api.worker(reqwest::Method::POST, "/v1/worker/heartbeat")
+            .json(&json!({"id": "w", "capabilities": {"repos": [], "hostname": "w", "os": "linux", "version": "t"}}))
+            .send().await.unwrap().json::<Value>().await.unwrap()
+    };
+    assert!(hb().await.get("check_prs").is_none(), "just reported");
+    sqlx::query("UPDATE runs SET pr_checked_at = now() - interval '10 minutes'").execute(&env.pool).await.unwrap();
+    assert_eq!(hb().await["check_prs"], json!([{"thread": id, "url": "https://github.com/o/r/pull/7"}]));
+    assert!(hb().await.get("check_prs").is_none(), "handed out once");
+    report("merged").await.unwrap();
+    sqlx::query("UPDATE runs SET pr_checked_at = now() - interval '10 minutes'").execute(&env.pool).await.unwrap();
+    assert!(hb().await.get("check_prs").is_none(), "merged ones aren't checked again");
+    let runs: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed(runs)["state"], "merged");
+
+    // Nonsense is refused.
+    let r = api.worker(reqwest::Method::POST, "/v1/worker/prs")
+        .json(&json!({"worker_id": "w", "prs": [{"thread": id, "pr": {"url": "javascript:alert(1)", "number": 7, "state": "open"}}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+    // In-place tasks have no branch of their own.
+    let r = api.dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "inplace", "model": "claude-haiku-5-5", "repo": "r", "isolation": "checkout"}))
+        .send().await.unwrap();
+    let ip: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.finish("w", ip, "succeeded", json!({})).await;
+    let r = open(ip).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert!(r.text().await.unwrap().contains("in the checkout"));
+    env.teardown().await;
+}

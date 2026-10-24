@@ -6,6 +6,7 @@
 	import { ago, dayGroup, duration, repoLabel } from '../format';
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
+	import PrIcon from './PrIcon.svelte';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import Ellipsis from '@lucide/svelte/icons/ellipsis';
 	import GitFork from '@lucide/svelte/icons/git-fork';
@@ -98,6 +99,11 @@
 				<span class="truncate font-mono text-[11px] text-faint">{repoLabel(r.repo)}</span>
 			{/if}
 		</span>
+		{#if r.pr}
+			<span class="tnum mt-px flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground group-hover/row:invisible" title="Pull request #{r.pr.number}: {r.pr.state}">
+				<PrIcon state={r.pr.state} />{r.pr.number}
+			</span>
+		{/if}
 		{#if unread}
 			<span class="mt-[6px] size-1.5 shrink-0 rounded-full bg-foreground group-hover/row:invisible" aria-label="New"></span>
 		{:else if !detail}

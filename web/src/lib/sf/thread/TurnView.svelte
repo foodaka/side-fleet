@@ -7,6 +7,7 @@
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 	import GitFork from '@lucide/svelte/icons/git-fork';
+	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
@@ -44,6 +45,7 @@
 	} = $props();
 	const run = $derived(turn.run);
 	const isRestore = $derived(run.kind === 'restore');
+	const isPr = $derived(run.kind === 'pr');
 	const finished = $derived(run.status === 'succeeded' || run.status === 'failed' || run.status === 'stopped');
 	let forking = $state(false);
 	let restoring = $state(false);
@@ -102,8 +104,8 @@
 				Moved{turn.movedFrom ? ` from ${turn.movedFrom}` : ''} to {turn.machine ?? 'another machine'}{#if run.resume_from_branch}, continuing from <span class="font-mono text-[12px]">{run.resume_from_branch}</span>{:else}, starting over (no work had been pushed){/if}
 			</span>
 		</p>
-	{:else if isRestore}
-		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground"><RotateCcw class="size-3" />{run.task}</p>
+	{:else if isRestore || isPr}
+		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">{#if isPr}<GitPullRequest class="size-3" />{:else}<RotateCcw class="size-3" />{/if}{run.task}</p>
 	{:else if !first}
 		<Message from="user">
 			<MessageContent class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap text-primary-foreground group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground">{run.task}</MessageContent>
@@ -121,7 +123,7 @@
 	{/if}
 
 	<div class="flex flex-col gap-1.5">
-		{#if !waiting && !isRestore && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
+		{#if !waiting && !isRestore && !isPr && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-left text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
@@ -152,7 +154,7 @@
 				{:else if it.kind === 'approval'}
 					<ApprovalCard item={it} agent={run.agent} {live} {ondecide} />
 				{:else if it.kind === 'note'}
-					<p class="py-1 text-[13px] {it.tone === 'err' ? 'text-err-ink' : it.tone === 'ok' ? 'text-ok-ink' : 'text-muted-foreground'}">{it.text}</p>
+					<p class="py-1 text-[13px] {it.tone === 'err' ? 'text-err-ink' : it.tone === 'ok' ? 'text-ok-ink' : 'text-muted-foreground'}">{#if it.href}<a href={it.href} target="_blank" rel="noopener noreferrer" class="underline underline-offset-2 hover:opacity-80">{it.text}</a>{:else}{it.text}{/if}</p>
 				{:else if it.kind === 'stderr-group'}
 					<details class="py-0.5 text-xs text-muted-foreground">
 						<summary class="cursor-pointer select-none hover:text-foreground">{it.lines.length} line{it.lines.length === 1 ? '' : 's'} of agent log</summary>
@@ -187,7 +189,7 @@
 			</p>
 		{/if}
 
-		{#if finished && !live}
+		{#if finished && !live && !isPr}
 			<div class="flex justify-end gap-1">
 				{#if onrestore && turn.snapshot}
 					<button

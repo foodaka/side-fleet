@@ -9,6 +9,7 @@
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
 	import GitFork from '@lucide/svelte/icons/git-fork';
+	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import Square from '@lucide/svelte/icons/square';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
@@ -19,6 +20,7 @@
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import CopyButton from '#lib/sf/ui/CopyButton.svelte';
+	import PrIcon from '#lib/sf/ui/PrIcon.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
@@ -68,6 +70,9 @@
 	const latest = $derived(thread?.current);
 	const live = $derived(!!thread?.live);
 	const machineOnline = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.online);
+	// The thread's pull request: the list's copy is re-checked by the machine, the thread's is set the moment one opens.
+	const pr = $derived(fleet.runs.find((r) => r.id === root?.id)?.pr ?? root?.pr ?? null);
+	const prLabel = { open: 'Open', merged: 'Merged', closed: 'Closed' };
 
 	// The review panel: everything the thread changed, or one message's changes.
 	let diffOpen = $state(false);
@@ -149,6 +154,17 @@
 			toast.error('Could not restore', { description: (err as Error).message });
 		}
 	}
+	let opening = $state(false);
+	async function openPr() {
+		opening = true;
+		try {
+			await thread?.openPr();
+			void fleet.refresh();
+		} catch (err) {
+			toast.error('Could not open a pull request', { description: (err as Error).message });
+		}
+		opening = false;
+	}
 	async function stop() {
 		stopping = true;
 		try { await thread?.stop(); } catch (err) { toast.error('Could not stop', { description: (err as Error).message }); }
@@ -203,6 +219,11 @@
 							<CopyButton text={() => thread?.branch ?? ''} label="" class="h-5 bg-transparent px-1 text-muted-foreground hover:bg-accent hover:text-foreground" />
 						</span>
 					{/if}
+					{#if pr}
+						<a href={pr.url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 hover:text-foreground" title="Open pull request #{pr.number} on GitHub">
+							<PrIcon state={pr.state} /><span class="tnum text-foreground/80">#{pr.number}</span>{prLabel[pr.state]}
+						</a>
+					{/if}
 					{#if thread.runs.length > 1}<span class="tnum max-md:hidden">{thread.runs.length} messages</span>{/if}
 					{#if root.forked_from}
 						<a href="#/runs/{root.forked_from}" class="inline-flex items-center gap-1 hover:text-foreground"><GitFork class="size-3" />Forked from <span class="max-w-[16rem] truncate text-foreground/80">{forkSource ?? 'another thread'}</span></a>
@@ -237,7 +258,7 @@
 						<TurnView
 							{turn}
 							first={i === 0}
-							prev={thread.turns.slice(0, i).findLast((t) => t.run.kind !== 'restore')}
+							prev={thread.turns.slice(0, i).findLast((t) => t.run.kind === 'agent')}
 							live={turn.run.id === thread.current?.id && live}
 							waiting={thread.waiting(turn.run.id)}
 							onsendnow={sendNow}
@@ -248,9 +269,30 @@
 						/>
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}
-						<p class="rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground">
-							The changes are on branch <span class="font-mono text-foreground/80">{thread.branch}</span> in {repoLabel(root?.repo)} on {thread.machine}. Review, merge or push it from there.
-						</p>
+						{@const branch = thread.branch}
+						<div class="flex items-center gap-3 rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground max-sm:flex-col max-sm:items-stretch">
+							<p class="flex-1">
+								{#if pr?.state === 'merged'}
+									Merged in <a href={pr.url} target="_blank" rel="noopener noreferrer" class="text-foreground/80 underline underline-offset-2">pull request #{pr.number}</a>. The branch <span class="font-mono text-foreground/80">{branch}</span> is still on {thread.machine}.
+								{:else if pr?.state === 'open'}
+									<a href={pr.url} target="_blank" rel="noopener noreferrer" class="text-foreground/80 underline underline-offset-2">Pull request #{pr.number}</a> is open for <span class="font-mono text-foreground/80">{branch}</span>. Keep working here, then push the new changes to it.
+								{:else}
+									The changes are on branch <span class="font-mono text-foreground/80">{branch}</span> in {repoLabel(root?.repo)} on {thread.machine}.{#if pr?.state === 'closed'} <a href={pr.url} target="_blank" rel="noopener noreferrer" class="underline underline-offset-2">Pull request #{pr.number}</a> was closed.{/if} Open a pull request, or review, merge or push it from there.
+								{/if}
+							</p>
+							{#if pr?.state !== 'merged'}
+								<Button
+									size="sm"
+									variant={pr?.state === 'open' ? 'outline' : 'default'}
+									class="h-8 shrink-0 rounded-full text-xs"
+									onclick={openPr}
+									disabled={opening || !machineOnline}
+									title={machineOnline ? `Commits what's left, pushes ${branch} to origin and opens a pull request with the GitHub CLI on ${thread.machine}` : `${thread.machine} is offline`}
+								>
+									<GitPullRequest class="size-3.5" />{opening ? 'Starting…' : pr?.state === 'open' ? 'Push changes' : 'Open pull request'}
+								</Button>
+							{/if}
+						</div>
 					{/if}
 				{/if}
 			</ConversationContent>

@@ -102,6 +102,12 @@ pub async fn run(
 /// Commit everything in the worktree and push its branch to `origin`. Returns
 /// the pushed sha, or None when there was nothing new since `last_sha`.
 pub async fn checkpoint(worktree: &Path, branch: &str, last_sha: Option<&str>) -> Result<Option<String>> {
+    commit_and_push(worktree, branch, "sidefleet checkpoint", last_sha).await
+}
+
+/// Commit everything in the worktree with `message` and push its branch to `origin`.
+/// Returns the pushed sha, or None when there was nothing new since `last_sha`.
+pub async fn commit_and_push(worktree: &Path, branch: &str, message: &str, last_sha: Option<&str>) -> Result<Option<String>> {
     if !is_task_branch(branch) {
         anyhow::bail!("{branch} is not a sidefleet task branch; not pushing it");
     }
@@ -117,7 +123,7 @@ pub async fn checkpoint(worktree: &Path, branch: &str, last_sha: Option<&str>) -
         if !has_identity {
             args.extend(["-c", "user.name=Sidefleet", "-c", "user.email=sidefleet@localhost"]);
         }
-        args.extend(["commit", "--no-verify", "--quiet", "-m", "sidefleet checkpoint"]);
+        args.extend(["commit", "--no-verify", "--quiet", "-m", message]);
         git(worktree, &args, None).await?;
     }
     let sha = git(worktree, &["rev-parse", "HEAD"], None).await?;
@@ -140,7 +146,7 @@ pub async fn fetch_branch(repo: &Path, branch: &str) -> Result<String> {
 }
 
 /// `git -C dir args`, never prompting for credentials.
-async fn git(dir: &Path, args: &[&str], timeout: Option<Duration>) -> Result<String> {
+pub(crate) async fn git(dir: &Path, args: &[&str], timeout: Option<Duration>) -> Result<String> {
     let cmd = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)

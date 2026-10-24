@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use sidefleet_core::{
     Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, NewEvent,
-    PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
+    PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
@@ -114,6 +114,20 @@ impl ControlClient {
         Ok(r.json().await.context("heartbeat response")?)
     }
 
+    /// What this machine found out about threads' pull requests.
+    pub async fn report_prs(&self, prs: Vec<PrReport>) -> Result<()> {
+        let r = self
+            .http
+            .post(self.url("/v1/worker/prs"))
+            .bearer_auth(&self.token)
+            .json(&PrReports { worker_id: self.worker_id.clone(), prs })
+            .send()
+            .await
+            .context("pull request report failed")?;
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(())
+    }
+
     pub async fn update_ack(&self) -> Result<()> {
         let r = self
             .http
@@ -138,7 +152,7 @@ impl ControlClient {
                 busy_repos: busy_repos.to_vec(),
                 agents: agents.to_vec(),
                 slots: Some(slots.clone()),
-                kinds: vec!["agent".into(), "restore".into(), "fork".into()],
+                kinds: vec!["agent".into(), "restore".into(), "fork".into(), "pr".into()],
             })
             .send()
             .await

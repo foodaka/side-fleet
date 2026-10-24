@@ -41,7 +41,7 @@ export type Item =
 			expiresAt: string;
 			at: string;
 	  }
-	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string }
+	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string; href?: string }
 	| { kind: 'stderr'; key: string; text: string; at: string };
 
 export interface Turn {
@@ -152,7 +152,16 @@ export class Thread {
 
 	/** Put the files back to how they were before `runId` started; the session carries on. */
 	async restore(runId: string) {
-		const r = await api<{ id: string }>(`/v1/runs/${runId}/restore`, { method: 'POST' });
+		await this.#action(`/v1/runs/${runId}/restore`);
+	}
+
+	/** Push the branch and open a pull request for it (or update the open one). */
+	async openPr() {
+		await this.#action(`/v1/runs/${this.root!.id}/pr`);
+	}
+
+	async #action(path: string) {
+		const r = await api<{ id: string }>(path, { method: 'POST' });
 		const run = await api<Run>(`/v1/runs/${r.id}`);
 		this.runs.push(run);
 		this.turns.push(newTurn(run));
@@ -216,6 +225,10 @@ export class Thread {
 				apply(turn, this.runs[i], ev);
 				// The machine dropped and the run was queued again elsewhere: follow the new run too.
 				if (ev.kind === 'status' && ev.payload?.moved_to) void this.#adopt(ev.payload.moved_to);
+				if (ev.kind === 'pull_request' && this.root && ev.payload?.url) {
+					const { url, number, state } = ev.payload;
+					this.root.pr = { url, number, state };
+				}
 			},
 			this.#abort.signal,
 			() => (turn.reconnecting = true)
@@ -255,7 +268,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
 				t.machine = run.worker_id;
-				t.activity = run.kind === 'restore' ? 'Restoring the files' : 'Starting ' + agentName(run.agent);
+				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : 'Starting ' + agentName(run.agent);
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
@@ -348,6 +361,10 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			break;
 		case 'restored':
 			t.items.push({ kind: 'note', key, tone: 'ok', text: 'Restored the files', at: ev.at });
+			t.activity = null;
+			break;
+		case 'pull_request':
+			t.items.push({ kind: 'note', key, tone: 'ok', text: `${p.opened ? 'Opened' : 'Pushed to'} pull request #${p.number}`, href: p.url, at: ev.at });
 			t.activity = null;
 			break;
 		case 'diff':

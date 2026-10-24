@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sidefleet_core::{Agent, Capabilities, NewEvent, Run, RunStatus, Slots, ASK_MODE};
+use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunStatus, Slots, ASK_MODE};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -103,6 +103,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
                 match client.heartbeat(&snapshot, &ids).await {
                     Ok(resp) => {
+                        if !resp.check_prs.is_empty() {
+                            tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
+                        }
                         if resp.update_requested && cfg2.allow_remote_update {
                             if !ids.is_empty() {
                                 tracing::info!(active = ids.len(), "update requested; waiting until this machine is idle");
@@ -390,6 +393,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let root_id = run.parent_id.unwrap_or(run.id);
     let fork_from = run.fork_commit.as_deref().filter(|c| snapshot::is_commit_id(c));
     let mut in_worktree = false;
+    let mut branch: Option<String> = None;
     let cwd = if run.isolation == "worktree" {
         let mut resume_from = run.resume_from_branch.as_deref();
         let mut prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, resume_from, fork_from).await;
@@ -404,6 +408,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         match prepared {
             Ok(wt) => {
                 in_worktree = true;
+                branch = Some(wt.branch.clone());
                 pre_events.push(NewEvent {
                     kind: "workspace".into(),
                     payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy(), "resumed_from": resume_from}),
@@ -442,6 +447,19 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
             Ok(sha) => (RunStatus::Succeeded, json!({"restored_to": sha})),
             Err(e) => {
                 let msg = format!("{e:#}");
+                let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+                (RunStatus::Failed, json!({"error": msg}))
+            }
+        };
+        report_finish(client, run_id, status, result, None).await;
+        return;
+    }
+
+    if run.kind == "pr" {
+        let (status, result) = match run_pr(client, &run, root_id, &cwd, branch.as_deref()).await {
+            Ok(pr) => (RunStatus::Succeeded, json!({"pr": pr})),
+            Err(e) => {
+                let msg = sidefleet_core::redact::redact(&format!("{e:#}"));
                 let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
                 (RunStatus::Failed, json!({"error": msg}))
             }
@@ -661,6 +679,33 @@ async fn run_restore(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Pat
     events.push(NewEvent { kind: "restored".into(), payload: json!({"to": target}) });
     client.post_events(run.id, events).await?;
     Ok(target)
+}
+
+/// A pull request run: commit and push the thread's branch, open a pull request
+/// for it (or find the open one), and tell the control plane about it.
+async fn run_pr(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Path, branch: Option<&str>) -> Result<sidefleet_core::PullRequest> {
+    let branch = branch.context("this task has no branch of its own to open a pull request from")?;
+    let (pr, opened) = crate::pr::open(cwd, branch, run.context.as_deref().unwrap_or("")).await?;
+    client.report_prs(vec![PrReport { thread: root_id, pr: pr.clone() }]).await?;
+    client.post_events(run.id, vec![NewEvent { kind: "pull_request".into(), payload: json!({"url": pr.url, "number": pr.number, "state": pr.state, "opened": opened, "branch": branch})}]).await?;
+    Ok(pr)
+}
+
+/// Look at open pull requests again and report the ones that changed state.
+async fn check_prs(client: ControlClient, dir: PathBuf, checks: Vec<PrCheck>) {
+    let mut reports = Vec::new();
+    for c in checks {
+        match crate::pr::view(&dir, &c.url).await {
+            Ok(Some(pr)) => reports.push(PrReport { thread: c.thread, pr }),
+            Ok(None) => {}
+            Err(e) => tracing::debug!(url = %c.url, error = %format!("{e:#}"), "checking a pull request failed"),
+        }
+    }
+    if !reports.is_empty() {
+        if let Err(e) = client.report_prs(reports).await {
+            tracing::warn!(error = %e, "reporting pull requests failed");
+        }
+    }
 }
 
 async fn report_finish(client: &ControlClient, run_id: Uuid, status: RunStatus, result: serde_json::Value, usage_limit: Option<sidefleet_core::UsageLimit>) {

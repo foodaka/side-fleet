@@ -32,14 +32,23 @@ export interface Run {
 	resume_from_branch: string | null;
 	/** Images the user attached to this message. */
 	images?: { id: string; media_type: string; bytes: number }[];
-	/** `restore` runs put the thread's worktree back to a snapshot instead of running the agent. */
-	kind: 'agent' | 'restore';
+	/** `restore` runs put the thread's worktree back to a snapshot instead of running the agent;
+	 * `pr` runs push the thread's branch and open a pull request. */
+	kind: 'agent' | 'restore' | 'pr';
 	restore_to: string | null;
 	/** For a fork: the message (run) of the thread it continues from. */
 	forked_from: string | null;
 	fork_commit: string | null;
 	/** On a thread's first run: when the thread was archived. */
 	archived_at?: string | null;
+	/** On a thread's first run: the pull request opened from its branch, as last checked. */
+	pr?: PullRequest | null;
+}
+
+export interface PullRequest {
+	url: string;
+	number: number;
+	state: 'open' | 'merged' | 'closed';
 }
 
 export interface RunSummary extends Run {

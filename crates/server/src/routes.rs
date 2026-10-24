@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::approvals::{DecideOutcome, RequestOutcome};
 use crate::auth::{self, Caller, Identity, WorkerAuth};
-use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, RestoreOutcome};
+use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, PrOutcome, RestoreOutcome};
 use crate::oauth::{self, public_base};
 use crate::tenancy::{self, Decide, NewEnrollment, Poll, DEFAULT_ORG};
 use crate::AppState;
@@ -57,6 +57,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/stop", post(stop_run))
         .route("/v1/runs/{id}/restore", post(restore_run))
         .route("/v1/runs/{id}/fork", post(fork_run))
+        .route("/v1/runs/{id}/pr", post(open_pr))
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/runs/{id}/approvals", get(list_approvals))
         .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
@@ -89,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/runs/{id}/approvals/{approval}", get(poll_approval))
         .route("/v1/worker/images/{id}", get(worker_get_image))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
+        .route("/v1/worker/prs", post(report_prs))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_worker));
 
     Router::new()
@@ -388,6 +390,29 @@ async fn restore_run(
         RestoreOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into())),
         RestoreOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself; only tasks in their own worktree can be restored".into())),
         RestoreOutcome::NoCheckpoint => Err(ApiError(StatusCode::CONFLICT, "this message has no snapshot to restore".into())),
+    }
+}
+
+/// Push the thread's branch and open a pull request for it (or update the open one).
+async fn open_pr(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+        return Err(not_found());
+    }
+    check_run_limit(&state, &caller).await?;
+    match db::create_pr_run(&state.pool, caller.org_id(), id).await? {
+        PrOutcome::Created(run, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, thread = %id, "pull request queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        PrOutcome::NotFound => Err(not_found()),
+        PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into())),
+        PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch of its own to open a pull request from".into())),
+        PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
     }
 }
 
@@ -810,6 +835,7 @@ async fn heartbeat(
         Ok(Json(HeartbeatResponse {
             server_version: state.config.build.clone(),
             update_requested: db::update_requested(&state.pool, auth.org, &req.id).await?,
+            check_prs: db::prs_to_check(&state.pool, auth.org, &req.id).await?,
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
@@ -847,6 +873,21 @@ async fn claim_run(
         }
         None => Ok(StatusCode::NO_CONTENT.into_response()),
     }
+}
+
+async fn report_prs(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Json(req): Json<sidefleet_core::PrReports>,
+) -> Result<StatusCode, ApiError> {
+    if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    }
+    if req.prs.len() > 100 || req.prs.iter().any(|r| !matches!(r.pr.state.as_str(), "open" | "merged" | "closed") || !r.pr.url.starts_with("https://")) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad pull request report".into()));
+    }
+    db::record_prs(&state.pool, auth.org, &req.worker_id, &req.prs).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

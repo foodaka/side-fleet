@@ -95,8 +95,9 @@ pub struct Run {
     /// Images the user attached to this message (`GET /v1/images/:id`, `/v1/worker/images/:id`).
     #[serde(default)]
     pub images: Vec<ImageRef>,
-    /// `agent` (the coding agent works on the task) or `restore` (the worker puts
-    /// the thread's worktree back to the snapshot in `restore_to`).
+    /// `agent` (the coding agent works on the task), `restore` (the worker puts
+    /// the thread's worktree back to the snapshot in `restore_to`) or `pr` (the
+    /// worker commits and pushes the thread's branch and opens a pull request).
     #[serde(default = "default_kind")]
     pub kind: String,
     /// For a restore run: the snapshot commit to restore.
@@ -109,11 +110,44 @@ pub struct Run {
     #[serde(default)]
     pub fork_commit: Option<String>,
     /// For a fork: the earlier conversation, given to the agent ahead of the task.
+    /// For a `pr` run: the pull request's title, then a blank line and its body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// On a root run: when its thread was archived (hidden from the list).
     #[serde(default)]
     pub archived_at: Option<DateTime<Utc>>,
+    /// On a root run: the pull request opened from its branch, as last checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PullRequest>,
+}
+
+/// A GitHub pull request for a thread's branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub url: String,
+    pub number: i64,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+}
+
+/// A thread whose open pull request a worker should look at again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrCheck {
+    pub thread: Uuid,
+    pub url: String,
+}
+
+/// `POST /v1/worker/prs`: what a worker found out about threads' pull requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrReports {
+    pub worker_id: String,
+    pub prs: Vec<PrReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrReport {
+    pub thread: Uuid,
+    pub pr: PullRequest,
 }
 
 pub fn default_kind() -> String {
@@ -595,6 +629,9 @@ pub struct HeartbeatResponse {
     /// Someone pressed Update on the Machines page: update when idle, then restart.
     #[serde(default)]
     pub update_requested: bool,
+    /// Open pull requests this worker opened, due to be checked for a merge or close.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_prs: Vec<PrCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

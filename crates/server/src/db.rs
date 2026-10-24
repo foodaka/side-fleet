@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker};
+use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -38,6 +38,7 @@ fn row_to_run(r: &PgRow) -> Run {
         fork_commit: r.get("fork_commit"),
         context: r.get("context"),
         archived_at: r.get("archived_at"),
+        pr: r.get::<Option<Value>, _>("pr").and_then(|v| serde_json::from_value(v).ok()),
     }
 }
 
@@ -77,7 +78,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at";
+    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, pr";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -370,6 +371,101 @@ pub async fn create_restore(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Res
     let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task, "restores": run_id})).await?;
     tx.commit().await?;
     Ok(RestoreOutcome::Created(run, ev))
+}
+
+pub enum PrOutcome {
+    Created(Run, RunEvent),
+    NotFound,
+    /// The thread is still queued or running.
+    Busy(Run),
+    /// The thread ran in the checkout itself, so it has no branch of its own.
+    InPlace,
+    /// No machine has run it yet.
+    NoMachine,
+}
+
+/// Queue a `pr` run on the machine with the thread's worktree: it commits what is
+/// left, pushes the branch and opens (or updates) the thread's pull request.
+pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Result<PrOutcome> {
+    let Some(target) = get_run(pool, org, run_id).await? else {
+        return Ok(PrOutcome::NotFound);
+    };
+    let root_id = target.parent_id.unwrap_or(target.id);
+    let thread = thread_runs(pool, org, root_id).await?;
+    let (Some(root), Some(latest)) = (thread.first().cloned(), thread.last().cloned()) else {
+        return Ok(PrOutcome::NotFound);
+    };
+    if !latest.status.is_terminal() {
+        return Ok(PrOutcome::Busy(latest));
+    }
+    if root.isolation != "worktree" {
+        return Ok(PrOutcome::InPlace);
+    }
+    let Some(worker) = thread.iter().rev().find_map(|r| r.worker_id.clone()) else {
+        return Ok(PrOutcome::NoMachine);
+    };
+    let task = if root.pr.as_ref().is_some_and(|p| p.state == "open") { "Update the pull request" } else { "Open a pull request" };
+    let first_line = root.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("Changes from Sidefleet").trim();
+    let title: String = first_line.chars().take(72).collect();
+    let title = if first_line.chars().count() > 72 { format!("{}…", title.trim_end()) } else { title };
+    let body: String = root.task.chars().take(4000).collect();
+    let context = format!("{title}\n\n{body}\n\nOpened from Sidefleet.");
+    let session = session_for(&thread, latest.agent, None);
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, session_id, pinned_worker_id, permission_mode, isolation, agent, kind, context, org_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 'worktree', $9, 'pr', $10, $11) RETURNING {RUN_COLS}"
+    ))
+    .bind(id)
+    .bind(task)
+    .bind(&latest.model)
+    .bind(&latest.repo)
+    .bind(root_id)
+    .bind(&session)
+    .bind(&worker)
+    .bind(&latest.permission_mode)
+    .bind(latest.agent.as_str())
+    .bind(&context)
+    .bind(org)
+    .fetch_one(&mut *tx)
+    .await?;
+    let run = row_to_run(&row);
+    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task})).await?;
+    tx.commit().await?;
+    Ok(PrOutcome::Created(run, ev))
+}
+
+/// Store what a worker found out about threads' pull requests. Only threads in
+/// its org; the worker that reports a pull request is the one that checks it later.
+pub async fn record_prs(pool: &PgPool, org: Uuid, worker_id: &str, prs: &[PrReport]) -> sqlx::Result<()> {
+    for r in prs {
+        sqlx::query("UPDATE runs SET pr = $3, pr_worker = $4, pr_checked_at = now() WHERE id = $1 AND org_id = $2 AND parent_id IS NULL")
+            .bind(r.thread)
+            .bind(org)
+            .bind(json!(r.pr))
+            .bind(worker_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Open pull requests this worker opened and hasn't checked in a while; marks
+/// them checked now so a failing check isn't handed out on every heartbeat.
+pub async fn prs_to_check(pool: &PgPool, org: Uuid, worker_id: &str) -> sqlx::Result<Vec<PrCheck>> {
+    let rows = sqlx::query(
+        "UPDATE runs SET pr_checked_at = now() WHERE id IN (
+             SELECT id FROM runs WHERE org_id = $1 AND pr_worker = $2 AND pr->>'state' = 'open'
+               AND (pr_checked_at IS NULL OR pr_checked_at < now() - interval '3 minutes')
+             ORDER BY pr_checked_at NULLS FIRST LIMIT 20)
+         RETURNING id, pr->>'url' AS url",
+    )
+    .bind(org)
+    .bind(worker_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| PrCheck { thread: r.get("id"), url: r.get("url") }).collect())
 }
 
 /// The commit (`before` or `after`) in a run's latest `snapshot` event, if it looks like one.

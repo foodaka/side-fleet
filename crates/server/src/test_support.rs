@@ -59,6 +59,7 @@ impl TestEnv {
             host_worker: None,
             github: None,
             public_url: None,
+            vapid: None,
         };
         tweak(&mut config);
         let state = AppState::new(pool.clone(), config);

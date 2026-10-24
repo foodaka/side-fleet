@@ -132,6 +132,7 @@ Environment:
 | `SIDEFLEET_PUBLIC_URL` | `https://app.sidefleet.xyz`: OAuth redirect, connect commands, `Secure` cookies |
 | `SIDEFLEET_BIND` | `0.0.0.0:8080` in the container |
 | `SIDEFLEET_DEV_KEY`, `SIDEFLEET_WORKER_TOKENS` | optional on a hosted control plane; act in the default org (leave unset) |
+| `SIDEFLEET_VAPID_PRIVATE_KEY` | web push ("Notify me"): a P-256 private key, base64url. `sidefleet serve` creates one when unset, but in a container it is lost on redeploy and browsers have to turn push on again; copy the `SIDEFLEET_VAPID_PRIVATE_KEY=` line a local `sidefleet serve` writes to `~/.sidefleet/server.env` into the platform's secrets instead. `SIDEFLEET_VAPID_SUBJECT` (`mailto:` or `https:`) defaults to `SIDEFLEET_PUBLIC_URL` |
 | `RUST_LOG` | log filter; logs never contain tokens, cookies or task text beyond ids |
 
 Run **one** instance. Live events reach open pages through an in-process broadcast, so a second

@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/enrollments/lookup", post(lookup_enrollment))
         .route("/v1/enrollments/{id}/approve", post(approve_enrollment))
         .route("/v1/enrollments/{id}/deny", post(deny_enrollment))
+        .merge(crate::inbox::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()
@@ -95,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/icon-512.png", get(|| web_file("icon-512.png")))
         .route("/maskable-512.png", get(|| web_file("maskable-512.png")))
         .route("/manifest.webmanifest", get(|| web_file("manifest.webmanifest")))
+        .route("/service-worker.js", get(|| web_file("service-worker.js")))
         .route("/healthz", get(healthz))
         .route("/connect.md", get(connect_md))
         .route("/auth/github/login", get(oauth::login))
@@ -529,6 +531,7 @@ async fn archive_run(
 ) -> Result<Json<Run>, ApiError> {
     let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
+    state.inbox.signal(caller.org_id()); // archived tasks leave the inbox
     Ok(Json(root))
 }
 

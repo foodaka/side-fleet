@@ -8,6 +8,7 @@
 	import StatusDot from './StatusDot.svelte';
 	import RunList from './RunList.svelte';
 	import OrgSwitcher from './OrgSwitcher.svelte';
+	import InboxBell from './InboxBell.svelte';
 	import { fleet } from '../state.svelte';
 	import { parseBuild } from '../format';
 
@@ -55,8 +56,10 @@
 <svelte:window {onkeydown} />
 
 <div class="flex h-full flex-col">
-	<div class="flex items-center justify-between gap-2 pt-3.5 pr-2.5 pb-3 pl-4">
+	<div class="flex items-center gap-1 pt-3.5 pr-2.5 pb-3 pl-4">
 		<a href="#/" class="flex items-center gap-2 text-[15px] font-semibold tracking-tight"><Logo />Sidefleet</a>
+		<span class="ml-auto"></span>
+		{#if !drawer}<InboxBell />{/if}
 		<Tooltip.Root>
 			<Tooltip.Trigger
 				class="mi-hover grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"

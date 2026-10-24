@@ -132,6 +132,7 @@ Environment:
 | `SIDEFLEET_PUBLIC_URL` | `https://app.sidefleet.xyz`: OAuth redirect, connect commands, `Secure` cookies |
 | `SIDEFLEET_BIND` | `0.0.0.0:8080` in the container |
 | `SIDEFLEET_DEV_KEY`, `SIDEFLEET_WORKER_TOKENS` | optional on a hosted control plane; act in the default org (leave unset) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | optional; a Telegram message (GitHub login, email, user count) for every new sign-up. Set both or neither |
 | `RUST_LOG` | log filter; logs never contain tokens, cookies or task text beyond ids |
 
 Run **one** instance. Live events reach open pages through an in-process broadcast, so a second

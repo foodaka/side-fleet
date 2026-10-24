@@ -42,6 +42,11 @@ services:
         sync: false
       - key: SIDEFLEET_GITHUB_CLIENT_SECRET
         sync: false
+      # Optional: a Telegram message for every new sign-up. Set both or neither.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
 
 databases:
   - name: sidefleet-db

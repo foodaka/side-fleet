@@ -136,6 +136,9 @@ pub async fn callback(State(state): State<AppState>, headers: HeaderMap, Query(q
         }
     };
     tracing::info!(user = %u.login, new = created, "signed in with GitHub");
+    if created {
+        crate::notify::new_user(&state, &u.login, email.as_deref());
+    }
     let mut res = Redirect::to("/").into_response();
     let h = res.headers_mut();
     if let Ok(v) = set_cookie(&state, SESSION_COOKIE, &session, "/", tenancy::SESSION_DAYS * 86_400).parse() {

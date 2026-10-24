@@ -46,7 +46,11 @@ export interface RunSummary extends Run {
 	follow_ups: number;
 	thread_status: RunStatus;
 	last_activity_at: string;
+	/** Tool calls in the thread waiting for you to approve or deny them ("Ask me"). */
+	pending_approvals?: number;
 }
+
+export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';
 
 export interface RunEvent {
 	run_id: string;

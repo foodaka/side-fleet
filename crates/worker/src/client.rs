@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use sidefleet_core::{
-    Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, NewEvent,
+    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, NewEvent,
     PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
@@ -171,6 +171,33 @@ impl ControlClient {
             .send()
             .await
             .context("control request failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.json().await?)
+    }
+
+    /// Ask the person on the page about a tool call ("Ask me").
+    pub async fn request_approval(&self, run_id: Uuid, req: &ApprovalRequest) -> Result<Approval> {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/worker/runs/{run_id}/approvals?worker_id={}", self.worker_id)))
+            .bearer_auth(&self.token)
+            .json(req)
+            .send()
+            .await
+            .context("approval request failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.json().await?)
+    }
+
+    /// An approval as it stands (expired or cancelled once past its deadline or run).
+    pub async fn approval(&self, run_id: Uuid, id: Uuid) -> Result<Approval> {
+        let r = self
+            .http
+            .get(self.url(&format!("/v1/worker/runs/{run_id}/approvals/{id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("approval poll failed")?;
         let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
         Ok(r.json().await?)
     }

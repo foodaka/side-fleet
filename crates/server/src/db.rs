@@ -81,7 +81,7 @@ const RUN_COLS: &str =
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
-async fn append_event_locked(
+pub(crate) async fn append_event_locked(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Uuid,
     kind: &str,
@@ -101,7 +101,7 @@ async fn append_event_locked(
 }
 
 /// Lock a run row. With `org`, a run of another org is treated as missing.
-async fn lock_run(tx: &mut Transaction<'_, Postgres>, org: Option<Uuid>, run_id: Uuid) -> sqlx::Result<Option<Run>> {
+pub(crate) async fn lock_run(tx: &mut Transaction<'_, Postgres>, org: Option<Uuid>, run_id: Uuid) -> sqlx::Result<Option<Run>> {
     let row = sqlx::query(&format!("SELECT {RUN_COLS} FROM runs WHERE id = $1 AND ($2::uuid IS NULL OR org_id = $2) FOR UPDATE"))
         .bind(run_id)
         .bind(org)
@@ -494,7 +494,9 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
         "SELECT {cols},
                 (SELECT count(*) FROM runs f WHERE f.parent_id = r.id) AS follow_ups,
                 (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1) AS thread_status,
-                (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at
+                (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at,
+                (SELECT count(*) FROM approvals a JOIN runs l ON l.id = a.run_id
+                 WHERE (l.id = r.id OR l.parent_id = r.id) AND l.status = 'running' AND a.status = 'pending') AS pending_approvals
          FROM runs r WHERE r.parent_id IS NULL AND r.org_id = $3 AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
     ))
     .bind(limit)
@@ -514,6 +516,7 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
                 follow_ups: r.get("follow_ups"),
                 thread_status: RunStatus::parse(&ts).unwrap_or(RunStatus::Failed),
                 last_activity_at: r.get("last_activity_at"),
+                pending_approvals: r.get("pending_approvals"),
             }
         })
         .collect())
@@ -693,6 +696,7 @@ pub async fn request_stop(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Resul
                 .bind(json!({"reason": "stopped; the worker was offline"}))
                 .fetch_one(&mut *tx)
                 .await?;
+                crate::approvals::cancel_pending(&mut tx, run_id).await?;
                 let ev = append_event_locked(&mut tx, run_id, "status", &json!({"status": "stopped", "reason": "worker offline"})).await?;
                 tx.commit().await?;
                 return Ok(Some((row_to_run(&row), Some(ev))));
@@ -952,7 +956,8 @@ pub async fn finish_run(
     if run.status != RunStatus::Running {
         return Ok(FinishOutcome::AlreadyFinished(run));
     }
-    let mut events = Vec::new();
+    // Whatever the agent was still waiting on can no longer be answered.
+    let mut events = crate::approvals::cancel_pending(&mut tx, run_id).await?;
     if let (Some(limit), RunStatus::Failed) = (usage_limit, status) {
         // The reset time the agent reported, if it is ahead of us; otherwise an hour.
         let now = Utc::now();
@@ -1039,6 +1044,7 @@ pub async fn reconcile_worker_runs(pool: &PgPool, org: Uuid, worker_id: &str, ac
         if run.status != RunStatus::Running || active.contains(&id) {
             continue;
         }
+        out.extend(crate::approvals::cancel_pending(&mut tx, id).await?);
         let reason = format!("the worker {worker_id} restarted while this run was in progress");
         if let Some(evs) = move_lost_run(&mut tx, &run, worker_id, &reason).await? {
             tx.commit().await?;
@@ -1077,6 +1083,7 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
         if run.status != RunStatus::Running {
             continue;
         }
+        out.extend(crate::approvals::cancel_pending(&mut tx, id).await?);
         let reason = "worker stopped heart-beating while the run was in progress";
         let worker = run.worker_id.clone().unwrap_or_default();
         if let Some(evs) = move_lost_run(&mut tx, &run, &worker, reason).await? {

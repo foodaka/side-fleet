@@ -4,7 +4,8 @@
 # before the result, unless it was moved from another machine; "fail" exits
 # non-zero; "error-result" reports is_error; "write" creates failover.txt during
 # the Bash tool call when it is not there yet; "edit" changes README.md and adds
-# notes.txt; "rename" moves notes.txt).
+# notes.txt; "rename" moves notes.txt; "ask" asks the worker's "Ask me" socket
+# from --mcp-config about a Bash call, as Claude Code's permission prompt tool would).
 if [ "$1" = "--version" ]; then printf '%s\n' "9.9.9 (Claude Code fake)"; exit 0; fi
 task=""
 model="unknown"
@@ -12,6 +13,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -p) task="$2"; shift 2;;
     --model) model="$2"; shift 2;;
+    --mcp-config) mcp="$2"; shift 2;;
     *) shift;;
   esac
 done
@@ -34,6 +36,23 @@ printf '%s\n' "fake stderr line with token=abcdefghijklmnop" >&2
 case "$task" in
   *"Sidefleet moved this task"*) ;;
   *slow*) sleep 60;;
+esac
+case "$task" in
+  *ask*)
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_ask","name":"Bash","input":{"command":"rm -rf build"}}]}}'
+    sock=$(printf '%s' "$mcp" | sed -n 's/.*"--socket","\([^"]*\)".*/\1/p')
+    answer=$(python3 -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(json.dumps({"tool_name": "Bash", "input": {"command": "rm -rf build"}, "tool_use_id": "tu_ask"}).encode() + b"\n")
+print(json.loads(s.makefile().readline())["behavior"])
+' "$sock")
+    if [ "$answer" = "allow" ]; then
+      printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_ask","content":"approved and ran","is_error":false}]}}'
+    else
+      printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_ask","content":"The user denied this tool call","is_error":true}]}}'
+    fi;;
 esac
 case "$task" in
   *edit*) printf 'demo\nedited by the agent\n' > README.md; printf 'one\ntwo\n' > notes.txt;;

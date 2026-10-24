@@ -32,6 +32,7 @@ fn spec(task: &str) -> AgentSpec {
         extra_args: vec![],
         resume_session_id: None,
         images: vec![],
+        approval: None,
     }
 }
 
@@ -286,4 +287,33 @@ async fn opencode_session_error_is_failed() {
     let r = events.iter().find(|e| e.kind == "result").expect("synthesised result");
     assert_eq!(r.payload["is_error"], true);
     assert_eq!(r.payload["result"], "simulated provider error");
+}
+
+#[test]
+fn ask_me_relays_claude_codes_permission_prompts() {
+    let hook = sidefleet_worker::agent::ApprovalHook {
+        exe: "/opt/sidefleet".into(),
+        socket: "/tmp/sf-ask-1/a.sock".into(),
+        timeout: Duration::from_secs(600),
+    };
+    let s = AgentSpec { permission_mode: "ask".into(), approval: Some(hook), ..spec("t") };
+    let args = s.args();
+    let after = |flag: &str| args[args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} in {args:?}")) + 1].clone();
+    assert_eq!(after("--permission-mode"), "acceptEdits", "edits go ahead on their own");
+    assert_eq!(after("--permission-prompt-tool"), "mcp__sidefleet__approve");
+    assert!(after("--mcp-config").contains("\"approval-mcp\",\"--socket\",\"/tmp/sf-ask-1/a.sock\""), "{args:?}");
+    if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+        assert_eq!(s.env(), vec![("MCP_TOOL_TIMEOUT", "660000".to_string())], "the prompt tool may wait as long as the person");
+    }
+
+    // Without a way to ask (no hook), it refuses like "Read & edit files".
+    let s = AgentSpec { permission_mode: "ask".into(), ..spec("t") };
+    assert!(!s.args().iter().any(|a| a.starts_with("--permission-prompt-tool") || a == "--mcp-config"));
+    assert!(s.args().windows(2).any(|w| w == ["--permission-mode", "acceptEdits"]));
+    // Other modes are untouched.
+    let s = AgentSpec { permission_mode: "plan".into(), ..spec("t") };
+    assert!(s.args().windows(2).any(|w| w == ["--permission-mode", "plan"]));
+    // opencode has no prompt relay yet: "Ask me" denies its shell.
+    let s = AgentSpec { permission_mode: "ask".into(), ..agent_spec(Agent::Opencode, "t") };
+    assert!(s.env().contains(&("OPENCODE_PERMISSION", r#"{"bash":"deny"}"#.to_string())));
 }

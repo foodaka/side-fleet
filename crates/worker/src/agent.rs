@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use sidefleet_core::{redact, result_usage_limit, Agent, AgentStream, MappedLine, NewEvent, RunStatus, UsageLimit};
+use sidefleet_core::{redact, result_usage_limit, Agent, AgentStream, MappedLine, NewEvent, RunStatus, UsageLimit, ASK_MODE};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use serde_json::{json, Value};
@@ -64,6 +64,18 @@ pub struct AgentSpec {
     pub resume_session_id: Option<String>,
     /// Image files the user attached, for the agent to look at.
     pub images: Vec<PathBuf>,
+    /// "Ask me" with Claude Code: where its permission prompts go (see [`crate::approval`]).
+    pub approval: Option<ApprovalHook>,
+}
+
+/// How Claude Code reaches the page for a permission: `exe approval-mcp --socket <socket>`.
+#[derive(Debug, Clone)]
+pub struct ApprovalHook {
+    /// This binary (`sidefleet`), which serves the prompt tool.
+    pub exe: PathBuf,
+    pub socket: PathBuf,
+    /// How long a question waits before it is denied.
+    pub timeout: Duration,
 }
 
 impl AgentSpec {
@@ -96,8 +108,15 @@ impl AgentSpec {
             "--model".into(),
             self.model.clone(),
             "--permission-mode".into(),
-            self.permission_mode.clone(),
+            // "Ask me" edits files on its own and asks about everything else.
+            if self.permission_mode == ASK_MODE { "acceptEdits".into() } else { self.permission_mode.clone() },
         ];
+        if let (true, Some(h)) = (self.permission_mode == ASK_MODE, &self.approval) {
+            a.push("--mcp-config".into());
+            a.push(crate::approval::mcp_config(&h.exe, &h.socket));
+            a.push("--permission-prompt-tool".into());
+            a.push(crate::approval::PROMPT_TOOL.into());
+        }
         if let Some(sid) = &self.resume_session_id {
             a.push("--resume".into());
             a.push(sid.clone());
@@ -179,7 +198,8 @@ impl AgentSpec {
                 // Code's acceptEdits, and "Read only" denies everything that writes.
                 let perms = match self.permission_mode.as_str() {
                     "plan" => Some(r#"{"edit":"deny","bash":"deny","webfetch":"deny"}"#),
-                    "acceptEdits" => Some(r#"{"bash":"deny"}"#),
+                    // Nothing relays opencode's questions yet, so "Ask me" refuses like acceptEdits.
+                    "acceptEdits" | ASK_MODE => Some(r#"{"bash":"deny"}"#),
                     _ => None,
                 };
                 let mut env = vec![("OPENCODE_DISABLE_AUTOUPDATE", "1".to_string())];
@@ -188,7 +208,15 @@ impl AgentSpec {
                 }
                 env
             }
-            Agent::Claude | Agent::Codex => vec![],
+            // Claude Code gives up on an MCP tool call after its own timeout; the
+            // prompt tool waits as long as the person may take, plus a margin.
+            Agent::Claude => match &self.approval {
+                Some(h) if self.permission_mode == ASK_MODE && std::env::var_os("MCP_TOOL_TIMEOUT").is_none() => {
+                    vec![("MCP_TOOL_TIMEOUT", (h.timeout + Duration::from_secs(60)).as_millis().to_string())]
+                }
+                _ => vec![],
+            },
+            Agent::Codex => vec![],
         }
     }
 

@@ -88,7 +88,7 @@ enum Cmd {
         /// Name shown on the Machines page (defaults to this machine's hostname).
         #[arg(long, env = "SIDEFLEET_NAME")]
         name: Option<String>,
-        /// Default permission mode for tasks: acceptEdits (default), bypassPermissions, default, plan.
+        /// Default permission mode for tasks: acceptEdits (default), bypassPermissions, plan, ask, default.
         #[arg(long, env = "SIDEFLEET_PERMISSION_MODE", default_value = "acceptEdits")]
         permission_mode: String,
         /// Save settings but do not install or start the background service.
@@ -139,6 +139,16 @@ enum Cmd {
         /// How many tasks may run at the same time on this machine.
         #[arg(long, env = "SIDEFLEET_PARALLEL", default_value_t = 3)]
         parallel: usize,
+        /// Seconds an "Ask me" tool call waits for approval on the page before it is denied.
+        #[arg(long, env = "SIDEFLEET_APPROVAL_TIMEOUT", default_value_t = sidefleet_core::DEFAULT_APPROVAL_TIMEOUT_SECS)]
+        approval_timeout: u64,
+    },
+    /// Internal: the MCP server Claude Code calls for "Ask me" permission prompts.
+    #[command(hide = true)]
+    ApprovalMcp {
+        /// The worker's socket for this run.
+        #[arg(long)]
+        socket: PathBuf,
     },
     /// Show the saved worker settings and whether the background service is running.
     Status,
@@ -252,6 +262,10 @@ async fn main() -> Result<()> {
     let _ = dotenvy::from_path(server_env_path());
 
     let cli = Cli::parse();
+    // Speaks MCP on stdout, so nothing else may print there.
+    if let Cmd::ApprovalMcp { socket } = &cli.cmd {
+        return Ok(sidefleet_worker::approval::serve_mcp_stdio(socket)?);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "sidefleet=info,sidefleet_server=info,sidefleet_worker=info,tower_http=warn".into()))
         .init();
@@ -283,7 +297,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Connect { control, token, repos, name, permission_mode, no_service, parallel } => connect(control, token, repos, name, permission_mode, no_service, parallel).await,
-        Cmd::Run { control, token, repos, id, name, claude_bin, codex_bin, opencode_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth, parallel } => {
+        Cmd::Run { control, token, repos, id, name, claude_bin, codex_bin, opencode_bin, permission_mode, max_turns, claude_args, poll_interval, skip_sign_in_check, scan_depth, parallel, approval_timeout } => {
             let control = control.context("no control plane address: run `sidefleet connect --control <url> --token <token>` first, or pass --control")?;
             let token = token.context("no worker token: run `sidefleet connect` first, or pass --token / SIDEFLEET_TOKEN")?;
             let id = id.unwrap_or_else(default_worker_id);
@@ -308,6 +322,8 @@ async fn main() -> Result<()> {
                 worktrees_dir: worktrees_dir(),
                 version: version_string().to_string(),
                 allow_remote_update: true,
+                approval_exe: std::env::current_exe().ok(),
+                approval_timeout: Duration::from_secs(approval_timeout.max(1)),
             };
             tokio::select! {
                 r = sidefleet_worker::worker::run(cfg) => r,
@@ -318,6 +334,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::ApprovalMcp { .. } => unreachable!("handled before logging starts"),
         Cmd::Status => status(),
         Cmd::Disconnect => disconnect(),
         Cmd::Detect { repos, claude_bin, codex_bin, opencode_bin, skip_sign_in_check, scan_depth } => {
@@ -473,6 +490,8 @@ async fn serve(opts: ServeOpts) -> Result<()> {
             worktrees_dir: worktrees_dir(),
             version: version_string().to_string(),
             allow_remote_update: true,
+            approval_exe: std::env::current_exe().ok(),
+            approval_timeout: Duration::from_secs(sidefleet_core::DEFAULT_APPROVAL_TIMEOUT_SECS),
         };
         tokio::spawn(async move {
             if let Err(e) = sidefleet_worker::worker::run(cfg).await {

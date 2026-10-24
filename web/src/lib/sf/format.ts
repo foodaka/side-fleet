@@ -50,8 +50,12 @@ export function machineModels(workers: Worker[], agent: AgentId): string[] {
 export const PERMISSIONS = [
 	{ id: 'acceptEdits', name: 'Read & edit files', hint: 'Can change files; shell commands are refused' },
 	{ id: 'bypassPermissions', name: 'Full access', hint: 'Can also run commands on that machine' },
-	{ id: 'plan', name: 'Read only', hint: 'Looks and answers, changes nothing' }
+	{ id: 'plan', name: 'Read only', hint: 'Looks and answers, changes nothing' },
+	{ id: 'ask', name: 'Ask me', hint: 'Edits files; asks you here before commands and anything else' }
 ] as const;
+
+/** The modes an agent offers: only Claude Code can ask you yet. */
+export const permsFor = (agent: AgentId) => PERMISSIONS.filter((p) => p.id !== 'ask' || agent === 'claude');
 
 /** What a permission mode means for an agent: Codex maps them onto its sandbox. */
 export function permHint(id: string, agent: AgentId): string {

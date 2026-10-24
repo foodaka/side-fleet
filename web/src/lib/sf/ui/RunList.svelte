@@ -38,11 +38,9 @@
 		q ? [...fleet.runs, ...(fleet.archived ?? [])].filter((r) => [r.task, repoLabel(r.repo), r.worker_id ?? ''].some((s) => s.toLowerCase().includes(q))) : []
 	);
 
-	const active = $derived(
-		fleet.runs.filter(live).sort((a, b) =>
-			a.thread_status === b.thread_status ? 0 : a.thread_status === 'running' ? -1 : 1
-		)
-	);
+	// Threads waiting on you first, then running, then queued.
+	const rank = (r: RunSummary) => (r.pending_approvals ? 0 : r.thread_status === 'running' ? 1 : 2);
+	const active = $derived(fleet.runs.filter(live).sort((a, b) => rank(a) - rank(b)));
 	const groups = $derived.by(() => {
 		const out: { label: string; runs: RunSummary[] }[] = [];
 		for (const r of fleet.runs) {
@@ -66,6 +64,7 @@
 	{@const on = r.id === activeId}
 	{@const unread = !on && seen.unread(r)}
 	{@const other = r.repo !== homeRepo}
+	{@const asking = !!r.pending_approvals && live(r)}
 	<div class="group/row relative">
 	<a
 		href="#/runs/{r.id}"
@@ -77,11 +76,17 @@
 			: 'text-foreground/80 hover:bg-sidebar-accent/60 hover:text-foreground'}"
 	>
 		<span class="grid h-[18px] w-2 shrink-0 place-items-center">
-			<StatusDot status={r.thread_status} class={r.thread_status === 'succeeded' && !unread ? 'opacity-45' : ''} />
+			{#if asking}
+				<span aria-hidden="true" class="inline-block size-1.5 shrink-0 rounded-full bg-queue pulse-run"></span>
+			{:else}
+				<StatusDot status={r.thread_status} class={r.thread_status === 'succeeded' && !unread ? 'opacity-45' : ''} />
+			{/if}
 		</span>
 		<span class="flex min-w-0 flex-1 flex-col">
 			<span class="truncate {unread ? 'font-medium text-foreground' : ''}">{r.task}</span>
-			{#if detail}
+			{#if asking}
+				<span class="truncate text-[11.5px] font-medium text-queue-ink">Waiting on you{#if r.pending_approvals! > 1}&nbsp;· {r.pending_approvals} tool calls{/if}</span>
+			{:else if detail}
 				<span class="tnum truncate text-[11.5px] text-muted-foreground">
 					{#if r.thread_status === 'running'}
 						{r.worker_id ?? 'Starting'} · {duration(r.started_at, null, fleet.now) || 'starting'}

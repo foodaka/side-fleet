@@ -159,6 +159,9 @@ pub struct RunSummary {
     pub thread_status: RunStatus,
     /// Last activity in the thread.
     pub last_activity_at: DateTime<Utc>,
+    /// Tool calls in the thread waiting for someone to approve or deny them ("Ask me").
+    #[serde(default)]
+    pub pending_approvals: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,7 +381,7 @@ pub struct CreateRunRequest {
     #[serde(default)]
     pub model: String,
     pub repo: String,
-    /// acceptEdits (default), bypassPermissions, plan, default, dontAsk.
+    /// acceptEdits (default), bypassPermissions, plan, ask, default, dontAsk.
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// worktree (default) or checkout.
@@ -436,7 +439,125 @@ pub struct ArchiveRequest {
     pub archived: bool,
 }
 
-pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "bypassPermissions", "plan", "default", "dontAsk"];
+pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "bypassPermissions", "plan", ASK_MODE, "default", "dontAsk"];
+
+/// Sidefleet's own permission mode, "Ask me": Claude Code reads and edits files in the
+/// workspace on its own and asks the person on the page before anything else (shell
+/// commands, fetches, MCP tools). The worker relays each question as an [`Approval`].
+pub const ASK_MODE: &str = "ask";
+
+// ---- tool approvals ("Ask me") ----
+
+/// How long a tool call waits for a decision before it is denied.
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 15 * 60;
+/// The longest wait a worker may ask for.
+pub const MAX_APPROVAL_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
+/// Lifecycle of an approval. Only a pending one changes, and only once:
+/// pending -> approved | denied | expired (nobody decided in time) | cancelled (the run ended).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Cancelled,
+}
+
+/// What can happen to an approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalAction {
+    Approve,
+    Deny,
+    /// Its time ran out (the worker asked after the deadline).
+    Expire,
+    /// Its run ended (finished, stopped, lost).
+    Cancel,
+}
+
+impl ApprovalStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalStatus::Pending => "pending",
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Denied => "denied",
+            ApprovalStatus::Expired => "expired",
+            ApprovalStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "pending" => ApprovalStatus::Pending,
+            "approved" => ApprovalStatus::Approved,
+            "denied" => ApprovalStatus::Denied,
+            "expired" => ApprovalStatus::Expired,
+            "cancelled" => ApprovalStatus::Cancelled,
+            _ => return None,
+        })
+    }
+
+    /// The status after `action`, or None when it cannot happen (already decided).
+    /// `overdue` means the deadline has passed: a late approve or deny expires it instead.
+    pub fn after(self, action: ApprovalAction, overdue: bool) -> Option<ApprovalStatus> {
+        if self != ApprovalStatus::Pending {
+            return None;
+        }
+        Some(match action {
+            ApprovalAction::Approve | ApprovalAction::Deny if overdue => ApprovalStatus::Expired,
+            ApprovalAction::Approve => ApprovalStatus::Approved,
+            ApprovalAction::Deny => ApprovalStatus::Denied,
+            ApprovalAction::Expire => ApprovalStatus::Expired,
+            ApprovalAction::Cancel => ApprovalStatus::Cancelled,
+        })
+    }
+}
+
+/// A tool call waiting for (or given) a decision from the person on the page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Approval {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    /// The agent's tool, e.g. `Bash`, `WebFetch`, `mcp__github__create_issue`.
+    pub tool_name: String,
+    /// The tool's input, redacted and with long strings clipped.
+    pub input: Value,
+    /// The agent's id for the tool call (`tool_use` events carry the same `id`).
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    pub status: ApprovalStatus,
+    /// Why it was denied, expired or cancelled, as the agent is told.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Who decided: a GitHub login, or `developer key`.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+/// The worker asks the page about a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub tool_name: String,
+    pub input: Value,
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    /// How long to wait for a decision (default [`DEFAULT_APPROVAL_TIMEOUT_SECS`]).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Body of approve / deny; both fields optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DecideApprovalRequest {
+    /// For a denial: what to tell the agent instead of the default.
+    #[serde(default)]
+    pub message: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRunResponse {
@@ -533,4 +654,38 @@ pub struct UsageLimit {
     /// When the limit resets, if the agent said; the control plane assumes an hour otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::{ApprovalAction::*, ApprovalStatus::*};
+
+    #[test]
+    fn only_a_pending_approval_changes() {
+        assert_eq!(Pending.after(Approve, false), Some(Approved));
+        assert_eq!(Pending.after(Deny, false), Some(Denied));
+        assert_eq!(Pending.after(Expire, false), Some(Expired));
+        assert_eq!(Pending.after(Cancel, false), Some(Cancelled));
+        for done in [Approved, Denied, Expired, Cancelled] {
+            for action in [Approve, Deny, Expire, Cancel] {
+                assert_eq!(done.after(action, false), None, "{done:?} + {action:?}");
+                assert_eq!(done.after(action, true), None, "{done:?} + {action:?} late");
+            }
+        }
+    }
+
+    #[test]
+    fn a_late_decision_expires_instead() {
+        assert_eq!(Pending.after(Approve, true), Some(Expired));
+        assert_eq!(Pending.after(Deny, true), Some(Expired));
+        assert_eq!(Pending.after(Cancel, true), Some(Cancelled));
+    }
+
+    #[test]
+    fn statuses_round_trip() {
+        for s in [Pending, Approved, Denied, Expired, Cancelled] {
+            assert_eq!(super::ApprovalStatus::parse(s.as_str()), Some(s));
+            assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
+        }
+    }
 }

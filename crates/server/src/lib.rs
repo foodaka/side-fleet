@@ -1,6 +1,7 @@
 //! Sidefleet control plane: Axum + Postgres. Exposed as a library so tests
 //! (and the worker's end-to-end tests) can spin up the exact router in-process.
 
+pub mod approvals;
 pub mod auth;
 pub mod db;
 pub mod events;

@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sidefleet_core::{
-    Agent, ArchiveRequest, ClaimRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
+    Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, ImageUpload, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
@@ -28,6 +28,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
+use crate::approvals::{DecideOutcome, RequestOutcome};
 use crate::auth::{self, Caller, Identity, WorkerAuth};
 use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, RestoreOutcome};
 use crate::oauth::{self, public_base};
@@ -57,6 +58,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/restore", post(restore_run))
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/archive", post(archive_run))
+        .route("/v1/runs/{id}/approvals", get(list_approvals))
+        .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
+        .route("/v1/runs/{id}/approvals/{approval}/deny", post(deny_tool))
         .route("/v1/images/{id}", get(get_image))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}", axum::routing::delete(delete_worker))
@@ -81,6 +85,8 @@ pub fn router(state: AppState) -> Router {
         // Events can carry screenshots (base64), well past axum's 2 MB default.
         .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/worker/runs/{id}/control", get(run_control))
+        .route("/v1/worker/runs/{id}/approvals", post(request_approval))
+        .route("/v1/worker/runs/{id}/approvals/{approval}", get(poll_approval))
         .route("/v1/worker/images/{id}", get(worker_get_image))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_worker));
@@ -218,6 +224,7 @@ async fn create_run(
     }
     check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    check_ask_agent(mode, agent)?;
     let isolation = match req.isolation.as_deref() {
         None | Some("") => "worktree",
         Some(i) if ISOLATION_MODES.contains(&i) => i,
@@ -297,6 +304,14 @@ fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
     }
 }
 
+/// "Ask me" relays Claude Code's permission prompts; the other agents have no such hook yet.
+fn check_ask_agent(mode: Option<&str>, agent: Agent) -> Result<(), ApiError> {
+    if mode == Some(sidefleet_core::ASK_MODE) && agent != Agent::Claude {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("\"Ask me\" works with Claude Code only for now, not {}", agent.display_name())));
+    }
+    Ok(())
+}
+
 /// All runs of the thread this run belongs to, root first.
 async fn get_thread(
     State(state): State<AppState>,
@@ -329,6 +344,9 @@ async fn follow_up(
     };
     check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    if let Some(a) = agent {
+        check_ask_agent(mode, a)?;
+    }
     if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
         return Err(not_found());
     }
@@ -391,6 +409,7 @@ async fn fork_run(
     let model = req.model.trim();
     agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
+    check_ask_agent(mode, agent)?;
     let context_budget = crate::fork::budget(task);
     let worker = match req.worker_id.as_deref().map(str::trim) {
         None | Some("") => None,
@@ -530,6 +549,59 @@ async fn archive_run(
     let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
     Ok(Json(root))
+}
+
+// ---- tool approvals ("Ask me") ----
+
+/// Every approval the run asked for, oldest first.
+async fn list_approvals(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Json<Vec<Approval>>, ApiError> {
+    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
+        return Err(not_found());
+    }
+    Ok(Json(crate::approvals::list(&state.pool, caller.org_id(), id).await?))
+}
+
+async fn approve_tool(state: State<AppState>, caller: Extension<Caller>, path: Path<(Uuid, Uuid)>, body: axum::body::Bytes) -> Result<Json<Approval>, ApiError> {
+    decide_tool(state, caller, path, body, true).await
+}
+
+async fn deny_tool(state: State<AppState>, caller: Extension<Caller>, path: Path<(Uuid, Uuid)>, body: axum::body::Bytes) -> Result<Json<Approval>, ApiError> {
+    decide_tool(state, caller, path, body, false).await
+}
+
+/// Approve or deny a tool call the agent is waiting on. The body (`{message?}`) is optional.
+async fn decide_tool(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path((id, approval)): Path<(Uuid, Uuid)>,
+    body: axum::body::Bytes,
+    approve: bool,
+) -> Result<Json<Approval>, ApiError> {
+    let req: DecideApprovalRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        DecideApprovalRequest::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?
+    };
+    let by = caller.user.as_ref().map_or_else(|| "developer key".to_string(), |u| u.login.clone());
+    let outcome = crate::approvals::decide(&state.pool, caller.org_id(), id, approval, approve, &by, req.message.as_deref()).await?;
+    let (status, msg) = match outcome {
+        DecideOutcome::Decided(a, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %id, approval = %approval, tool = %a.tool_name, approved = approve, "tool call decided");
+            return Ok(Json(a));
+        }
+        DecideOutcome::NotFound => return Err(ApiError(StatusCode::NOT_FOUND, "approval not found".into())),
+        DecideOutcome::AlreadyDecided(a) => (StatusCode::CONFLICT, format!("this tool call was already {}", a.status.as_str())),
+        DecideOutcome::Expired(_, ev) => {
+            ev.into_iter().for_each(|e| state.events.publish(e));
+            (StatusCode::GONE, "too late: the wait for a decision ran out and the tool call was denied".to_string())
+        }
+        DecideOutcome::RunEnded(_, ev) => {
+            ev.into_iter().for_each(|e| state.events.publish(e));
+            (StatusCode::CONFLICT, "the run is no longer running".to_string())
+        }
+    };
+    Err(ApiError(status, msg))
 }
 
 #[derive(Deserialize)]
@@ -817,6 +889,45 @@ async fn run_control(
         status: run.status,
         stop_requested: run.stop_requested || run.status.is_terminal(),
     }))
+}
+
+/// The worker's agent wants to use a tool the permission mode leaves to the person:
+/// store the question and show it on the page. The worker then polls for the answer.
+async fn request_approval(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WorkerQuery>,
+    Json(req): Json<ApprovalRequest>,
+) -> Result<(StatusCode, Json<Approval>), ApiError> {
+    if req.tool_name.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "tool_name must not be empty".into()));
+    }
+    match crate::approvals::request(&state.pool, auth.org, id, &q.worker_id, &req).await? {
+        RequestOutcome::Created(a, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %id, approval = %a.id, tool = %a.tool_name, "tool call waiting for approval");
+            Ok((StatusCode::CREATED, Json(*a)))
+        }
+        RequestOutcome::NotFound => Err(not_found()),
+        RequestOutcome::NotOwner => Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into())),
+        RequestOutcome::NotRunning => Err(ApiError(StatusCode::CONFLICT, "the run is not running".into())),
+    }
+}
+
+/// The approval as it stands. Past its deadline it expires; once its run ends it is cancelled.
+async fn poll_approval(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Path((id, approval)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Approval>, ApiError> {
+    let (a, ev) = crate::approvals::poll(&state.pool, auth.org, id, approval, chrono::Utc::now())
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "approval not found".into()))?;
+    if let Some(ev) = ev {
+        state.events.publish(ev);
+    }
+    Ok(Json(a))
 }
 
 async fn finish_run(

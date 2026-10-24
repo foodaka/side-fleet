@@ -1,1 +1,0 @@
-export{t as component}from"../chunks/CO7__ZMr.js";

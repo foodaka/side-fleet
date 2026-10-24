@@ -1,7 +1,7 @@
 import { api } from './api';
 import { followRun } from './sse';
 import { fleet } from './state.svelte';
-import type { AgentId, Run, RunEvent } from './types';
+import type { AgentId, ApprovalStatus, Run, RunEvent } from './types';
 import { agentName } from './format';
 import type { DiffSet } from './diff/parse';
 
@@ -24,6 +24,21 @@ export type Item =
 			isError: boolean;
 			truncated: boolean;
 			images: ImageRef[];
+			at: string;
+	  }
+	| {
+			/** A tool call waiting for (or given) your decision ("Ask me"). */
+			kind: 'approval';
+			key: string;
+			id: string;
+			runId: string;
+			name: string;
+			summary: string;
+			input: Record<string, any>;
+			status: ApprovalStatus;
+			message: string | null;
+			decidedBy: string | null;
+			expiresAt: string;
 			at: string;
 	  }
 	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string }
@@ -161,6 +176,17 @@ export class Thread {
 		await api(`/v1/runs/${id}/stop`, { method: 'POST' });
 	}
 
+	/** Approve or deny a tool call the agent is waiting on. The event stream confirms it. */
+	async decide(item: Extract<Item, { kind: 'approval' }>, approve: boolean) {
+		const a = await api<{ status: ApprovalStatus; decided_by: string | null; message: string | null }>(
+			`/v1/runs/${item.runId}/approvals/${item.id}/${approve ? 'approve' : 'deny'}`,
+			{ method: 'POST' }
+		);
+		item.status = a.status;
+		item.decidedBy = a.decided_by;
+		item.message = a.message;
+	}
+
 	/** Whether this run is a message waiting for an earlier one to finish. */
 	waiting(id: string) {
 		const i = this.runs.findIndex((r) => r.id === id);
@@ -233,6 +259,8 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
+				// Nobody can answer the agent any more.
+				for (const it of t.items) if (it.kind === 'approval' && it.status === 'pending') it.status = 'cancelled';
 				if (p.status !== 'succeeded' || p.reason)
 					t.items.push({
 						kind: 'note', key, at: ev.at,
@@ -283,6 +311,23 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				tool.images = p.images ?? [];
 			}
 			t.activity = 'Thinking';
+			break;
+		}
+		case 'approval_requested':
+			t.items.push({
+				kind: 'approval', key, id: p.id, runId: run.id, name: p.tool_name, summary: p.summary ?? '',
+				input: p.input ?? {}, status: p.status ?? 'pending', message: null, decidedBy: null, expiresAt: p.expires_at, at: ev.at
+			});
+			t.activity = 'Waiting for you to approve';
+			break;
+		case 'approval_decided': {
+			const a = t.items.find((x) => x.kind === 'approval' && x.id === p.id);
+			if (a && a.kind === 'approval') {
+				a.status = p.status;
+				a.message = p.message ?? null;
+				a.decidedBy = p.decided_by ?? null;
+			}
+			if (!t.items.some((x) => x.kind === 'approval' && x.status === 'pending')) t.activity = 'Thinking';
 			break;
 		}
 		case 'result':

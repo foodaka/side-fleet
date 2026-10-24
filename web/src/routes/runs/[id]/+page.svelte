@@ -14,7 +14,7 @@
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
 	import type { AgentId, Run } from '#lib/sf/types';
-	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, PERMISSIONS, permName, repoLabel } from '#lib/sf/format';
+	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, permName, permsFor, repoLabel } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
@@ -112,6 +112,8 @@
 		untrack(() => { agent = a; model = thread!.latest!.model; });
 	});
 	const switching = $derived(!!threadAgent && agent !== threadAgent);
+	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
+	const replyPerm = $derived(perm === 'ask' && agent !== 'claude' ? 'acceptEdits' : perm);
 	const host = $derived(fleet.workers.filter((w) => w.id === thread?.machine));
 	/** The model this agent last used in the thread, else its default. */
 	const lastModel = (a: AgentId) => thread?.runs.findLast((r) => r.agent === a)?.model ?? defaultModel(a);
@@ -124,7 +126,7 @@
 		sending = true;
 		try {
 			const pick = switching || model !== thread.latest?.model ? { agent, model } : undefined;
-			await thread.reply(reply.trim(), perm || undefined, await attachments.payload(), pick);
+			await thread.reply(reply.trim(), replyPerm || undefined, await attachments.payload(), pick);
 			reply = '';
 			attachments.clear();
 			void fleet.refresh();
@@ -242,6 +244,7 @@
 							oncancel={() => cancel(turn.run.id)}
 							onopendiff={openDiff}
 							onrestore={!live && turn.run.isolation === 'worktree' ? () => restore(turn.run.id) : undefined}
+							ondecide={(item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}
 						/>
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}
@@ -289,13 +292,13 @@
 							unavailable={(a) => (!host.length || host.some((w) => hasAgent(w, a)) ? '' : `Not on ${thread?.machine}`)}
 							onagent={(a) => (model = lastModel(a))}
 						/>
-						<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
+						<Select.Root type="single" value={replyPerm} onValueChange={(v) => (perm = v)}>
 							<Select.Trigger size="sm" class="h-7 min-w-0 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent max-sm:[&>span]:truncate" aria-label="Permissions for this reply">
-								{#if perm}{permName(perm)}{:else if latest?.permission_mode}<span class="max-sm:hidden">Same permissions ({permName(latest.permission_mode)})</span><span class="sm:hidden">{permName(latest.permission_mode)}</span>{:else}Same permissions{/if}
+								{#if replyPerm}{permName(replyPerm)}{:else if latest?.permission_mode}<span class="max-sm:hidden">Same permissions ({permName(latest.permission_mode)})</span><span class="sm:hidden">{permName(latest.permission_mode)}</span>{:else}Same permissions{/if}
 							</Select.Trigger>
 							<Select.Content>
 								<Select.Item value="" label="Same permissions">Same permissions</Select.Item>
-								{#each PERMISSIONS as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{p.hint}</span></span></Select.Item>{/each}
+								{#each permsFor(agent) as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{p.hint}</span></span></Select.Item>{/each}
 							</Select.Content>
 						</Select.Root>
 						<span class="hidden min-w-0 truncate text-xs text-faint sm:inline">{hint}</span>

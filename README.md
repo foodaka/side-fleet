@@ -54,8 +54,9 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   and the message waits its turn, or press Send now to interrupt. Screenshots and other images the
   agent opens show inline, so you can ask for one from your phone. Drop, paste or attach images to a
   task or reply and the agent gets them too.
-- **Permission modes**: read and edit files (default), full access for unattended commands, or
-  read only for questions.
+- **Permission modes**: read and edit files (default), full access for unattended commands, read
+  only for questions, or "Ask me": Claude Code edits files on its own and asks you on the page
+  (phone included) before anything else, such as a shell command, and waits for Approve or Deny.
 - **Zero-config workers**: `connect` checks which agents are installed and signed in, finds your
   git checkouts (repos match by their git remote, whatever the folder is called), and installs a
   launchd or systemd service that survives reboots. Or click "Copy prompt" and let Claude Code or
@@ -155,6 +156,14 @@ The page's permission modes map onto each agent:
 | Read & edit files | `acceptEdits` | sandbox `workspace-write` (commands run sandboxed, no network) | shell denied |
 | Full access | `bypassPermissions` | no sandbox | all permissions granted |
 | Read only | `plan` | sandbox `read-only` | `plan` agent, edits, shell and fetches denied |
+| Ask me | `acceptEdits`, other tools asked on the page | not offered yet | not offered yet |
+
+With "Ask me", a tool call that `acceptEdits` would refuse shows on the page as a card with
+Approve and Deny, and the thread is marked "Waiting on you" in the sidebar. The agent waits until
+you decide, or denies the call after 15 minutes (`sidefleet run --approval-timeout <secs>`). Claude
+Code's `acceptEdits` already lets simple file commands in the workspace (`mkdir`, `rm`, `ls`)
+through without asking; everything else, such as running a script, a network call or an MCP tool,
+is asked.
 
 ## Command line
 
@@ -226,7 +235,8 @@ working; run `pnpm build` in `web/` after changing it (CI fails if it is out of 
   afterwards, or use Full access.
 - opencode's output format was mapped from its source (1.19), not yet from a live run; its cost is
   what opencode reports per step.
-- Tool permission prompts are not relayed to the page; whatever the mode does not allow is denied.
+- Only Claude Code can relay its permission prompts to the page ("Ask me"). For Codex and opencode,
+  whatever the mode does not allow is denied.
 - Worktrees start from the repo's `HEAD` without untracked or ignored files (`node_modules`,
   `.env`), and are kept until you remove them (`git worktree remove`, or delete the folder under
   `~/.sidefleet/worktrees` and run `git worktree prune`).

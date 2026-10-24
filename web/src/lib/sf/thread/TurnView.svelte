@@ -9,6 +9,7 @@
 	import GitFork from '@lucide/svelte/icons/git-fork';
 	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
+	import ApprovalCard from './ApprovalCard.svelte';
 	import ToolImages from './ToolImages.svelte';
 	import ChangesCard from '../diff/ChangesCard.svelte';
 	import ForkDialog from './ForkDialog.svelte';
@@ -23,7 +24,8 @@
 		onsendnow,
 		oncancel,
 		onopendiff,
-		onrestore
+		onrestore,
+		ondecide
 	}: {
 		turn: Turn;
 		first: boolean;
@@ -37,6 +39,8 @@
 		onopendiff?: (runId: string, path: string | null) => void;
 		/** Put the files back to how they were before this turn; absent when that isn't possible now. */
 		onrestore?: () => Promise<void>;
+		/** Approve or deny a tool call the agent is waiting on. */
+		ondecide?: (item: Extract<Turn['items'][number], { kind: 'approval' }>, approve: boolean) => Promise<void>;
 	} = $props();
 	const run = $derived(turn.run);
 	const isRestore = $derived(run.kind === 'restore');
@@ -145,6 +149,8 @@
 					<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={it.text} /></div>
 				{:else if it.kind === 'tool-group'}
 					<ToolGroup tools={it.tools} {live} />
+				{:else if it.kind === 'approval'}
+					<ApprovalCard item={it} agent={run.agent} {live} {ondecide} />
 				{:else if it.kind === 'note'}
 					<p class="py-1 text-[13px] {it.tone === 'err' ? 'text-err-ink' : it.tone === 'ok' ? 'text-ok-ink' : 'text-muted-foreground'}">{it.text}</p>
 				{:else if it.kind === 'stderr-group'}

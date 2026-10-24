@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sidefleet_core::{Agent, Capabilities, NewEvent, Run, RunStatus, Slots};
+use sidefleet_core::{Agent, Capabilities, NewEvent, Run, RunStatus, Slots, ASK_MODE};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 use uuid::Uuid;
 
-use crate::agent::{self, AgentSpec};
+use crate::agent::{self, AgentSpec, ApprovalHook};
+use crate::approval::{self, Bridge};
 use crate::checkpoint::{self, ChangeTracker};
 use crate::client::{Backoff, ClientError, ControlClient};
 use crate::diff;
@@ -47,6 +48,11 @@ pub struct WorkerConfig {
     pub version: String,
     /// Act on "Update" from the page: pull/reinstall and restart when idle.
     pub allow_remote_update: bool,
+    /// The `sidefleet` executable, which serves "Ask me" permission prompts to Claude
+    /// Code (`sidefleet approval-mcp`). None: "Ask me" refuses like "Read & edit files".
+    pub approval_exe: Option<PathBuf>,
+    /// How long a tool call waits for someone to approve it before it is denied.
+    pub approval_timeout: Duration,
 }
 
 pub async fn run(cfg: WorkerConfig) -> Result<()> {
@@ -470,6 +476,26 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         Agent::Codex => &cfg.codex_bin,
         Agent::Opencode => &cfg.opencode_bin,
     };
+    let permission_mode = run.permission_mode.clone().unwrap_or_else(|| cfg.permission_mode.clone());
+    let (stop_tx, stop_rx) = watch::channel(false);
+
+    // "Ask me": Claude Code's permission prompts come to us over a socket and go to the page.
+    let mut bridge = None;
+    if run.agent == Agent::Claude && permission_mode == ASK_MODE {
+        match start_approvals(client, cfg, run_id, &stop_tx) {
+            Ok(b) => bridge = Some(b),
+            Err(e) => {
+                let msg = format!("could not set up \"Ask me\" ({e:#}); tool calls that need approval are refused, as with Read & edit files");
+                tracing::warn!(run_id = %run_id, "{msg}");
+                let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+            }
+        }
+    }
+    let approval = match (&bridge, &cfg.approval_exe) {
+        (Some(b), Some(exe)) => Some(ApprovalHook { exe: exe.clone(), socket: b.socket.clone(), timeout: cfg.approval_timeout }),
+        _ => None,
+    };
+
     let spec = AgentSpec {
         agent: run.agent,
         bin: bin.clone(),
@@ -480,15 +506,15 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         },
         model: run.model.clone(),
         cwd,
-        permission_mode: run.permission_mode.clone().unwrap_or_else(|| cfg.permission_mode.clone()),
+        permission_mode,
         max_turns: cfg.max_turns,
         extra_args: cfg.extra_args.clone(),
         resume_session_id: run.resume_session_id.clone(),
         images,
+        approval,
     };
 
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);
-    let (stop_tx, stop_rx) = watch::channel(false);
 
     let exec = tokio::spawn(agent::execute(spec, event_tx, stop_rx));
 
@@ -571,6 +597,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     };
     // Executor dropped its sender; forwarder drains the channel and exits.
     let _ = forwarder.await;
+    drop(bridge);
     if let Some(dir) = images_dir {
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -600,6 +627,18 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     }
 
     report_finish(client, run_id, outcome.status, outcome.result, outcome.usage_limit).await;
+}
+
+/// Listen for the run's permission prompts and relay each to the page.
+fn start_approvals(client: &ControlClient, cfg: &WorkerConfig, run_id: Uuid, stop: &watch::Sender<bool>) -> Result<Bridge> {
+    anyhow::ensure!(cfg.approval_exe.is_some(), "this worker does not know its own executable");
+    let (client, timeout, stop) = (client.clone(), cfg.approval_timeout, stop.subscribe());
+    let bridge = Bridge::start(approval::socket_dir(run_id), move |ask| {
+        let (client, stop) = (client.clone(), stop.clone());
+        async move { approval::ask_page(&client, run_id, &ask, timeout, stop).await }
+    })
+    .context("listening for permission prompts")?;
+    Ok(bridge)
 }
 
 /// A restore run: put the thread's worktree back to `run.restore_to`. The

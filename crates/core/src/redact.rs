@@ -79,6 +79,20 @@ pub fn redact_json(v: &Value) -> Value {
     }
 }
 
+/// A tool call's input as it may leave the machine for an approval: redacted, with
+/// every string clipped to `max_string` bytes (a `Write` can carry a whole file).
+pub fn redact_tool_input(v: &Value, max_string: usize) -> Value {
+    fn clip(v: Value, max: usize) -> Value {
+        match v {
+            Value::String(s) => Value::String(crate::stream::truncate_bytes(&s, max)),
+            Value::Array(a) => Value::Array(a.into_iter().map(|x| clip(x, max)).collect()),
+            Value::Object(o) => Value::Object(o.into_iter().map(|(k, x)| (k, clip(x, max))).collect()),
+            other => other,
+        }
+    }
+    clip(redact_json(v), max_string)
+}
+
 fn is_secret_key(k: &str) -> bool {
     let k = k.to_ascii_lowercase();
     [
@@ -202,5 +216,14 @@ mod tests {
         let long = "a".repeat(1000);
         let s = summarize_tool_input("Bash", &json!({"command": long}));
         assert!(s.chars().count() <= 241);
+    }
+
+    #[test]
+    fn tool_input_for_approval_is_redacted_and_clipped() {
+        let v = json!({"command": "export GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "content": "x".repeat(10_000), "n": 3});
+        let r = redact_tool_input(&v, 100);
+        assert!(!r["command"].as_str().unwrap().contains("ghp_abc"), "{r}");
+        assert!(r["content"].as_str().unwrap().len() < 200);
+        assert_eq!(r["n"], 3);
     }
 }

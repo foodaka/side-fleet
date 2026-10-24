@@ -11,7 +11,7 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, permsFor, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
@@ -36,6 +36,8 @@
 	let machine = $state(load('sidefleet_machine'));
 	let perm = $state(PERMISSIONS.some((p) => p.id === load('sidefleet_perm')) ? load('sidefleet_perm') : 'acceptEdits');
 	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
+	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
+	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
 	let repo = $state(load('sidefleet_repo'));
 	// Off by default and not remembered: it pushes the task's branch to origin.
 	let failover = $state(false);
@@ -114,7 +116,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: perm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload() })
+				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload() })
 			});
 			task = '';
 			attachments.clear();
@@ -238,10 +240,10 @@
 						</Select.Root>
 					{/if}
 
-					<Select.Root type="single" value={perm} onValueChange={(v) => { perm = v; save('sidefleet_perm', v); }}>
-						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === perm)?.name}</Select.Trigger>
+					<Select.Root type="single" value={effectivePerm} onValueChange={(v) => { perm = v; save('sidefleet_perm', v); }}>
+						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === effectivePerm)?.name}</Select.Trigger>
 						<Select.Content>
-							{#each PERMISSIONS as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
+							{#each permsFor(agent) as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
 						</Select.Content>
 					</Select.Root>
 

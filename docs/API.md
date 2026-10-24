@@ -7,6 +7,8 @@
    on a new branch (or uses the checkout for in-place tasks, one per repo at a time), and spawns
    the agent with `cwd` set to the repo:
    - `claude`: `claude -p <task> --output-format stream-json --verbose --model <m> --permission-mode <mode>`
+     (for `ask`: `--permission-mode acceptEdits --mcp-config <…> --permission-prompt-tool mcp__sidefleet__approve`,
+     see [Tool approvals](#tool-approvals-ask-me))
    - `codex`: `codex exec [resume] --json --skip-git-repo-check -c sandbox_mode=… [-m <m>] -- [<session>] <task>`
    - `opencode`: `opencode run --format json [--model <provider/model>] [--session <id>]`, task on stdin
 
@@ -83,7 +85,7 @@ is scoped to that org: another org's runs, images and machines read as 404.
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?, images?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it); `images` is up to 8 `{media_type, data}` (base64 PNG, JPEG, GIF or WebP, 10 MB each) for the agent to look at; the run lists them as `images: [{id, media_type, bytes}]` |
+| `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?, images?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `ask` (Claude Code only; `400` with another agent), `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it); `images` is up to 8 `{media_type, data}` (base64 PNG, JPEG, GIF or WebP, 10 MB each) for the agent to look at; the run lists them as `images: [{id, media_type, bytes}]` |
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
@@ -92,6 +94,9 @@ is scoped to that org: another org's runs, images and machines read as 404.
 | `POST` | `/v1/runs/:id/restore` | `202`: put the thread's worktree back to before this run; `409` while a message in the thread is queued or running, for in-place threads, or when the run has no snapshot |
 | `POST` | `/v1/runs/:id/fork` `{task, agent?, model, permission_mode?}` | `202 {id, status}`: a new thread from this message; `409` while it runs, `400` when the machine holding its files doesn't have the agent |
 | `GET` | `/v1/images/:id` | an image from a tool result or attached to a message (PNG, JPEG, GIF or WebP); `tool_result` events and runs refer to them as `images: [{id, media_type, bytes}]` |
+| `GET` | `/v1/runs/:id/approvals` | the run's tool approvals, oldest first (see [Tool approvals](#tool-approvals-ask-me)) |
+| `POST` | `/v1/runs/:id/approvals/:approval/approve` | `200` with the approval, now `approved`: the agent's tool call goes ahead. `409` when it was already decided, expired or cancelled, or the run is no longer running; `410` when its time ran out first (it is now `expired`) |
+| `POST` | `/v1/runs/:id/approvals/:approval/deny` `{message?}` | `200` with the approval, now `denied`; the agent is told `message`, or that the user denied it. Same `409`/`410` as approve |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `DELETE` | `/v1/workers/:id` | forget a machine (frees a plan slot); `409` while it runs a task |
@@ -113,6 +118,32 @@ their orgs; `401` when signed out), `GET /auth/github/login` and `/auth/github/c
 `POST /auth/logout`, `POST /v1/enroll` and `GET /v1/enroll/:id` (a machine asking to join, and
 polling with its secret).
 
+## Tool approvals ("Ask me")
+
+A run with `permission_mode: "ask"` (Claude Code only) asks the person on the page before a tool
+call that `acceptEdits` would refuse, instead of refusing it:
+
+1. The worker starts Claude Code with `--permission-mode acceptEdits`,
+   `--permission-prompt-tool mcp__sidefleet__approve` and an `--mcp-config` that runs
+   `sidefleet approval-mcp --socket <path>`: a small stdio MCP server, spawned by Claude Code,
+   whose one tool relays each question over a Unix socket (in a `0700` folder in the temp dir) to
+   the worker. It holds no credentials.
+2. The worker redacts the tool input (and clips strings to 4 KB) and calls
+   `POST /v1/worker/runs/:id/approvals` `{tool_name, input, tool_use_id?, timeout_secs?}`. The
+   control plane stores a `pending` approval and appends an `approval_requested` event (the
+   approval plus a one-line `summary`), so the page shows Approve and Deny inline and the thread's
+   `pending_approvals` in `GET /v1/runs` makes the sidebar say "Waiting on you".
+3. Someone approves or denies; that appends `approval_decided` `{id, tool_name, tool_use_id,
+   status, message, decided_by, decided_at}`.
+4. The worker polls `GET /v1/worker/runs/:id/approvals/:approval` every second and answers
+   Claude Code `{"behavior": "allow", "updatedInput": <the original input>}` or
+   `{"behavior": "deny", "message": …}`. The original input never leaves the machine.
+
+An approval changes once, from `pending` to one of: `approved`, `denied`, `expired` (nobody
+decided within `timeout_secs`, 15 minutes by default, at most 24 hours; a late approve answers
+`410`), or `cancelled` (the run finished, was stopped or was lost first). Anything that goes wrong
+on the way, such as the control plane being unreachable, denies the tool call.
+
 ## Worker endpoints
 
 Bearer one of `SIDEFLEET_WORKER_TOKENS` (comma-separated, one per machine if you want to revoke
@@ -122,7 +153,9 @@ default org, or a per-org token, acting in its org:
 agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
 only get `claude` runs, workers that send no slots are not load balanced, and workers that send
 no `kinds` (`agent`, `restore`, `fork`) only get plain agent runs),
-`POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`, `GET /v1/worker/images/:id`
+`POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`,
+`POST /v1/worker/runs/:id/approvals` and `GET /v1/worker/runs/:id/approvals/:approval` (a tool
+approval, above; asking is only allowed while the run is running on that worker, `409` otherwise), `GET /v1/worker/images/:id`
 (a run's attached images, which the worker saves to a temporary folder for the agent),
 `POST /v1/worker/runs/:id/finish` (`{status, result, usage_limit?: {resets_at?}}`; answers with
 the run, which is `queued` again when a usage limit moved it to another machine).

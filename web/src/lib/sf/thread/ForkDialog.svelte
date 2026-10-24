@@ -8,7 +8,7 @@
 	import GitFork from '@lucide/svelte/icons/git-fork';
 	import { api } from '../api';
 	import { fleet } from '../state.svelte';
-	import { PERMISSIONS, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, repoKey, repoLabel } from '../format';
+	import { PERMISSIONS, permsFor, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, repoKey, repoLabel } from '../format';
 	import type { AgentId, Run } from '../types';
 	import AgentModelPicker from '../ui/AgentModelPicker.svelte';
 
@@ -31,6 +31,9 @@
 		task = '';
 		machine = '';
 	});
+
+	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
+	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
 
 	/** The machine holding the files after this message, if they were kept. */
 	const filesOn = $derived(hasFiles ? run.worker_id : null);
@@ -57,7 +60,7 @@
 		try {
 			const r = await api<{ id: string }>(`/v1/runs/${run.id}/fork`, {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, permission_mode: perm, worker_id: chosen?.id })
+				body: JSON.stringify({ task: task.trim(), agent, model, permission_mode: effectivePerm, worker_id: chosen?.id })
 			});
 			open = false;
 			void fleet.refresh();
@@ -106,10 +109,10 @@
 						{/each}
 					</Select.Content>
 				</Select.Root>
-				<Select.Root type="single" value={perm} onValueChange={(v) => (perm = v)}>
-					<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === perm)?.name}</Select.Trigger>
+				<Select.Root type="single" value={effectivePerm} onValueChange={(v) => (perm = v)}>
+					<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === effectivePerm)?.name}</Select.Trigger>
 					<Select.Content>
-						{#each PERMISSIONS as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
+						{#each permsFor(agent) as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
 					</Select.Content>
 				</Select.Root>
 			</div>

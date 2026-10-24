@@ -1559,3 +1559,171 @@ async fn threads_can_be_archived_and_come_back_with_a_new_message() {
     assert_eq!(archive(Uuid::new_v4(), true).await.unwrap().status(), StatusCode::NOT_FOUND);
     env.teardown().await;
 }
+
+// ---- tool approvals ("Ask me") ----
+
+async fn ask(api: &Api, worker: &str, run: Uuid, body: Value) -> (StatusCode, Value) {
+    let r = api
+        .worker(reqwest::Method::POST, &format!("/v1/worker/runs/{run}/approvals?worker_id={worker}"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let s = r.status();
+    (s, r.json().await.unwrap_or(Value::Null))
+}
+
+async fn poll_approval(api: &Api, run: Uuid, approval: &str) -> Value {
+    let r = api.worker(reqwest::Method::GET, &format!("/v1/worker/runs/{run}/approvals/{approval}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    r.json().await.unwrap()
+}
+
+async fn decide(api: &Api, run: Uuid, approval: &str, verb: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut req = api.dev(reqwest::Method::POST, &format!("/v1/runs/{run}/approvals/{approval}/{verb}"));
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.unwrap();
+    let s = r.status();
+    (s, r.json().await.unwrap_or(Value::Null))
+}
+
+async fn pending_in_list(api: &Api, root: Uuid) -> i64 {
+    let list: Vec<RunSummary> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    list.iter().find(|r| r.run.id == root).unwrap().pending_approvals
+}
+
+/// A running "Ask me" run claimed by worker `w`.
+async fn running_ask_run(api: &Api) -> Uuid {
+    api.register("w", &["r"]).await;
+    let id = create_id(api, json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r", "permission_mode": "ask"})).await;
+    let run = api.claim("w", &["r"]).await.unwrap();
+    assert_eq!(run.permission_mode.as_deref(), Some("ask"));
+    id
+}
+
+#[tokio::test]
+async fn an_approval_waits_for_one_decision_and_shows_on_the_page() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let id = running_ask_run(&api).await;
+
+    let (s, a) = ask(&api, "w", id, json!({"tool_name": "Bash", "tool_use_id": "toolu_1",
+        "input": {"command": "curl -H 'Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz' https://example.com", "description": "fetch"}})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(a["status"], "pending");
+    assert!(!a["input"]["command"].as_str().unwrap().contains("sk-abcdef"), "stored input is redacted: {a}");
+    let aid = a["id"].as_str().unwrap().to_string();
+    assert_eq!(pending_in_list(&api, id).await, 1, "the sidebar shows the thread waiting on you");
+
+    // The page hears about it live, with a one-line summary.
+    let evs = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
+    let req = evs.iter().find(|e| e.kind == "approval_requested").expect("approval_requested event");
+    assert_eq!(req.payload["id"], aid.as_str());
+    assert_eq!(req.payload["tool_use_id"], "toolu_1");
+    assert!(req.payload["summary"].as_str().unwrap().starts_with("curl"));
+
+    assert_eq!(poll_approval(&api, id, &aid).await["status"], "pending");
+
+    let (s, a) = decide(&api, id, &aid, "approve", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(a["status"], "approved");
+    assert_eq!(a["decided_by"], "developer key");
+    // Decided once: neither a second approve nor a deny changes it.
+    assert_eq!(decide(&api, id, &aid, "approve", None).await.0, StatusCode::CONFLICT);
+    assert_eq!(decide(&api, id, &aid, "deny", None).await.0, StatusCode::CONFLICT);
+    assert_eq!(poll_approval(&api, id, &aid).await["status"], "approved");
+    assert_eq!(pending_in_list(&api, id).await, 0);
+
+    let kinds: Vec<String> = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap().into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, vec!["status", "status", "approval_requested", "approval_decided"]);
+
+    // A denial tells the agent why: the person's words, or a default.
+    let (_, b) = ask(&api, "w", id, json!({"tool_name": "WebFetch", "input": {"url": "https://example.com"}})).await;
+    let (s, b) = decide(&api, id, b["id"].as_str().unwrap(), "deny", Some(json!({"message": "use the local docs"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!((b["status"].as_str(), b["message"].as_str()), (Some("denied"), Some("use the local docs")));
+    let (_, c) = ask(&api, "w", id, json!({"tool_name": "Bash", "input": {"command": "rm -rf build"}})).await;
+    let (_, c) = decide(&api, id, c["id"].as_str().unwrap(), "deny", None).await;
+    assert!(c["message"].as_str().unwrap().contains("denied"));
+
+    // Approvals are listed per run; unknown ones are 404.
+    let list: Vec<Value> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{id}/approvals")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list.len(), 3);
+    assert_eq!(decide(&api, id, &Uuid::new_v4().to_string(), "approve", None).await.0, StatusCode::NOT_FOUND);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn an_approval_nobody_answers_in_time_expires() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let id = running_ask_run(&api).await;
+
+    let (_, a) = ask(&api, "w", id, json!({"tool_name": "Bash", "input": {"command": "make"}, "timeout_secs": 1})).await;
+    let (_, b) = ask(&api, "w", id, json!({"tool_name": "Bash", "input": {"command": "make test"}, "timeout_secs": 1})).await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    // The worker asks after the deadline: expired, with a message for the agent.
+    let a = poll_approval(&api, id, a["id"].as_str().unwrap()).await;
+    assert_eq!(a["status"], "expired");
+    assert!(a["message"].as_str().unwrap().contains("Nobody approved"), "{a}");
+    // A late approval on the page does not go through either.
+    let (s, _) = decide(&api, id, b["id"].as_str().unwrap(), "approve", None).await;
+    assert_eq!(s, StatusCode::GONE);
+    assert_eq!(poll_approval(&api, id, b["id"].as_str().unwrap()).await["status"], "expired");
+    assert_eq!(pending_in_list(&api, id).await, 0);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn approvals_end_with_their_run() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let id = running_ask_run(&api).await;
+
+    // A stop cancels what the agent was waiting on, so the worker stops waiting.
+    let (_, a) = ask(&api, "w", id, json!({"tool_name": "Bash", "input": {"command": "sleep 1"}})).await;
+    let aid = a["id"].as_str().unwrap().to_string();
+    api.stop(id).await;
+    let a = poll_approval(&api, id, &aid).await;
+    assert_eq!(a["status"], "cancelled");
+    // Nothing new can be asked once a stop is pending.
+    assert_eq!(ask(&api, "w", id, json!({"tool_name": "Bash", "input": {}})).await.0, StatusCode::CONFLICT);
+
+    // Finishing cancels any left pending.
+    let id2 = create_id(&api, json!({"task": "t2", "model": "claude-sonnet-5-5", "repo": "r", "permission_mode": "ask"})).await;
+    api.finish("w", id, "stopped", json!({})).await;
+    api.claim("w", &["r"]).await.unwrap();
+    let (_, b) = ask(&api, "w", id2, json!({"tool_name": "Bash", "input": {"command": "ls"}})).await;
+    let bid = b["id"].as_str().unwrap().to_string();
+    let (s, _) = api.finish("w", id2, "succeeded", json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, body) = decide(&api, id2, &bid, "approve", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    let kinds: Vec<String> = sidefleet_server::db::events_since(&env.pool, id2, 0).await.unwrap().into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, vec!["status", "status", "approval_requested", "approval_decided", "status"]);
+
+    // Only the run's own worker may ask, and only while it runs.
+    assert_eq!(ask(&api, "other", id2, json!({"tool_name": "Bash", "input": {}})).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(ask(&api, "w", id2, json!({"tool_name": "Bash", "input": {}})).await.0, StatusCode::CONFLICT);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn ask_me_is_for_claude_code() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "t", "agent": "codex", "model": "", "repo": "r", "permission_mode": "ask"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    env.teardown().await;
+}

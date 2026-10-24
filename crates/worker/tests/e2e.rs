@@ -73,6 +73,9 @@ impl Harness {
             worktrees_dir: repos.path().join(".worktrees"),
             version: "test-build".into(),
             allow_remote_update: false,
+            // Never run: the fake agent talks to the worker's socket itself.
+            approval_exe: Some("/nonexistent/sidefleet".into()),
+            approval_timeout: Duration::from_secs(20),
         };
         let worker = tokio::spawn(run_worker(cfg));
         let h = Harness { env, http: Client::new(), _repos: repos, worker };
@@ -475,6 +478,8 @@ fn machine(env: &TestEnv, id: &str, root: &std::path::Path, heartbeat: Duration)
         worktrees_dir: root.join(".worktrees"),
         version: "test-build".into(),
         allow_remote_update: false,
+        approval_exe: None,
+        approval_timeout: Duration::from_secs(20),
     }
 }
 
@@ -674,5 +679,70 @@ async fn a_thread_forks_into_a_new_thread_with_another_agent_and_the_files_so_fa
     assert!(std::fs::read_to_string(wt.join("README.md")).unwrap().contains("edited by the agent"));
     assert!(events.iter().any(|e| e.kind == "snapshot"));
     assert!(!events.iter().any(|e| e.kind == "diff"), "the fork changed nothing itself");
+    h.teardown().await;
+}
+
+async fn create_ask(h: &Harness, task: &str) -> Uuid {
+    let r = h
+        .http
+        .post(format!("{}/v1/runs", h.env.base_url))
+        .bearer_auth(DEV_KEY)
+        .json(&json!({"task": task, "model": "claude-haiku-5-5", "repo": "demo", "permission_mode": "ask"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap()
+}
+
+async fn pending_approval(h: &Harness, id: Uuid) -> serde_json::Value {
+    for _ in 0..100 {
+        let list: Vec<serde_json::Value> = h.dev_get(&format!("/v1/runs/{id}/approvals")).await;
+        if let Some(a) = list.iter().find(|a| a["status"] == "pending") {
+            return a.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no approval was requested for {id}");
+}
+
+async fn decide(h: &Harness, id: Uuid, approval: &serde_json::Value, verb: &str) {
+    let aid = approval["id"].as_str().unwrap();
+    let r = h.http.post(format!("{}/v1/runs/{id}/approvals/{aid}/{verb}", h.env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+}
+
+/// "Ask me": the agent's permission prompt reaches the page, waits, and the agent goes on
+/// once someone approves; a denial reaches the agent as an error tool result.
+#[tokio::test]
+async fn ask_me_waits_for_approval_on_the_page() {
+    let h = Harness::start(2).await;
+
+    let id = create_ask(&h, "ask before cleaning up").await;
+    let a = pending_approval(&h, id).await;
+    assert_eq!(a["tool_name"], "Bash");
+    assert_eq!(a["input"]["command"], "rm -rf build");
+    assert_eq!(a["tool_use_id"], "tu_ask");
+    // The agent waits: the run is still going, with no result yet.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(h.dev_get::<Run>(&format!("/v1/runs/{id}")).await.status, RunStatus::Running);
+    decide(&h, id, &a, "approve").await;
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let events = h.sse_collect(id, Duration::from_secs(5)).await;
+    let result = events.iter().find(|(e, _)| e.kind == "tool_result" && e.payload["tool_use_id"] == "tu_ask").expect("tool result");
+    assert_eq!(result.0.payload["content"], "approved and ran");
+    let started = events.iter().find(|(e, _)| e.kind == "started").unwrap();
+    let command = started.0.payload["command"].as_str().unwrap();
+    assert!(command.contains("--permission-mode acceptEdits") && command.contains("--permission-prompt-tool mcp__sidefleet__approve"), "{command}");
+
+    let id = create_ask(&h, "ask before cleaning up again").await;
+    let a = pending_approval(&h, id).await;
+    decide(&h, id, &a, "deny").await;
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let events = h.sse_collect(id, Duration::from_secs(5)).await;
+    let result = events.iter().find(|(e, _)| e.kind == "tool_result" && e.payload["tool_use_id"] == "tu_ask").expect("tool result");
+    assert_eq!(result.0.payload["is_error"], true);
+    assert!(result.0.payload["content"].as_str().unwrap().contains("denied"), "{}", result.0.payload);
+
     h.teardown().await;
 }

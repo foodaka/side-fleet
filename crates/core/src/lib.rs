@@ -12,5 +12,5 @@ pub mod stream_opencode;
 
 pub use agent::{result_usage_limit, Agent, AgentStream, AGENTS, CLAUDE_MODELS};
 pub use models::*;
-pub use redact::{redact, summarize_tool_input};
+pub use redact::{redact, redact_tool_input, summarize_tool_input};
 pub use stream::{map_stream_line, usage_limit_in, MappedLine, TOOL_RESULT_MAX_BYTES};

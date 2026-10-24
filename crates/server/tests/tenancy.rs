@@ -617,3 +617,39 @@ async fn routing_and_usage_limits_only_count_machines_of_the_runs_org() {
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn a_new_sign_up_sends_one_telegram_message() {
+    let (tg, sent) = sidefleet_server::test_support::FakeTelegram::start().await;
+    let gh = sidefleet_server::test_support::FakeGithub::start().await;
+    let env = TestEnv::start_with(|c| {
+        c.github = Some(gh);
+        c.telegram = Some(tg);
+    })
+    .await;
+
+    // alice signs up, signs in again, then bob signs up: two messages, not three.
+    env.github_login("alice").await;
+    env.github_login("alice").await;
+    env.github_login("bob").await;
+    let mut msgs = Vec::new();
+    for _ in 0..50 {
+        msgs = sent.lock().unwrap().clone();
+        if msgs.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(sent.lock().unwrap().len(), 2, "one message per new user: {msgs:?}");
+    let mut texts: Vec<String> = msgs.iter().map(|(_, v)| v["text"].as_str().unwrap().to_string()).collect();
+    texts.sort();
+    for (token, v) in &msgs {
+        assert_eq!(token, "123:test");
+        assert_eq!(v["chat_id"], "42");
+    }
+    assert!(texts[0].contains("GitHub: alice (https://github.com/alice)") && texts[0].contains("Email: alice@example.com"), "{}", texts[0]);
+    assert!(texts[1].contains("GitHub: bob") && texts[1].contains("Users: 2"), "{}", texts[1]);
+
+    env.teardown().await;
+}

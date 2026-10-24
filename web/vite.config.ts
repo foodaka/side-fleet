@@ -64,7 +64,8 @@ export default defineConfig({
 				strict: false
 			}),
 			router: { type: 'hash' },
-			// A fixed version keeps builds byte-for-byte reproducible (CI checks the committed build).
+			// A fixed version keeps builds byte-for-byte reproducible, so main's web-dist
+			// workflow only commits when the app changed.
 			version: { name: 'sidefleet', pollInterval: 0 },
 			paths: { relative: true }
 		})

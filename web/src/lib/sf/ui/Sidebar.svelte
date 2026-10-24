@@ -3,6 +3,7 @@
 	import * as Tooltip from '#lib/components/ui/tooltip';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import { Kbd } from '#lib/components/ui/kbd';
+	import MessageSquare from '@lucide/svelte/icons/message-square';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, Settings, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
@@ -146,5 +147,8 @@
 				{/if}
 			</DropdownMenu.Content>
 		</DropdownMenu.Root>
+		<button type="button" class="{item(false)} w-full" onclick={() => (fleet.feedbackOpen = true)}>
+			<MessageSquare size={14} />Feedback
+		</button>
 	</nav>
 </div>

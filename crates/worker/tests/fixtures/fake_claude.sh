@@ -6,6 +6,7 @@
 # the Bash tool call when it is not there yet; "edit" changes README.md and adds
 # notes.txt; "rename" moves notes.txt; "ask" asks the worker's "Ask me" socket
 # from --mcp-config about a Bash call, as Claude Code's permission prompt tool would).
+# With --include-partial-messages the last message streams as text deltas first.
 if [ "$1" = "--version" ]; then printf '%s\n' "9.9.9 (Claude Code fake)"; exit 0; fi
 task=""
 model="unknown"
@@ -14,6 +15,7 @@ while [ $# -gt 0 ]; do
     -p) task="$2"; shift 2;;
     --model) model="$2"; shift 2;;
     --mcp-config) mcp="$2"; shift 2;;
+    --include-partial-messages) partial=1; shift;;
     *) shift;;
   esac
 done
@@ -62,7 +64,16 @@ case "$task" in
   *fail*) printf '%s\n' "fatal: simulated crash" >&2; kill $child 2>/dev/null; exit 3;;
   *error-result*) printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":900,"num_turns":1,"session_id":"fake-session"}'; kill $child 2>/dev/null; exit 0;;
 esac
+if [ -n "$partial" ]; then
+  printf '%s\n' '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}},"parent_tool_use_id":null}'
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}'
+  for d in "The working " "tree has " "one untracked " "file."; do
+    printf '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%s"}},"parent_tool_use_id":null}\n' "$d"
+    sleep 0.15
+  done
+fi
 printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The working tree has one untracked file."}]}}'
+[ -n "$partial" ] && printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}'
 sleep 0.2
 printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}'
 printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Done: one untracked file (notes.txt). Model was $model.\",\"duration_ms\":1200,\"num_turns\":2,\"total_cost_usd\":0.0042,\"session_id\":\"fake-session\"}"

@@ -2,7 +2,7 @@
 //! machine with its own sign-in, flags and output format; the worker spawns it
 //! and maps its stdout to the same run events (see [`AgentStream`]).
 
-use crate::stream::{map_stream_line, usage_limit_in, MappedLine};
+use crate::stream::{usage_limit_in, ClaudeStream, MappedLine};
 use crate::{stream_codex, stream_opencode, NewEvent, UsageLimit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -120,7 +120,8 @@ impl fmt::Display for Agent {
 
 /// Maps one agent's stdout, line by line, to run events. Codex and opencode
 /// need a little state (the session id, the last message, which tool calls
-/// were announced); Claude Code's lines map one to one.
+/// were announced); Claude Code's lines map one to one, apart from the text
+/// it streams while it writes (see [`ClaudeStream`]).
 ///
 /// A failed `result` whose text says the account hit its usage limit gets a
 /// `usage_limit` field (`{"resets_at": ...}`), which the worker reports when it
@@ -132,7 +133,7 @@ pub struct AgentStream {
 }
 
 enum Inner {
-    Claude,
+    Claude(ClaudeStream),
     Codex(stream_codex::CodexStream),
     Opencode(stream_opencode::OpencodeStream),
 }
@@ -142,7 +143,7 @@ impl AgentStream {
     /// does not say); `cwd` makes file paths in tool calls relative.
     pub fn new(agent: Agent, model: &str, cwd: &str) -> Self {
         let inner = match agent {
-            Agent::Claude => Inner::Claude,
+            Agent::Claude => Inner::Claude(ClaudeStream::default()),
             Agent::Codex => Inner::Codex(stream_codex::CodexStream::new(model, cwd)),
             Agent::Opencode => Inner::Opencode(stream_opencode::OpencodeStream::new(model, cwd)),
         };
@@ -150,13 +151,11 @@ impl AgentStream {
     }
 
     pub fn map_line(&mut self, line: &str) -> MappedLine {
+        if matches!(self.inner, Inner::Claude(_)) && line.contains("\"rate_limit_event\"") {
+            self.note_rate_limit(line);
+        }
         let mut mapped = match &mut self.inner {
-            Inner::Claude => {
-                if line.contains("\"rate_limit_event\"") {
-                    self.note_rate_limit(line);
-                }
-                map_stream_line(line)
-            }
+            Inner::Claude(s) => s.map_line(line),
             Inner::Codex(s) => s.map_line(line),
             Inner::Opencode(s) => s.map_line(line),
         };
@@ -170,7 +169,7 @@ impl AgentStream {
     /// (opencode) get one synthesised from what they said.
     pub fn finish(&mut self, exit_ok: bool) -> Vec<NewEvent> {
         let mut evs = match &mut self.inner {
-            Inner::Claude | Inner::Codex(_) => vec![],
+            Inner::Claude(_) | Inner::Codex(_) => vec![],
             Inner::Opencode(s) => s.finish(exit_ok),
         };
         evs.iter_mut().for_each(|e| self.mark_usage_limit(e));

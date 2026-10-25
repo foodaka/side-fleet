@@ -72,6 +72,8 @@ export interface Turn {
 		tokens: number | null;
 	} | null;
 	lastText: string;
+	/** The text the agent is writing right now, until its final message replaces it. Never stored. */
+	liveText: string;
 	reconnecting: boolean;
 	/** What this turn changed, and everything the thread has changed so far (null: same as `turn`). */
 	diff: { turn: DiffSet; total: DiffSet | null } | null;
@@ -94,6 +96,7 @@ function newTurn(run: Run): Turn {
 		activity: run.status === 'queued' ? 'queued' : null,
 		result: null,
 		lastText: '',
+		liveText: '',
 		reconnecting: false,
 		diff: null,
 		snapshot: null
@@ -277,6 +280,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
+				t.liveText = '';
 				// Nobody can answer the agent any more.
 				for (const it of t.items) if (it.kind === 'approval' && it.status === 'pending') it.status = 'cancelled';
 				if (p.status !== 'succeeded' || p.reason)
@@ -311,12 +315,17 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 		case 'assistant_thinking':
 			t.activity = 'Thinking';
 			break;
+		case 'assistant_live':
+			t.liveText = p.text ?? '';
+			break;
 		case 'assistant_text':
+			t.liveText = '';
 			t.lastText = p.text ?? '';
 			t.items.push({ kind: 'text', key, text: p.text ?? '', at: ev.at });
 			t.activity = 'Working';
 			break;
 		case 'tool_use':
+			t.liveText = '';
 			t.items.push({
 				kind: 'tool', key, id: p.id, name: p.name, summary: p.summary ?? '',
 				output: null, isError: false, truncated: false, images: [], at: ev.at
@@ -352,6 +361,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			break;
 		}
 		case 'result':
+			t.liveText = '';
 			run.session_id = p.session_id ?? run.session_id;
 			t.result = {
 				ok: !p.is_error,

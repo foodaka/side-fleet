@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use sidefleet_core::{
-    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, NewEvent,
-    PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
+    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest,
+    NewEvent, PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
@@ -187,6 +187,25 @@ impl ControlClient {
             .context("post events failed")?;
         let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
         Ok(r.json().await?)
+    }
+
+    /// Show the text the agent is writing to whoever follows the run. Best effort:
+    /// Ok(false) means the control plane takes no live text (it predates it).
+    pub async fn post_live(&self, run_id: Uuid, text: &str) -> Result<bool> {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/worker/runs/{run_id}/live?worker_id={}", self.worker_id)))
+            .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(5))
+            .json(&LiveTextRequest { text: text.to_string() })
+            .send()
+            .await
+            .context("post live text failed")?;
+        if matches!(r.status(), StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
+            return Ok(false);
+        }
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(true)
     }
 
     pub async fn control(&self, run_id: Uuid) -> Result<RunControl> {

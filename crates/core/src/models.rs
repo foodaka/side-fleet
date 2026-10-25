@@ -682,6 +682,13 @@ pub struct PostEventsRequest {
     pub events: Vec<NewEvent>,
 }
 
+/// The reply text an agent is writing (see [`crate::LIVE_TEXT`]), for whoever
+/// follows the run right now. Never stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveTextRequest {
+    pub text: String,
+}
+
 /// Returned to the worker after posting events and from the control endpoint,
 /// so it learns about a stop request without an extra round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]

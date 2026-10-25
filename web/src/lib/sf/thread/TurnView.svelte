@@ -162,9 +162,13 @@
 					</details>
 				{/if}
 			{/each}
+			{#if live && turn.liveText}
+				<!-- Takes the place of the final message, which lands here when it is complete. -->
+				<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.liveText} /></div>
+			{/if}
 		</div>
 
-		{#if live && turn.activity && turn.activity !== 'queued'}
+		{#if live && turn.activity && turn.activity !== 'queued' && !turn.liveText}
 			<div class="flex items-center gap-2 py-1.5" role="status">
 				<span class="size-1.5 rounded-full bg-run pulse-run"></span>
 				<Shimmer as="span" class="text-[13px]" content_length={turn.activity.length}>{turn.activity}</Shimmer>

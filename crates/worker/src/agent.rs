@@ -124,6 +124,8 @@ impl AgentSpec {
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
+            // Text as it is generated, shown live on the page (see `ClaudeStream`).
+            "--include-partial-messages".into(),
             "--model".into(),
             self.model.clone(),
             "--permission-mode".into(),

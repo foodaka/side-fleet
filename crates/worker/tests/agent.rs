@@ -60,9 +60,14 @@ async fn success_path_maps_events_in_order_and_redacts() {
     let ordered: Vec<&str> = kinds.iter().copied().filter(|k| *k != "stderr").collect();
     assert_eq!(
         ordered,
-        vec!["started", "agent_init", "assistant_text", "tool_use", "tool_result", "assistant_text", "result"]
+        vec![
+            "started", "agent_init", "assistant_text", "tool_use", "tool_result",
+            "assistant_live", "assistant_live", "assistant_live", "assistant_text", "assistant_live", "result"
+        ]
     );
-    let events: Vec<&NewEvent> = events.iter().filter(|e| e.kind != "stderr").collect();
+    let live: Vec<&str> = events.iter().filter(|e| e.kind == "assistant_live").map(|e| e.payload["text"].as_str().unwrap()).collect();
+    assert_eq!(live, ["The working ", "The working tree has ", "The working tree has one untracked ", ""]);
+    let events: Vec<&NewEvent> = events.iter().filter(|e| e.kind != "stderr" && e.kind != "assistant_live").collect();
     let all = serde_json::to_string(&events).unwrap();
     assert!(!all.contains("ghp_abc"), "tool input token leaked: {all}");
     assert!(!all.contains("supersecretvalue99"), "tool result secret leaked: {all}");
@@ -70,7 +75,7 @@ async fn success_path_maps_events_in_order_and_redacts() {
     assert!(all.contains("git status --short"));
     assert_eq!(events[3].payload["summary"], "export GITHUB_TOKEN=[REDACTED] && git status --short");
     assert_eq!(events[1].payload["model"], "claude-sonnet-5-5");
-    assert!(events[0].payload["command"].as_str().unwrap().contains("--output-format stream-json --verbose --model claude-sonnet-5-5 --permission-mode acceptEdits"));
+    assert!(events[0].payload["command"].as_str().unwrap().contains("--output-format stream-json --verbose --include-partial-messages --model claude-sonnet-5-5 --permission-mode acceptEdits"));
     assert!(!events[0].payload["command"].as_str().unwrap().contains("summarise"), "task must not be echoed in the command");
 }
 

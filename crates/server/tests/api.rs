@@ -393,6 +393,46 @@ async fn event_ordering_and_sse_replay() {
 }
 
 #[tokio::test]
+async fn live_text_reaches_subscribers_redacted_and_is_never_stored() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let (_, body) = api.create_run("stream me", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    let live = |worker: &str, text: &str| {
+        api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/live?worker_id={worker}")).json(&json!({"text": text})).send()
+    };
+
+    // Nobody is watching: accepted and dropped.
+    assert_eq!(live("w", "unseen ").await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let mut sse = Sse::open(&api, id, None).await;
+    for _ in 0..2 {
+        sse.next_event(Duration::from_secs(1)).await.unwrap(); // queued, running
+    }
+    assert_eq!(live("other", "not yours ").await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(live("w", "Using token=abcdefgh12345 now ").await.unwrap().status(), StatusCode::NO_CONTENT);
+    let (name, frame_id, data) = sse.next(Duration::from_secs(1)).await.unwrap();
+    assert_eq!((name.as_str(), frame_id), ("assistant_live", None), "no id, so a resume never skips stored events");
+    let v: Value = serde_json::from_str(&data).unwrap();
+    assert_eq!(v["kind"], "assistant_live");
+    assert_eq!(v["run_id"], id.to_string());
+    assert_eq!(v["payload"]["text"], "Using token=[REDACTED] now ");
+
+    // The stored message follows in order; the live text was never an event.
+    api.post_events("w", id, json!([{"kind": "assistant_text", "payload": {"text": "Using it now."}}])).await;
+    let ev = sse.next_event(Duration::from_secs(1)).await.unwrap();
+    assert_eq!((ev.seq, ev.kind.as_str()), (2, "assistant_text"));
+    let stored = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
+    assert!(stored.iter().all(|e| e.kind != "assistant_live"), "{stored:?}");
+
+    let too_long = "x".repeat(2 * sidefleet_core::LIVE_TEXT_MAX_BYTES + 1);
+    assert_eq!(live("w", &too_long).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn stop_while_running_is_signalled_to_the_worker() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

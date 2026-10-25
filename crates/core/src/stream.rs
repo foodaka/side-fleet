@@ -7,6 +7,9 @@
 //! * `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":...,"content":...,"is_error":...}]}}`
 //! * `{"type":"result","subtype":"success"|"error_*","is_error":bool,"result":...,"duration_ms":...,"total_cost_usd":...}`
 //!
+//! * `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":...}}}`
+//!   (with `--include-partial-messages`): the reply as it is generated, see [`ClaudeStream`].
+//!
 //! Anything else is forwarded as `agent_other` with only its `type`/`subtype`.
 
 use crate::redact::{redact, redact_json, summarize_tool_input};
@@ -25,16 +28,112 @@ pub enum MappedLine {
     Raw(String),
 }
 
-/// Map one stdout line of the agent to run events.
+/// Kind of the event carrying the reply text while it is generated: `{"text": ...}`,
+/// everything of the current text block so far (empty clears it). The worker sends
+/// these to the page without storing them; the final `assistant_text` replaces it.
+pub const LIVE_TEXT: &str = "assistant_live";
+
+/// A text block past this many bytes stops updating live; the whole message still lands.
+pub const LIVE_TEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Map one stdout line of the agent to run events. Stateless: `stream_event`
+/// lines map to nothing here; [`ClaudeStream`] turns them into live text.
 pub fn map_stream_line(line: &str) -> MappedLine {
+    match parse_line(line) {
+        Ok(v) => map_value(&v),
+        Err(mapped) => mapped,
+    }
+}
+
+fn parse_line(line: &str) -> Result<Value, MappedLine> {
     let line = line.trim();
     if line.is_empty() {
-        return MappedLine::Events(vec![]);
+        return Err(MappedLine::Events(vec![]));
     }
-    let v: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => return MappedLine::Raw(truncate_bytes(&redact(line), TOOL_RESULT_MAX_BYTES)),
-    };
+    serde_json::from_str(line).map_err(|_| MappedLine::Raw(truncate_bytes(&redact(line), TOOL_RESULT_MAX_BYTES)))
+}
+
+/// Claude Code's stdout with `--include-partial-messages`: [`map_stream_line`],
+/// plus an [`LIVE_TEXT`] event each time the top-level reply's text grows.
+#[derive(Debug, Default)]
+pub struct ClaudeStream {
+    /// The text block being generated, unredacted; None while the block is not text.
+    text: Option<String>,
+    /// What the last live event showed.
+    shown: String,
+}
+
+impl ClaudeStream {
+    pub fn map_line(&mut self, line: &str) -> MappedLine {
+        let v = match parse_line(line) {
+            Ok(v) => v,
+            Err(mapped) => return mapped,
+        };
+        if v.get("type").and_then(Value::as_str) == Some("stream_event") {
+            return MappedLine::Events(self.on_stream_event(&v).into_iter().collect());
+        }
+        map_value(&v)
+    }
+
+    fn on_stream_event(&mut self, v: &Value) -> Option<NewEvent> {
+        // A subagent's messages stream too, interleaved with the main one's; they land whole.
+        if v.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
+            return None;
+        }
+        let ev = v.get("event")?;
+        match ev.get("type").and_then(Value::as_str)? {
+            "content_block_start" => {
+                let is_text = ev.pointer("/content_block/type").and_then(Value::as_str) == Some("text");
+                self.text = is_text.then(String::new);
+                self.show(String::new())
+            }
+            "content_block_delta" => {
+                let text = self.text.as_mut()?;
+                if ev.pointer("/delta/type").and_then(Value::as_str) != Some("text_delta") || text.len() > LIVE_TEXT_MAX_BYTES {
+                    return None;
+                }
+                text.push_str(ev.pointer("/delta/text").and_then(Value::as_str).unwrap_or(""));
+                let view = live_view(text);
+                self.show(view)
+            }
+            "message_start" | "content_block_stop" | "message_stop" => {
+                self.text = None;
+                self.show(String::new())
+            }
+            _ => None,
+        }
+    }
+
+    /// The live event for `view`, unless the page already shows it.
+    fn show(&mut self, view: String) -> Option<NewEvent> {
+        if view == self.shown {
+            return None;
+        }
+        self.shown = view.clone();
+        Some(NewEvent { kind: LIVE_TEXT.into(), payload: json!({"text": view}) })
+    }
+}
+
+/// The part of a text block in progress that may be shown: redacted, and without
+/// what could still be the start of a secret, i.e. its unfinished last word and an
+/// unfinished private key block. Each pattern [`redact`] knows then sees a secret
+/// whole before any of it leaves the machine.
+pub fn live_view(text: &str) -> String {
+    let mut end = text.len();
+    if let Some(i) = text.rfind("-----BEGIN") {
+        if !text[i..].contains("-----END") {
+            end = i;
+        }
+    }
+    let mut text = &text[..end];
+    if !text.ends_with(char::is_whitespace) {
+        let word_start = text.char_indices().rev().find(|(_, c)| c.is_whitespace()).map(|(i, c)| i + c.len_utf8());
+        text = &text[..word_start.unwrap_or(0)];
+    }
+    redact(text)
+}
+
+fn map_value(v: &Value) -> MappedLine {
     let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
     let mut out = Vec::new();
     match ty {
@@ -53,9 +152,9 @@ pub fn map_stream_line(line: &str) -> MappedLine {
             }
             // hook_started / hook_response / compact_boundary etc. are noise for the viewer.
         }
-        "rate_limit_event" => {}
+        "rate_limit_event" | "stream_event" => {}
         "assistant" => {
-            for block in content_blocks(&v) {
+            for block in content_blocks(v) {
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         let text = block.get("text").and_then(Value::as_str).unwrap_or("");
@@ -90,7 +189,7 @@ pub fn map_stream_line(line: &str) -> MappedLine {
             }
         }
         "user" => {
-            for block in content_blocks(&v) {
+            for block in content_blocks(v) {
                 if block.get("type").and_then(Value::as_str) == Some("tool_result") {
                     let content = tool_result_text(block.get("content"));
                     let truncated = content.len() > TOOL_RESULT_MAX_BYTES;
@@ -328,6 +427,91 @@ mod tests {
         assert_eq!(usage_limit_in("You've hit your limit").unwrap().resets_at, None);
         assert!(usage_limit_in("Reached max turns (3)").is_none());
         assert!(usage_limit_in("Prompt is too long").is_none());
+    }
+
+    fn claude_events(lines: &str) -> Vec<NewEvent> {
+        let mut s = ClaudeStream::default();
+        lines
+            .lines()
+            .flat_map(|l| match s.map_line(l) {
+                MappedLine::Events(e) => e,
+                MappedLine::Raw(r) => panic!("expected events, got raw {r}"),
+            })
+            .collect()
+    }
+
+    fn live(e: &NewEvent) -> &str {
+        e.payload["text"].as_str().unwrap()
+    }
+
+    #[test]
+    fn partial_messages_stream_live_text_and_keep_the_final_messages() {
+        let evs = claude_events(include_str!("../tests/fixtures/claude_partial_messages.jsonl"));
+        // Stored events are exactly what Claude Code without partial messages gives.
+        let stored: Vec<&str> = evs.iter().map(|e| e.kind.as_str()).filter(|k| *k != LIVE_TEXT).collect();
+        assert_eq!(stored, ["agent_init", "assistant_thinking", "assistant_text", "tool_use", "tool_result", "assistant_text", "result"]);
+        assert!(!evs.iter().any(|e| e.kind == "agent_other"), "stream_event lines are not forwarded as such");
+
+        // Live text grows word by word ahead of each final message, then clears.
+        let first_final = evs.iter().position(|e| e.kind == "assistant_text").unwrap();
+        let before: Vec<&str> = evs[..first_final].iter().filter(|e| e.kind == LIVE_TEXT).map(live).collect();
+        assert!(before.len() > 5, "{before:?}");
+        // "R", then "ivers car": the unfinished "car" waits for the next delta.
+        assert_eq!(before[0], "Rivers ");
+        assert!(before.windows(2).all(|w| w[1].starts_with(w[0]) && w[1].len() > w[0].len()), "{before:?}");
+        assert!(before.iter().all(|t| t.is_empty() || t.ends_with(' ')), "{before:?}");
+        let final_text = evs[first_final].payload["text"].as_str().unwrap();
+        assert!(final_text.starts_with(before.last().unwrap()), "{final_text:?}");
+        assert_eq!(live(&evs[first_final + 1]), "", "cleared once the block ends");
+        assert!(evs.iter().filter(|e| e.kind == LIVE_TEXT).all(|e| e.payload.as_object().unwrap().len() == 1));
+    }
+
+    fn delta(text: &str) -> String {
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}},"parent_tool_use_id":null}).to_string()
+    }
+    const TEXT_START: &str = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}"#;
+
+    #[test]
+    fn live_text_never_shows_part_of_a_secret() {
+        let mut lines = vec![TEXT_START.to_string()];
+        for d in ["Set ", "GITHUB_", "TOKEN=ghp_abcd", "efghijklmnopqrstuvwxyz", "1234 and run ", "it. Bearer abc", "def123456 ok "] {
+            lines.push(delta(d));
+        }
+        let evs = claude_events(&lines.join("\n"));
+        let shown: Vec<&str> = evs.iter().map(live).collect();
+        for t in &shown {
+            assert!(!t.contains("ghp_") && !t.contains("abcd") && !t.contains("abcdef"), "{t:?}");
+        }
+        assert_eq!(*shown.last().unwrap(), "Set GITHUB_TOKEN=[REDACTED] and run it. Bearer [REDACTED] ok ");
+
+        let pem = ["Key:\n-----BEGIN RSA PRIVATE KEY-----\n", "MIIEowIBAAKCAQEA\n", "-----END RSA PRIVATE KEY-----\n", "done "];
+        let mut lines = vec![TEXT_START.to_string()];
+        lines.extend(pem.iter().map(|d| delta(d)));
+        let shown: Vec<String> = claude_events(&lines.join("\n")).iter().map(|e| live(e).to_string()).collect();
+        assert!(shown.iter().all(|t| !t.contains("MIIE")), "{shown:?}");
+        assert_eq!(shown.last().unwrap(), &format!("Key:\n{REDACTED}\ndone "));
+    }
+
+    #[test]
+    fn live_text_skips_subagents_tools_and_thinking() {
+        let sub = json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"sub agent words "}},"parent_tool_use_id":"toolu_1"}).to_string();
+        let thinking = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}},"parent_tool_use_id":null}"#;
+        let think_delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret plans "}},"parent_tool_use_id":null}"#;
+        let tool = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":"Bash","input":{}}},"parent_tool_use_id":null}"#;
+        let json_delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\": \"ls \""}},"parent_tool_use_id":null}"#;
+        let lines = [TEXT_START, &sub, thinking, think_delta, tool, json_delta, &delta("no block open ")].join("\n");
+        assert!(claude_events(&lines).is_empty());
+        // The stateless mapping ignores stream events altogether.
+        assert!(events(&delta("hello there ")).is_empty());
+    }
+
+    #[test]
+    fn live_view_holds_back_the_last_word() {
+        assert_eq!(live_view(""), "");
+        assert_eq!(live_view("Hello"), "");
+        assert_eq!(live_view("Hello wor"), "Hello ");
+        assert_eq!(live_view("Hello world\n"), "Hello world\n");
+        assert_eq!(live_view("Grüße\u{3000}wél"), "Grüße\u{3000}");
     }
 
     #[test]

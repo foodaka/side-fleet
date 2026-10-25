@@ -41,6 +41,32 @@ export const defaultModel = (agent: AgentId) => (agent === 'claude' ? 'sonnet' :
 /** `Claude Code · Sonnet 5.5`, `opencode · moonshotai/kimi-k2`. */
 export const agentModel = (agent: string | null | undefined, model: string) => `${agentName(agent)} · ${modelName(model, agent)}`;
 
+/** Reasoning efforts each agent takes ('' is the agent's own default); opencode has none. */
+export const EFFORTS: Record<AgentId, { id: string; name: string; hint?: string }[]> = {
+	claude: [
+		{ id: 'low', name: 'Low' },
+		{ id: 'medium', name: 'Medium' },
+		{ id: 'high', name: 'High' },
+		{ id: 'xhigh', name: 'Extra High' },
+		{ id: 'max', name: 'Max' },
+		{ id: 'ultrathink', name: 'Ultrathink', hint: 'Deep thinking on this message' },
+		{ id: 'ultracode', name: 'Ultracode', hint: 'xhigh effort plus multi-agent workflow orchestration' }
+	],
+	codex: [
+		{ id: 'minimal', name: 'Minimal' },
+		{ id: 'low', name: 'Low' },
+		{ id: 'medium', name: 'Medium' },
+		{ id: 'high', name: 'High' },
+		{ id: 'xhigh', name: 'Extra High' }
+	],
+	opencode: []
+};
+
+export const effortValid = (agent: AgentId, effort: string) => !effort || EFFORTS[agent].some((e) => e.id === effort);
+
+export const effortName = (agent: string | null | undefined, effort: string | null | undefined) =>
+	EFFORTS[(agent ?? 'claude') as AgentId]?.find((e) => e.id === effort)?.name ?? effort ?? '';
+
 /** Whether a machine can run tasks with this agent (an older control plane run without `agent` is Claude Code). */
 export const hasAgent = (w: Worker, agent: AgentId) => !!w.capabilities.agents?.[agent];
 

@@ -137,10 +137,12 @@ export class Thread {
 	 * Send a follow-up on the same session. While a message runs, it waits behind it.
 	 * With another agent the thread switches to it: it starts its own session with the conversation so far.
 	 */
-	async reply(text: string, permission?: string, images: { media_type: string; data: string }[] = [], agent?: { agent: AgentId; model: string }) {
+	async reply(text: string, permission?: string, images: { media_type: string; data: string }[] = [], agent?: { agent: AgentId; model: string }, effort?: string) {
 		const root = this.root!;
 		const body: Record<string, unknown> = { task: text };
 		if (permission) body.permission_mode = permission;
+		// '' goes back to the agent's default; absent keeps the thread's.
+		if (effort !== undefined) body.effort = effort;
 		if (agent) Object.assign(body, agent);
 		if (images.length) body.images = images;
 		const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(body) });

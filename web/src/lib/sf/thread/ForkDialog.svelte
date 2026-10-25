@@ -16,6 +16,7 @@
 
 	let agent = $state<AgentId>('claude');
 	let model = $state('');
+	let effort = $state('');
 	let perm = $state('acceptEdits');
 	let task = $state('');
 	let machine = $state('');
@@ -27,6 +28,7 @@
 		if (!open) return;
 		agent = run.agent;
 		model = run.model;
+		effort = run.effort ?? '';
 		perm = PERMISSIONS.some((p) => p.id === run.permission_mode) ? run.permission_mode! : 'acceptEdits';
 		task = '';
 		machine = '';
@@ -60,7 +62,7 @@
 		try {
 			const r = await api<{ id: string }>(`/v1/runs/${run.id}/fork`, {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, permission_mode: effectivePerm, worker_id: chosen?.id })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: effectivePerm, worker_id: chosen?.id })
 			});
 			open = false;
 			void fleet.refresh();
@@ -85,10 +87,11 @@
 				<AgentModelPicker
 					bind:agent
 					bind:model
+					bind:effort
 					{models}
 					id="fork-model"
 					unavailable={(a) => (machines.some((w) => hasAgent(w, a)) ? '' : `Not on ${where}`)}
-					onagent={(a) => (model = a === run.agent ? run.model : defaultModel(a))}
+					onagent={(a) => { model = a === run.agent ? run.model : defaultModel(a); effort = a === run.agent ? (run.effort ?? '') : ''; }}
 				/>
 				<Select.Root type="single" value={chosen?.id ?? DEFAULT} onValueChange={(v) => (machine = v === DEFAULT ? '' : v)}>
 					<Select.Trigger size="sm" class="h-8 max-w-[14rem] rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Machine">

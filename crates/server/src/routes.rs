@@ -229,6 +229,7 @@ async fn create_run(
     let agent = parse_agent(req.agent.as_deref())?;
     let model = req.model.trim();
     agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    let effort = check_effort(agent, req.effort.as_deref())?;
     let repo = req.repo.trim();
     if repo.is_empty() || repo.contains("..") || repo.starts_with('/') {
         return Err(ApiError(StatusCode::BAD_REQUEST, "repo must be a relative repo name".into()));
@@ -247,7 +248,7 @@ async fn create_run(
         Some(w) if db::worker_exists(&state.pool, caller.org_id(), w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
-    let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover, images: &req.images };
+    let new = db::NewRun { task, agent, model, effort, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover, images: &req.images };
     check_run_limit(&state, &caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
     tag_run(&state, &caller, run.id).await?;
@@ -304,6 +305,14 @@ fn check_images(images: &[ImageUpload]) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+/// An effort the agent takes, or None (absent or empty) for its default.
+fn check_effort(agent: Agent, effort: Option<&str>) -> Result<Option<&str>, ApiError> {
+    match effort.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(e) => agent.check_effort(e).map(|_| Some(e)).map_err(|m| ApiError(StatusCode::BAD_REQUEST, m)),
+    }
 }
 
 fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
@@ -394,7 +403,7 @@ async fn follow_up(
     };
     check_full_access(&caller, mode.or(inherited.as_deref()))?;
     check_run_limit(&state, &caller).await?;
-    match db::create_follow_up(&state.pool, caller.org_id(), id, task, agent, req.model.as_deref().map(str::trim), mode, &req.images).await? {
+    match db::create_follow_up(&state.pool, caller.org_id(), id, task, agent, req.model.as_deref().map(str::trim), req.effort.as_deref().map(str::trim), mode, &req.images).await? {
         FollowUpOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
@@ -476,6 +485,7 @@ async fn fork_run(
     let agent = parse_agent(req.agent.as_deref())?;
     let model = req.model.trim();
     agent.check_model(model).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    let effort = check_effort(agent, req.effort.as_deref())?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     check_ask_agent(mode, agent)?;
     let context_budget = crate::fork::budget(task);
@@ -484,7 +494,7 @@ async fn fork_run(
         Some(w) if db::worker_exists(&state.pool, caller.org_id(), w).await? => Some(w),
         Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
     };
-    let new = db::NewFork { task, agent, model, permission_mode: mode, worker_id: worker, context_budget };
+    let new = db::NewFork { task, agent, model, effort, permission_mode: mode, worker_id: worker, context_budget };
     let Some(target) = db::get_run(&state.pool, caller.org_id(), id).await? else {
         return Err(not_found());
     };

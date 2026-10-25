@@ -56,6 +56,9 @@ pub struct Run {
     pub agent: Agent,
     /// Model id for that agent; empty means the machine's default (Codex, opencode).
     pub model: String,
+    /// Reasoning effort (see [`Agent::check_effort`]); None means the agent's default.
+    #[serde(default)]
+    pub effort: Option<String>,
     pub repo: String,
     pub status: RunStatus,
     pub worker_id: Option<String>,
@@ -414,6 +417,9 @@ pub struct CreateRunRequest {
     /// A model for that agent; may be empty for codex and opencode (the machine's default).
     #[serde(default)]
     pub model: String,
+    /// Reasoning effort for that agent (see `Agent::efforts`); the agent's default when absent.
+    #[serde(default)]
+    pub effort: Option<String>,
     pub repo: String,
     /// acceptEdits (default), bypassPermissions, plan, ask, default, dontAsk.
     #[serde(default)]
@@ -443,6 +449,9 @@ pub struct FollowUpRequest {
     pub agent: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Without it: the effort this agent last used in the thread.
+    #[serde(default)]
+    pub effort: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -459,6 +468,8 @@ pub struct ForkRequest {
     pub agent: Option<String>,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub effort: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// Run on this machine. Absent: on the machine with the message's files, or any machine

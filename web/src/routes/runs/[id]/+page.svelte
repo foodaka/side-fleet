@@ -110,11 +110,12 @@
 	// The agent for the next message: the thread's latest one, or another to switch to.
 	let agent = $state<AgentId>('claude');
 	let model = $state('');
+	let effort = $state('');
 	const threadAgent = $derived(thread?.latest?.agent ?? null);
 	$effect(() => {
 		const a = threadAgent;
 		if (!a) return;
-		untrack(() => { agent = a; model = thread!.latest!.model; });
+		untrack(() => { agent = a; model = thread!.latest!.model; effort = thread!.latest!.effort ?? ''; });
 	});
 	const switching = $derived(!!threadAgent && agent !== threadAgent);
 	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
@@ -122,6 +123,7 @@
 	const host = $derived(fleet.workers.filter((w) => w.id === thread?.machine));
 	/** The model this agent last used in the thread, else its default. */
 	const lastModel = (a: AgentId) => thread?.runs.findLast((r) => r.agent === a)?.model ?? defaultModel(a);
+	const lastEffort = (a: AgentId) => thread?.runs.findLast((r) => r.agent === a)?.effort ?? '';
 	// A new agent starts a session of its own, so a thread without one can carry on that way.
 	const canReply = $derived(!!thread?.hasSession || live || switching);
 
@@ -131,7 +133,7 @@
 		sending = true;
 		try {
 			const pick = switching || model !== thread.latest?.model ? { agent, model } : undefined;
-			await thread.reply(reply.trim(), replyPerm || undefined, await attachments.payload(), pick);
+			await thread.reply(reply.trim(), replyPerm || undefined, await attachments.payload(), pick, effort);
 			reply = '';
 			attachments.clear();
 			void fleet.refresh();
@@ -328,11 +330,12 @@
 						<AgentModelPicker
 							bind:agent
 							bind:model
+							bind:effort
 							models={machineModels(host, agent)}
 							id="reply-model"
 							size="sm"
 							unavailable={(a) => (!host.length || host.some((w) => hasAgent(w, a)) ? '' : `Not on ${thread?.machine}`)}
-							onagent={(a) => (model = lastModel(a))}
+							onagent={(a) => { model = lastModel(a); effort = lastEffort(a); }}
 						/>
 						<Select.Root type="single" value={replyPerm} onValueChange={(v) => (perm = v)}>
 							<Select.Trigger size="sm" class="h-7 min-w-0 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent max-sm:[&>span]:truncate" aria-label="Permissions for this reply">

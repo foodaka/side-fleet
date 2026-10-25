@@ -5,7 +5,7 @@
 	// waits until the app first calls in, and offers updates in chat (the app
 	// messages you when a task finishes or needs an OK). Each connection is a
 	// personal API token.
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { Button } from '#lib/components/ui/button';
 	import Check from '@lucide/svelte/icons/check';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
@@ -28,7 +28,9 @@
 	/** Show the setup card even when there are connections already. */
 	let adding = $state(false);
 	let poll: ReturnType<typeof setInterval> | undefined;
-	const org = $derived(fleet.org);
+	// By id: the shared state refetches the org every 5 s, and a new copy of the
+	// same org must not restart a setup half done.
+	const orgId = $derived(fleet.org?.id);
 
 	async function load() {
 		try {
@@ -39,15 +41,18 @@
 	}
 	// The connections are per org: reload when it changes.
 	$effect(() => {
-		if (org) {
-			void org.id;
-			reset();
-			void load();
+		if (orgId) {
+			untrack(() => {
+				reset();
+				void load();
+			});
 		}
 	});
 	onDestroy(() => clearInterval(poll));
 
 	const live = $derived((tokens ?? []).filter((t) => !t.revoked_at));
+	/** The list above the card leaves out the one being set up, so the card doesn't jump down as it appears. */
+	const listed = $derived(live.filter((t) => t.id !== fresh?.id));
 	const chosen = $derived(CHAT_APPS.find((a) => a.id === app));
 	/** The connection being set up, as it is now (its first call, its updates). */
 	const current = $derived(live.find((t) => t.id === fresh?.id));
@@ -119,7 +124,7 @@
 	{#if tokens === null}
 		<p class="text-[13px] text-muted-foreground">Loading…</p>
 	{:else}
-		{#if live.length}
+		{#if listed.length}
 			<section class="flex flex-col gap-2" aria-labelledby="connected-h">
 				<div class="flex items-end justify-between gap-3">
 					<h2 id="connected-h" class="text-[15px] font-semibold tracking-tight">Your chat apps</h2>
@@ -128,7 +133,7 @@
 					{/if}
 				</div>
 				<ul class="divide-y rounded-xl border bg-card">
-					{#each live as t (t.id)}
+					{#each listed as t (t.id)}
 						<li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 text-[13px]">
 							<div class="min-w-0 flex-1">
 								<p class="truncate font-medium">{t.name}</p>
@@ -138,7 +143,7 @@
 								{#if t.last_used_at}Last active {rel(t.last_used_at, fleet.now)}{:else}Not connected yet{/if}
 							</span>
 							<button type="button" class="text-xs text-err-ink hover:underline" onclick={() => disconnect(t)}>Disconnect</button>
-							{#if hasUpdates(appOf(t.name)) && t.id !== fresh?.id}
+							{#if hasUpdates(appOf(t.name))}
 								<div class="basis-full pt-1"><ChatUpdates token={t} app={appOf(t.name)} onchange={load} /></div>
 							{/if}
 						</li>

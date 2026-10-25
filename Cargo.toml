@@ -38,4 +38,6 @@ gethostname = "1"
 tempfile = "3"
 bytes = "1"
 rand = "0.8"
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+web-push-native = { version = "0.5", default-features = false }
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }

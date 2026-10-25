@@ -169,3 +169,23 @@ export interface Enrollment {
 	created_at: string;
 	expires_at: string;
 }
+
+/** Why a task waits on you (crates/server/src/attention.rs). */
+export type InboxReason = 'finished' | 'failed' | 'usage_limit' | 'machine_lost' | 'approval_needed';
+
+/** A task in the "waiting on you" inbox (`GET /v1/inbox`). */
+export interface InboxItem {
+	/** The task (its thread's first run). */
+	id: string;
+	/** Its latest run. */
+	run_id: string;
+	title: string;
+	repo: string;
+	agent: AgentId;
+	/** Unknown reasons may appear from newer control planes; show their label. */
+	reason: InboxReason | (string & {});
+	label: string;
+	detail?: string;
+	/** When it started waiting. */
+	since: string;
+}

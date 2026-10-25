@@ -18,3 +18,9 @@ To check: `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir
 worktree and is the same in the main checkout.
 
 Other sessions share the stash stack across worktrees, so never use bare `git stash`/`git stash pop`.
+
+## The web app's build output
+
+Never commit `crates/server/web-dist`: change `web/` only, and CI rebuilds and commits web-dist on
+main after merge. If you ran `pnpm build` to try a change, `git checkout crates/server/web-dist`
+before committing.

@@ -197,7 +197,10 @@ cargo run -p sidefleet -- serve
 ```
 
 The web UI's build output in `crates/server/web-dist/` is committed so Rust-only installs keep
-working; run `pnpm build` in `web/` after changing it (CI fails if it is out of date). Tagging
+working, but only by CI: after a change to `web/` lands on main, the `web-dist` workflow rebuilds
+it and commits the result. Pull requests change `web/` only and leave `web-dist/` alone (CI fails
+otherwise); run `pnpm build` in `web/` to try a change locally, then `git checkout
+crates/server/web-dist` before committing. Tagging
 `vX.Y.Z` builds release binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64).
 
 ## Layout

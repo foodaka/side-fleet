@@ -1,4 +1,4 @@
-//! The worker loop: register, heartbeat every 15s, poll for a claimable run,
+//! The worker loop: register, heartbeat every 15s, long-poll for a claimable run,
 //! execute it, and report back. Backs off on control plane errors.
 
 use std::collections::HashMap;
@@ -20,6 +20,9 @@ use crate::client::{Backoff, ClientError, ControlClient};
 use crate::diff;
 use crate::snapshot;
 use crate::detect::{self, DetectOptions};
+
+/// How long the control plane may hold a claim open waiting for a run.
+const CLAIM_WAIT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -145,6 +148,11 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             if completed >= max {
                 return Ok(());
             }
+            // Claim no more than the runs left; wait for those in flight to end.
+            if completed + active.lock().await.len() >= max {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
         }
         // Wait for a free slot before asking for work, so we never claim more than we can run.
         let permit = match permits.clone().try_acquire_owned() {
@@ -179,7 +187,12 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             .collect();
         // Our load, so the control plane can prefer a machine with more free slots.
         let slots = Slots { parallel: cfg.parallel.max(1), active: active_count.load(Ordering::Relaxed) };
-        match client.claim(&repos, &busy, &agents, &slots).await {
+        // Let the control plane hold the claim until a run is queued, so a new task starts at once.
+        // While a repo is busy here, keep the wait short: when that run ends, the next claim must
+        // say so, or a task for that repo would wait out the whole poll.
+        let wait = if busy.is_empty() { CLAIM_WAIT } else { cfg.poll_interval };
+        let asked = tokio::time::Instant::now();
+        match client.claim(&repos, &busy, &agents, &slots, wait).await {
             Ok(Some(run)) => {
                 backoff.reset();
                 let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
@@ -200,7 +213,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             Ok(None) => {
                 drop(permit);
                 backoff.reset();
-                tokio::time::sleep(cfg.poll_interval).await;
+                // A control plane that held the claim has waited already; an older one answers
+                // at once, so poll it at the usual pace.
+                tokio::time::sleep(cfg.poll_interval.saturating_sub(asked.elapsed())).await;
             }
             Err(ClientError::NotRegistered) => {
                 drop(permit);
@@ -417,6 +432,7 @@ async fn fetch_images(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Ve
 async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_path: Option<PathBuf>) {
     let run_id = run.id;
     tracing::info!(run_id = %run_id, repo = %run.repo, agent = %run.agent, model = %run.model, isolation = %run.isolation, "executing run");
+    let claimed_at = std::time::Instant::now();
 
     let Some(repo_dir) = repo_path else {
         let msg = format!("repo {} is no longer present under {}", run.repo, cfg.repos_root.display());
@@ -508,6 +524,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     }
 
     // The tree before the agent starts, and the one the thread started from, to diff against afterwards.
+    let setup_at = std::time::Instant::now();
     let before = match diff::point(&cwd).await {
         Ok(t) => Some(t),
         Err(e) => {
@@ -515,10 +532,12 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
             None
         }
     };
+    let point_at = std::time::Instant::now();
     let base = match &before {
         Some(b) => diff::thread_base(&cwd, root_id, b).await,
         None => None,
     };
+    let base_at = std::time::Instant::now();
     // Kept as a commit too, to restore to or fork from later.
     let before_commit = match &before {
         Some(p) => snapshot::keep(&cwd, &p.tree, &snapshot::ref_name(root_id, run_id, "before")).await.map_err(|e| tracing::warn!(error = %format!("{e:#}"), "keeping the snapshot failed")).ok(),
@@ -526,7 +545,20 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     };
     let diff_cwd = cwd.clone();
 
+    let keep_at = std::time::Instant::now();
     let (images_dir, images) = fetch_images(client, &run).await;
+    // What runs before the agent starts, so slow git work ahead of each turn shows up.
+    let ms = |d: Duration| d.as_millis() as u64;
+    tracing::debug!(
+        run_id = %run_id,
+        workdir_ms = ms(setup_at - claimed_at),
+        point_ms = ms(point_at - setup_at),
+        thread_base_ms = ms(base_at - point_at),
+        snapshot_ms = ms(keep_at - base_at),
+        images_ms = ms(keep_at.elapsed()),
+        total_ms = ms(claimed_at.elapsed()),
+        "ready to start the agent"
+    );
 
     let bin = match run.agent {
         Agent::Claude => &cfg.claude_bin,

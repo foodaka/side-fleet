@@ -5,6 +5,7 @@ pub mod approvals;
 pub mod attention;
 pub mod auth;
 pub mod chat_updates;
+pub mod claims;
 pub mod db;
 pub mod events;
 pub mod fork;
@@ -162,14 +163,22 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub events: events::EventBus,
     pub inbox: inbox::Inbox,
+    pub claims: claims::ClaimSignal,
 }
 
 impl AppState {
-    /// Also starts the inbox's watcher when called inside a Tokio runtime.
+    /// Also starts the inbox's and claims' watchers when called inside a Tokio runtime.
     pub fn new(pool: PgPool, config: Config) -> Self {
-        let state = Self { pool, config: Arc::new(config), events: events::EventBus::default(), inbox: inbox::Inbox::default() };
+        let state = Self {
+            pool,
+            config: Arc::new(config),
+            events: events::EventBus::default(),
+            inbox: inbox::Inbox::default(),
+            claims: claims::ClaimSignal::default(),
+        };
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(inbox::watch(state.clone()));
+            rt.spawn(claims::watch(state.clone()));
         }
         state
     }

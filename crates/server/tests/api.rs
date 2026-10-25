@@ -1813,3 +1813,65 @@ async fn pull_requests_are_opened_on_the_threads_machine_and_kept_on_the_thread(
     assert!(r.text().await.unwrap().contains("in the checkout"));
     env.teardown().await;
 }
+
+/// A claim held open for up to `wait_secs`, started in the background.
+fn claim_waiting(env: &TestEnv, worker: &str, wait_secs: u64) -> tokio::task::JoinHandle<Option<Run>> {
+    let (api, worker) = (Api::new(&env.base_url), worker.to_string());
+    tokio::spawn(async move {
+        let r = api
+            .worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": worker, "repos": ["r"], "busy_repos": [], "wait_secs": wait_secs}))
+            .send()
+            .await
+            .unwrap();
+        match r.status() {
+            StatusCode::NO_CONTENT => None,
+            StatusCode::OK => Some(r.json().await.unwrap()),
+            s => panic!("unexpected claim status {s}: {}", r.text().await.unwrap()),
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_waiting_claim_takes_work_as_soon_as_it_is_queued() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    // Well under the claim's 5s recheck, so only a wake-up gets the run there in time.
+    let soon = Duration::from_millis(1500);
+
+    // Nothing arrives: 204 once the wait is over, not before.
+    let t = std::time::Instant::now();
+    assert!(claim_waiting(&env, "w", 2).await.unwrap().is_none());
+    assert!(t.elapsed() >= Duration::from_secs(2), "answered after {:?}", t.elapsed());
+    assert!(t.elapsed() < Duration::from_secs(4), "answered after {:?}", t.elapsed());
+
+    // A new task.
+    let waiting = claim_waiting(&env, "w", 20);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let t = std::time::Instant::now();
+    let id = create_id(&api, json!({"task": "go", "model": "claude-sonnet-5-5", "repo": "r"})).await;
+    let run = tokio::time::timeout(soon, waiting).await.expect("claimed soon after it was queued").unwrap().unwrap();
+    assert_eq!(run.id, id);
+    assert!(t.elapsed() < soon);
+
+    // A reply queued behind the running turn: claimable, and claimed, once that turn finishes.
+    api.post_events("w", id, json!([{"kind": "agent_init", "payload": {"session_id": "s1"}}])).await;
+    let reply = send_message(&api, id, "and a test").await;
+    let waiting = claim_waiting(&env, "w", 20);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "the reply must wait for the running turn");
+    api.finish("w", id, "succeeded", json!({"session_id": "s1"})).await;
+    let run = tokio::time::timeout(soon, waiting).await.expect("claimed soon after the turn finished").unwrap().unwrap();
+    assert_eq!(run.id, reply);
+    assert_eq!(run.resume_session_id.as_deref(), Some("s1"));
+
+    // A reply to a finished thread.
+    api.finish("w", reply, "succeeded", json!({"session_id": "s1"})).await;
+    let waiting = claim_waiting(&env, "w", 20);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let next = send_message(&api, id, "one more").await;
+    let run = tokio::time::timeout(soon, waiting).await.expect("claimed soon after it was sent").unwrap().unwrap();
+    assert_eq!(run.id, next);
+    env.teardown().await;
+}

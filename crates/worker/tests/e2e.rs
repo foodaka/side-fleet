@@ -746,3 +746,44 @@ async fn ask_me_waits_for_approval_on_the_page() {
 
     h.teardown().await;
 }
+
+#[tokio::test]
+async fn an_idle_worker_starts_a_new_task_at_once() {
+    let env = TestEnv::start().await;
+    let http = Client::new();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("demo")).unwrap();
+    git_init(&tmp.path().join("demo"));
+    // The default poll interval: without a held claim a task would wait up to 2s for the next poll.
+    let cfg = WorkerConfig { poll_interval: Duration::from_secs(2), ..machine(&env, "w", tmp.path(), Duration::from_secs(15)) };
+    let worker = tokio::spawn(run_worker(cfg));
+    for _ in 0..50 {
+        let ws: Vec<serde_json::Value> = http.get(format!("{}/v1/workers", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if !ws.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Idle past a poll interval, so the worker is between polls (or holding a claim).
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let asked = tokio::time::Instant::now();
+    let r = http
+        .post(format!("{}/v1/runs", env.base_url))
+        .bearer_auth(DEV_KEY)
+        .json(&json!({"task": "say hi", "model": "claude-haiku-5-5", "repo": "demo"}))
+        .send()
+        .await
+        .unwrap();
+    let id: Uuid = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    loop {
+        let run: Run = http.get(format!("{}/v1/runs/{id}", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if run.status != RunStatus::Queued {
+            break;
+        }
+        assert!(asked.elapsed() < Duration::from_secs(1), "still queued after {:?}", asked.elapsed());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    worker.abort();
+    env.teardown().await;
+}

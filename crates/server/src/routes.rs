@@ -41,6 +41,10 @@ use crate::AppState;
 #[folder = "web-dist/"]
 struct WebApp;
 const CONNECT_MD: &str = include_str!("../static/connect.md");
+/// The longest a worker's claim is held waiting for a run (under common proxy idle timeouts).
+const MAX_CLAIM_WAIT_SECS: u64 = 25;
+/// How often a waiting claim looks again without being woken.
+const CLAIM_RECHECK: Duration = Duration::from_secs(5);
 /// Tasks and replies up to this many bytes; well under what an agent CLI accepts as an argument.
 pub const MAX_TASK_BYTES: usize = 100_000;
 /// One batch of worker events, images included.
@@ -915,20 +919,35 @@ async fn claim_run(
     let agents = if req.agents.is_empty() { vec![Agent::Claude.as_str().to_string()] } else { req.agents.clone() };
     // Workers from before restores and forks only run plain agent runs.
     let kinds = if req.kinds.is_empty() { vec!["agent".to_string()] } else { req.kinds.clone() };
-    let max_running = tenancy::org_limits(&state.pool, auth.org).await?.map(|l| l.parallel_runs);
-    let claimed =
-        db::claim_run(&state.pool, auth.org, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds, max_running).await?;
-    for ev in claimed.failed {
-        tracing::warn!(run_id = %ev.run_id, "queued message had no session to continue; failed");
-        state.events.publish(ev);
-    }
-    match claimed.run {
-        Some((run, ev)) => {
+    // A long poll: subscribe before the first look, so a run queued in between still wakes us.
+    let wait = Duration::from_secs(req.wait_secs.unwrap_or(0).min(MAX_CLAIM_WAIT_SECS));
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut wake = state.claims.subscribe(auth.org);
+    loop {
+        let max_running = tenancy::org_limits(&state.pool, auth.org).await?.map(|l| l.parallel_runs);
+        let claimed =
+            db::claim_run(&state.pool, auth.org, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds, max_running)
+                .await?;
+        for ev in claimed.failed {
+            tracing::warn!(run_id = %ev.run_id, "queued message had no session to continue; failed");
+            state.events.publish(ev);
+        }
+        if let Some((run, ev)) = claimed.run {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, worker = %req.worker_id, "run claimed");
-            Ok(Json(run).into_response())
+            return Ok(Json(run).into_response());
         }
-        None => Ok(StatusCode::NO_CONTENT.into_response()),
+        let now = tokio::time::Instant::now();
+        if now >= deadline || state.claims.is_closed() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        // Also look again every few seconds: some runs become claimable by time alone
+        // (the least-busy grace, a failover exclusion or a usage limit running out).
+        let recheck = tokio::time::sleep_until(deadline.min(now + CLAIM_RECHECK));
+        tokio::select! {
+            Ok(()) = wake.changed() => {}
+            _ = recheck => {}
+        }
     }
 }
 

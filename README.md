@@ -65,7 +65,8 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Chat with your fleet**: connect the AI assistant you already chat with (Hermes, OpenClaw,
   Claude Code or any MCP client) on the Chat apps page, and run and check tasks from Telegram,
   WhatsApp or Discord: "fix the failing test in my web repo", "how did it go?", "open a PR". You
-  choose what it may do: check on tasks, run them, or also approve commands.
+  choose what it may do: check on tasks, run them, or also approve commands. With updates in chat
+  on, it messages you when a task finishes, fails or needs your OK, and you answer right there.
 - **Permission modes**: read and edit files (default), full access for unattended commands, read
   only for questions, or "Ask me": Claude Code edits files on its own and asks you on the page
   (phone included) before anything else, such as a shell command, and waits for Approve or Deny.

@@ -122,6 +122,35 @@ Its tools, each listed only for tokens whose scope allows it:
 | `open_pull_request` `{task_id}` | `tasks` | as `POST /v1/runs/:id/pr` |
 | `approve`, `deny` `{task_id, approval_id, reason?}` | `full` | decide a pending tool approval |
 
+### Updates in chat
+
+A connection can have Sidefleet tell its app how tasks go, so the assistant brings it up in the
+chat: when a task finishes (`task.finished`), fails (`task.failed`), waits for approval
+(`task.needs_approval`, with the `approval`) or gets a pull request (`task.pull_request`).
+Updates cover the threads the connection started or sent a message to, or every thread of the org
+with `all_tasks`; a stopped run, or one with a follow-up queued behind it, sends none. Each is
+`{event_type, text, task}`: `text` is written for the assistant (what happened, the agent's last
+message, changed files, and what it can do next with the tools), `task` is the thread's
+[summary](#developer-endpoints). Sent in the background, retried twice (after 2 s and 10 s).
+
+| Method | Path | |
+|---|---|---|
+| `PUT` | `/v1/api-tokens/:id/updates` `{kind, url, all_tasks?}` | turn on or change; `kind` is `hermes`, `openclaw` or `webhook`. Returns the token with `secret`, made the first time and kept across changes |
+| `DELETE` | `/v1/api-tokens/:id/updates` | turn off (the secret goes too) |
+| `POST` | `/v1/api-tokens/:id/updates/test` | send a test update now; `502` with the reason when it didn't arrive |
+
+- `hermes`: a Hermes webhook route (`hermes webhook subscribe sidefleet --prompt "{text}" --deliver telegram --mirror-to-session --secret <secret>`),
+  signed "Generic V2": `X-Webhook-Timestamp`, and `X-Webhook-Signature-V2` = hex HMAC-SHA256 of
+  `<timestamp>.<body>` with the secret.
+- `openclaw`: OpenClaw's `POST /hooks/agent` with `Authorization: Bearer <secret>` (its
+  `hooks.token`) and `{message: text, name: "Sidefleet"}`, plus an `Idempotency-Key`.
+- `webhook`: the JSON as is, signed like `hermes`, with `X-Sidefleet-Event` and `X-Sidefleet-Delivery`.
+
+A token's list entry shows `updates: {kind, url, all_tasks, last_at, last_error}`, never the secret.
+On a hosted control plane, updates only go to public addresses: the name must resolve to public IPs
+only, and the connection is made to the address that was checked. Redirects aren't followed.
+`SIDEFLEET_PRIVATE_WEBHOOKS=1` allows private ones (the default when self-hosting).
+
 Each tool calls the routes above in-process with the caller's own credentials, so it can do exactly
 what the token can do on the API, with the same checks and plan limits. Ids are checked before they
 go into a path.

@@ -902,3 +902,177 @@ async fn chat_agents_run_and_follow_tasks_over_mcp_within_their_scope() {
 
     env.teardown().await;
 }
+
+/// Stands in for Hermes or OpenClaw: records each request, answers with `status`.
+#[derive(Clone)]
+struct Receiver {
+    url: String,
+    got: std::sync::Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Value)>>>,
+    status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+}
+
+impl Receiver {
+    async fn start() -> Receiver {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(202));
+        let (g, st) = (got.clone(), status.clone());
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let (g, st) = (g.clone(), st.clone());
+            async move {
+                g.lock().unwrap().push((headers, serde_json::from_slice(&body).unwrap_or(Value::Null)));
+                axum::http::StatusCode::from_u16(st.load(std::sync::atomic::Ordering::SeqCst)).unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Receiver { url, got, status }
+    }
+    fn count(&self) -> usize {
+        self.got.lock().unwrap().len()
+    }
+    /// The `n`th request, waiting up to 5 s for it.
+    async fn nth(&self, n: usize) -> (axum::http::HeaderMap, Value) {
+        for _ in 0..100 {
+            if let Some(r) = self.got.lock().unwrap().get(n) {
+                return r.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("no request #{n} arrived");
+    }
+}
+
+/// A Hermes route's check: hex HMAC-SHA256 of `<timestamp>.<body>`.
+fn signed_by(h: &axum::http::HeaderMap, body: &Value, secret: &str) -> bool {
+    let ts = h["x-webhook-timestamp"].to_str().unwrap();
+    let want = sidefleet_server::chat_updates::hex(&sidefleet_server::chat_updates::hmac_sha256(secret.as_bytes(), format!("{ts}.{body}").as_bytes()));
+    h["x-webhook-signature-v2"].to_str().unwrap() == want
+}
+
+#[tokio::test]
+async fn chat_apps_hear_when_their_tasks_finish_or_need_approval() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let org = alice.org_id().await;
+    let w = Worker::new(&env, alice.create_token(&org, "mac").await.1["token"].as_str().unwrap());
+    let reg = json!({"id": "mac", "display_name": "Mac mini", "capabilities": {"repos": [{"name": "shop", "path": "/tmp/shop", "id": ""}], "agents": {"claude": {"version": "1", "signed_in": true}}}, "active_runs": []});
+    assert_eq!(w.call(Method::POST, "/v1/worker/register", Some(reg)).await.0, StatusCode::OK);
+    let (hermes, openclaw, hook) = (Receiver::start().await, Receiver::start().await, Receiver::start().await);
+    let mint = |name: &'static str, scope: &'static str| alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": name, "scope": scope})));
+    let h = mint("Hermes", "full").await.1;
+    let (h_id, h_tok) = (h["id"].as_str().unwrap().to_string(), h["token"].as_str().unwrap().to_string());
+    let o_id = mint("OpenClaw", "tasks").await.1["id"].as_str().unwrap().to_string();
+    let k_id = mint("Watcher", "read").await.1["id"].as_str().unwrap().to_string();
+
+    // Turning updates on hands out the secret the app checks them with; listing never shows it.
+    async fn put(b: &Browser, id: &str, kind: &str, url: String, all: bool) -> (StatusCode, Value) {
+        b.json(Method::PUT, &format!("/v1/api-tokens/{id}/updates"), Some(json!({"kind": kind, "url": url, "all_tasks": all}))).await
+    }
+    let on = |id: &str, kind: &'static str, url: String, all: bool| {
+        let id = id.to_string();
+        let alice = &alice;
+        async move { put(alice, &id, kind, url, all).await }
+    };
+    let (s, v) = on(&h_id, "hermes", format!("{}/webhooks/sidefleet", hermes.url), false).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let h_secret = v["secret"].as_str().unwrap().to_string();
+    assert_eq!(v["updates"]["kind"], "hermes");
+    let (_, v) = on(&h_id, "hermes", format!("{}/webhooks/sidefleet", hermes.url), false).await;
+    assert_eq!(v["secret"], h_secret.as_str(), "changing the address keeps the secret");
+    let o_secret = on(&o_id, "openclaw", format!("{}/hooks/agent", openclaw.url), false).await.1["secret"].as_str().unwrap().to_string();
+    let k_secret = on(&k_id, "webhook", format!("{}/sidefleet", hook.url), true).await.1["secret"].as_str().unwrap().to_string();
+    assert_eq!(on(&k_id, "slack", hook.url.clone(), false).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(on(&k_id, "webhook", "file:///etc/passwd".into(), false).await.0, StatusCode::BAD_REQUEST);
+    let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
+    assert!(!list.to_string().contains(&h_secret));
+    // Tokens can't change where updates go.
+    assert_eq!(with_token(&env, &h_tok, Method::PUT, &format!("/v1/api-tokens/{h_id}/updates"), Some(json!({"kind": "webhook", "url": "http://x"}))).await.0, StatusCode::FORBIDDEN);
+
+    // A test: Hermes gets a signed payload, OpenClaw its hook token and a message.
+    assert_eq!(alice.json(Method::POST, &format!("/v1/api-tokens/{h_id}/updates/test"), None).await.0, StatusCode::OK);
+    let (hd, body) = hermes.nth(0).await;
+    assert_eq!(body["event_type"], "test");
+    assert!(signed_by(&hd, &body, &h_secret));
+    assert!(!signed_by(&hd, &body, "wrong"));
+    assert_eq!(alice.json(Method::POST, &format!("/v1/api-tokens/{o_id}/updates/test"), None).await.0, StatusCode::OK);
+    let (od, body) = openclaw.nth(0).await;
+    assert_eq!(od["authorization"].to_str().unwrap(), format!("Bearer {o_secret}"));
+    assert_eq!(body["name"], "Sidefleet");
+    assert!(body["message"].as_str().unwrap().contains("test update"));
+    // A refused test says why, and the page shows it.
+    openclaw.status.store(401, std::sync::atomic::Ordering::SeqCst);
+    let (s, v) = alice.json(Method::POST, &format!("/v1/api-tokens/{o_id}/updates/test"), None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY);
+    assert!(v["error"].as_str().unwrap().contains("secret doesn't match"), "{v}");
+    let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
+    let o = list.as_array().unwrap().iter().find(|t| t["id"] == o_id.as_str()).unwrap().clone();
+    assert!(o["updates"]["last_error"].as_str().unwrap().contains("secret"));
+    openclaw.status.store(202, std::sync::atomic::Ordering::SeqCst);
+
+    // Hermes starts a task over MCP; the machine asks to run a command: Hermes hears it, with the ids to decide.
+    let (t, err) = tool(&env, &h_tok, "start_task", json!({"task": "Fix the checkout bug", "repo": "shop", "access": "ask"})).await;
+    assert!(!err, "{t}");
+    let id = t.split_whitespace().nth(2).unwrap().to_string();
+    assert_eq!(w.claim("mac", &["shop"]).await.0, StatusCode::OK);
+    let (s, a) = w.call(Method::POST, &format!("/v1/worker/runs/{id}/approvals?worker_id=mac"), Some(json!({"tool_name": "Bash", "input": {"command": "pnpm test"}}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{a}");
+    let (hd, body) = hermes.nth(1).await;
+    assert_eq!(body["event_type"], "task.needs_approval");
+    assert!(signed_by(&hd, &body, &h_secret));
+    let text = body["text"].as_str().unwrap();
+    assert!(text.contains("`pnpm test`") && text.contains(a["id"].as_str().unwrap()) && text.contains(&id), "{text}");
+    // ...and approves it once the user says yes.
+    let (t, err) = tool(&env, &h_tok, "approve", json!({"task_id": id, "approval_id": a["id"]})).await;
+    assert!(!err, "{t}");
+
+    // It finishes: Hermes and the all-tasks webhook hear; OpenClaw (not its task) doesn't.
+    let events = json!({"events": [
+        {"kind": "agent_init", "payload": {"session_id": "s1"}},
+        {"kind": "diff", "payload": {"turn": {"files": [{"path": "src/pay.rs", "status": "modified", "additions": 3, "deletions": 1}], "file_count": 1, "additions": 3, "deletions": 1}, "total": null}},
+        {"kind": "result", "payload": {"result": "Fixed: the retry charged twice."}},
+    ]});
+    assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/events?worker_id=mac"), Some(events)).await.0, StatusCode::OK);
+    assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/finish?worker_id=mac"), Some(json!({"status": "succeeded"}))).await.0, StatusCode::OK);
+    let (_, body) = hermes.nth(2).await;
+    assert_eq!(body["event_type"], "task.finished");
+    let text = body["text"].as_str().unwrap();
+    assert!(text.contains("Fixed: the retry charged twice.") && text.contains("src/pay.rs") && text.contains("open_pull_request"), "{text}");
+    assert_eq!(hook.nth(0).await.1["event_type"], "task.needs_approval", "it wants every task");
+    let (kd, body) = hook.nth(1).await;
+    assert_eq!(body["event_type"], "task.finished");
+    assert_eq!(body["task"]["id"], id.as_str());
+    assert!(signed_by(&kd, &body, &k_secret));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(openclaw.count(), 2, "only the two tests");
+
+    // A task started on the page: only the all-tasks webhook hears it.
+    let (_, r) = alice.create_run("shop").await;
+    let pid = r["id"].as_str().unwrap();
+    assert_eq!(w.claim("mac", &["shop"]).await.0, StatusCode::OK);
+    assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{pid}/finish?worker_id=mac"), Some(json!({"status": "failed", "result": {"error": "boom"}}))).await.0, StatusCode::OK);
+    let (_, body) = hook.nth(2).await;
+    assert_eq!(body["event_type"], "task.failed");
+    assert!(body["text"].as_str().unwrap().contains("Error: boom"));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(hermes.count(), 3);
+
+    // Off means off; a disconnected app hears nothing more.
+    assert_eq!(alice.json(Method::DELETE, &format!("/v1/api-tokens/{k_id}/updates"), None).await.0, StatusCode::OK);
+    assert_eq!(alice.json(Method::POST, &format!("/v1/api-tokens/{k_id}/updates/test"), None).await.0, StatusCode::NOT_FOUND);
+    env.teardown().await;
+
+    // Hosted with the default: no private or local addresses.
+    let env = TestEnv::start_with(|c| {
+        c.github = Some(sidefleet_server::GithubOAuth::new("x".into(), "y".into()));
+        c.private_webhooks = false;
+    })
+    .await;
+    let (s, v) = with_token(&env, DEV_KEY, Method::POST, "/v1/api-tokens", Some(json!({"name": "Hermes", "scope": "read"}))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let id = v["id"].as_str().unwrap();
+    let (s, v) = with_token(&env, DEV_KEY, Method::PUT, &format!("/v1/api-tokens/{id}/updates"), Some(json!({"kind": "hermes", "url": hermes.url}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap().contains("private or local"), "{v}");
+    env.teardown().await;
+}

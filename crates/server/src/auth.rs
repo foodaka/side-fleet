@@ -121,6 +121,8 @@ pub struct Caller {
     pub user: Option<User>,
     /// Set for an API token: what it may do. None for the page and the developer key.
     pub scope: Option<Scope>,
+    /// Set for an API token: its id, so the runs it starts can be told apart.
+    pub token: Option<Uuid>,
 }
 
 impl Caller {
@@ -167,7 +169,7 @@ pub async fn require_dev(State(state): State<AppState>, mut req: Request, next: 
     };
     let caller = match identity {
         Identity::DevKey => match tenancy::default_org(&state.pool).await {
-            Ok(org) => Caller { org, user: None, scope: None },
+            Ok(org) => Caller { org, user: None, scope: None, token: None },
             Err(e) => return server_error(e),
         },
         Identity::ApiToken(t) => {
@@ -178,7 +180,7 @@ pub async fn require_dev(State(state): State<AppState>, mut req: Request, next: 
             if !scope_allows(t.scope, req.method(), req.uri().path()) {
                 return forbidden(&format!("this API token's scope ({}) does not allow that", t.scope.as_str()));
             }
-            Caller { org: t.org, user: t.user, scope: Some(t.scope) }
+            Caller { org: t.org, user: t.user, scope: Some(t.scope), token: Some(t.id) }
         }
         Identity::User(user) => {
             let orgs = match tenancy::memberships(&state.pool, user.id).await {
@@ -196,7 +198,7 @@ pub async fn require_dev(State(state): State<AppState>, mut req: Request, next: 
                     None => return forbidden("you are not a member of any org"),
                 },
             };
-            Caller { org, user: Some(user), scope: None }
+            Caller { org, user: Some(user), scope: None, token: None }
         }
     };
     req.extensions_mut().insert(caller);

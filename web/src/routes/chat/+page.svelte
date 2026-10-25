@@ -2,7 +2,9 @@
 	// Chat apps: connect the assistant you already chat with (Hermes, OpenClaw,
 	// Claude Code) so it can run and check tasks on the fleet. Three steps on one
 	// card: pick the app, pick what it may do, add the setup it gets; then the page
-	// waits until the app first calls in. Each connection is a personal API token.
+	// waits until the app first calls in, and offers updates in chat (the app
+	// messages you when a task finishes or needs an OK). Each connection is a
+	// personal API token.
 	import { onDestroy } from 'svelte';
 	import { Button } from '#lib/components/ui/button';
 	import Check from '@lucide/svelte/icons/check';
@@ -12,7 +14,8 @@
 	import { fleet } from '#lib/sf/state.svelte';
 	import { rel } from '#lib/sf/format';
 	import Command from '#lib/sf/ui/Command.svelte';
-	import { ACCESS, CHAT_APPS, EXAMPLES, accessOf, setupMessage, setupSnippet, setupSteps, type ChatAppId } from '#lib/sf/chat';
+	import ChatUpdates from '#lib/sf/ui/ChatUpdates.svelte';
+	import { ACCESS, CHAT_APPS, EXAMPLES, accessOf, appOf, hasUpdates, setupMessage, setupSnippet, setupSteps, type ChatAppId } from '#lib/sf/chat';
 	import type { ApiScope, ApiToken } from '#lib/sf/types';
 
 	let tokens = $state<ApiToken[] | null>(null);
@@ -46,7 +49,9 @@
 
 	const live = $derived((tokens ?? []).filter((t) => !t.revoked_at));
 	const chosen = $derived(CHAT_APPS.find((a) => a.id === app));
-	const connected = $derived(!!fresh && !!live.find((t) => t.id === fresh?.id)?.last_used_at);
+	/** The connection being set up, as it is now (its first call, its updates). */
+	const current = $derived(live.find((t) => t.id === fresh?.id));
+	const connected = $derived(!!current?.last_used_at);
 	const showSetup = $derived(adding || fresh !== null || (tokens !== null && live.length === 0));
 	$effect(() => {
 		if (connected) clearInterval(poll);
@@ -133,6 +138,9 @@
 								{#if t.last_used_at}Last active {rel(t.last_used_at, fleet.now)}{:else}Not connected yet{/if}
 							</span>
 							<button type="button" class="text-xs text-err-ink hover:underline" onclick={() => disconnect(t)}>Disconnect</button>
+							{#if hasUpdates(appOf(t.name)) && t.id !== fresh?.id}
+								<div class="basis-full pt-1"><ChatUpdates token={t} app={appOf(t.name)} onchange={load} /></div>
+							{/if}
 						</li>
 					{/each}
 				</ul>
@@ -224,7 +232,9 @@
 									<ul class="flex flex-wrap gap-1.5">
 										{#each EXAMPLES as e (e)}<li class="rounded-full border bg-card px-3 py-1 text-[12.5px]">“{e}”</li>{/each}
 									</ul>
-									<button type="button" class="mt-1 w-fit text-xs text-muted-foreground hover:text-foreground" onclick={reset}>Done</button>
+									{#if !hasUpdates(chosen.id)}
+										<button type="button" class="mt-1 w-fit text-xs text-muted-foreground hover:text-foreground" onclick={reset}>Done</button>
+									{/if}
 								</div>
 							{:else}
 								<div class="flex items-center justify-between gap-3 rounded-xl border border-dashed px-4 py-3">
@@ -237,6 +247,26 @@
 						{/if}
 					</div>
 				</div>
+
+				<!-- 4. Updates in chat (not for Claude Code: it has no chat to message) -->
+				{#if chosen && hasUpdates(chosen.id) && current}
+					<div class="flex flex-col gap-3 {connected ? '' : 'opacity-50'}">
+						<p class="flex items-center gap-3 text-[14px] font-medium">
+							<span class={step(connected)}>4</span>Let {chosen.id === 'other' ? 'it' : chosen.name} message you
+							<span class="text-xs font-normal text-muted-foreground">Optional</span>
+						</p>
+						<div class="flex min-w-0 flex-col gap-3 sm:pl-9">
+							{#if connected}
+								<ChatUpdates token={current} app={chosen.id} onchange={load} open />
+								<button type="button" class="w-fit text-xs text-muted-foreground hover:text-foreground" onclick={reset}>
+									{current.updates ? 'Done' : 'Skip for now'}
+								</button>
+							{:else}
+								<p class="text-[13px] text-muted-foreground">Once it's connected, it can also tell you when a task finishes or needs your OK.</p>
+							{/if}
+						</div>
+					</div>
+				{/if}
 			</section>
 		{/if}
 	{/if}

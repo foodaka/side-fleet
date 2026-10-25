@@ -73,6 +73,8 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp", get(crate::mcp::get).post(crate::mcp::post))
         .route("/v1/api-tokens", get(list_api_tokens).post(create_api_token))
         .route("/v1/api-tokens/{id}", axum::routing::delete(revoke_api_token))
+        .route("/v1/api-tokens/{id}/updates", axum::routing::put(set_chat_updates).delete(clear_chat_updates))
+        .route("/v1/api-tokens/{id}/updates/test", post(test_chat_updates))
         .route("/v1/orgs", post(create_org))
         .route("/v1/orgs/{org}/tokens", get(list_tokens).post(create_token))
         .route("/v1/orgs/{org}/tokens/{id}", axum::routing::delete(revoke_token))
@@ -248,6 +250,7 @@ async fn create_run(
     let new = db::NewRun { task, agent, model, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover, images: &req.images };
     check_run_limit(&state, &caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
+    tag_run(&state, &caller, run.id).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -312,6 +315,14 @@ fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
             format!("permission_mode must be one of {}", PERMISSION_MODES.join(", ")),
         )),
     }
+}
+
+/// A message sent through an API token: its chat app hears how the task goes.
+async fn tag_run(state: &AppState, caller: &Caller, run: Uuid) -> Result<(), ApiError> {
+    if let Some(t) = caller.token {
+        tenancy::tag_run(&state.pool, run, t).await?;
+    }
+    Ok(())
 }
 
 /// Full access runs any command without asking, so an API token needs the `full` scope to
@@ -385,6 +396,7 @@ async fn follow_up(
     check_run_limit(&state, &caller).await?;
     match db::create_follow_up(&state.pool, caller.org_id(), id, task, agent, req.model.as_deref().map(str::trim), mode, &req.images).await? {
         FollowUpOutcome::Created(run, ev) => {
+            tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -435,6 +447,7 @@ async fn open_pr(
     check_run_limit(&state, &caller).await?;
     match db::create_pr_run(&state.pool, caller.org_id(), id).await? {
         PrOutcome::Created(run, ev) => {
+            tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, thread = %id, "pull request queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -480,6 +493,7 @@ async fn fork_run(
     check_run_limit(&state, &caller).await?;
     match db::create_fork(&state.pool, caller.org_id(), id, new).await? {
         ForkOutcome::Created(run, ev) => {
+            tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, forked_from = %id, agent = %run.agent, model = %run.model, "fork queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -981,6 +995,7 @@ async fn request_approval(
         RequestOutcome::Created(a, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %id, approval = %a.id, tool = %a.tool_name, "tool call waiting for approval");
+            crate::chat_updates::approval_requested(&state, auth.org, &a);
             Ok((StatusCode::CREATED, Json(*a)))
         }
         RequestOutcome::NotFound => Err(not_found()),
@@ -1023,6 +1038,7 @@ async fn finish_run(
                 tracing::warn!(run_id = %id, worker = %q.worker_id, agent = %run.agent, "usage limit hit; no other machine can take the run now");
             }
             tracing::info!(run_id = %id, status = run.status.as_str(), "run finished");
+            crate::chat_updates::run_finished(&state, auth.org, &run);
             Ok(Json(run))
         }
         FinishOutcome::Requeued(run, evs) => {
@@ -1180,6 +1196,56 @@ async fn revoke_api_token(State(state): State<AppState>, Extension(caller): Exte
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
     tracing::info!(org = %caller.org_id(), token = %id, "API token revoked");
     Ok(Json(json!(t)))
+}
+
+#[derive(Deserialize)]
+struct ChatUpdatesReq {
+    kind: String,
+    url: String,
+    #[serde(default)]
+    all_tasks: bool,
+}
+
+/// Turn on updates in chat for one of the caller's connections. The response carries the
+/// secret the app checks updates with (Hermes route secret, OpenClaw hook token).
+async fn set_chat_updates(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ChatUpdatesReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind = req.kind.trim();
+    if !crate::chat_updates::KINDS.contains(&kind) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("kind must be one of {}", crate::chat_updates::KINDS.join(", "))));
+    }
+    let url = req.url.trim();
+    if url.len() > 2000 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "that address is too long".into()));
+    }
+    crate::chat_updates::check_url(url, state.config.private_webhooks).await.map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    let (token, secret) = tenancy::set_chat_updates(&state.pool, caller.org_id(), caller.user_id(), id, kind, url, req.all_tasks)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
+    tracing::info!(org = %caller.org_id(), token = %id, kind, "chat updates on");
+    let mut v = json!(token);
+    v["secret"] = json!(secret);
+    Ok(Json(v))
+}
+
+async fn clear_chat_updates(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let t = tenancy::clear_chat_updates(&state.pool, caller.org_id(), caller.user_id(), id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
+    Ok(Json(json!(t)))
+}
+
+/// Send one test update now and say how it went (`502` with the reason when it didn't arrive).
+async fn test_chat_updates(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let target = tenancy::chat_update_target(&state.pool, caller.org_id(), caller.user_id(), id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "updates aren't on for that connection".into()))?;
+    crate::chat_updates::send_test(&state, &target).await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn list_tokens(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

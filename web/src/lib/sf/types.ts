@@ -170,8 +170,20 @@ export interface ApiToken {
 	created_at: string;
 	revoked_at: string | null;
 	last_used_at: string | null;
+	/** Updates in chat: Sidefleet tells the app when tasks finish or need an OK. */
+	updates: ChatUpdates | null;
 	/** Only in the response that created it. */
 	token?: string;
+}
+
+export interface ChatUpdates {
+	kind: 'hermes' | 'openclaw' | 'webhook';
+	url: string;
+	/** Every task, not only the ones this app started or replied to. */
+	all_tasks: boolean;
+	last_at: string | null;
+	/** Why the last update didn't arrive. */
+	last_error: string | null;
 }
 
 export interface Enrollment {

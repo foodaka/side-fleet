@@ -523,6 +523,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
             _ => run.task.clone(),
         },
         model: run.model.clone(),
+        effort: run.effort.clone(),
         cwd,
         permission_mode,
         max_turns: cfg.max_turns,

@@ -26,6 +26,7 @@ fn spec(task: &str) -> AgentSpec {
         bin: fake_bin(),
         task: task.into(),
         model: "claude-sonnet-5-5".into(),
+        effort: None,
         cwd: std::env::temp_dir(),
         permission_mode: "acceptEdits".into(),
         max_turns: None,
@@ -139,6 +140,32 @@ fn resume_adds_the_resume_flag() {
     let i = a.iter().position(|x| x == "--resume").expect("--resume present");
     assert_eq!(a[i + 1], "sess-123");
     assert!(s.display_command().contains("--resume sess-123"));
+}
+
+#[test]
+fn effort_reaches_each_agent() {
+    let mut s = spec("think hard");
+    assert!(!s.args().iter().any(|a| a == "--effort"), "the agent's default when unset");
+    s.effort = Some("max".into());
+    let a = s.args();
+    assert_eq!(a[a.iter().position(|x| x == "--effort").expect("--effort") + 1], "max");
+    assert_eq!(a[1], "think hard");
+    // Ultracode: xhigh plus the keyword; ultrathink: only the keyword.
+    s.effort = Some("ultracode".into());
+    let a = s.args();
+    assert_eq!(a[a.iter().position(|x| x == "--effort").unwrap() + 1], "xhigh");
+    assert_eq!(a[1], "think hard\n\nultracode");
+    s.effort = Some("ultrathink".into());
+    let a = s.args();
+    assert!(!a.iter().any(|x| x == "--effort"));
+    assert_eq!(a[1], "think hard\n\nultrathink");
+
+    let mut s = agent_spec(Agent::Codex, "do it");
+    s.effort = Some("high".into());
+    let a = s.args();
+    let i = a.iter().position(|x| x == "model_reasoning_effort=\"high\"").expect("reasoning effort");
+    assert_eq!(a[i - 1], "-c");
+    assert!(i < a.iter().position(|x| x == "--").unwrap());
 }
 
 #[test]

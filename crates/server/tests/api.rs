@@ -462,13 +462,21 @@ async fn follow_ups_resume_the_session_on_the_same_worker() {
     // Root run with an explicit permission mode.
     let r = api
         .dev(reqwest::Method::POST, "/v1/runs")
-        .json(&json!({"task": "first", "model": "claude-haiku-5-5", "repo": "r", "permission_mode": "bypassPermissions"}))
+        .json(&json!({"task": "first", "model": "claude-haiku-5-5", "repo": "r", "permission_mode": "bypassPermissions", "effort": "high"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::ACCEPTED);
     let root: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
     assert_eq!(api.get_run(root).await.permission_mode.as_deref(), Some("bypassPermissions"));
+    assert_eq!(api.get_run(root).await.effort.as_deref(), Some("high"));
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r", "effort": "minimal"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "an effort Claude Code doesn't take is rejected");
     let r = api
         .dev(reqwest::Method::POST, "/v1/runs")
         .json(&json!({"task": "x", "model": "claude-haiku-5-5", "repo": "r", "permission_mode": "sudo"}))
@@ -497,6 +505,7 @@ async fn follow_ups_resume_the_session_on_the_same_worker() {
     assert_eq!(f1run.model, "claude-haiku-5-5");
     assert_eq!(f1run.repo, "r");
     assert_eq!(f1run.permission_mode.as_deref(), Some("bypassPermissions"));
+    assert_eq!(f1run.effort.as_deref(), Some("high"));
 
     // Another worker with the repo must not get it; the pinned one does.
     assert!(api.claim("w2", &["r"]).await.is_none(), "follow-up leaked to a worker without the session");
@@ -507,12 +516,13 @@ async fn follow_ups_resume_the_session_on_the_same_worker() {
     api.finish("w1", f1, "succeeded", json!({"result": "ok"})).await;
 
     // Messages can address any run in the thread and still attach to the root.
-    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{f1}/messages")).json(&json!({"task": "third", "permission_mode": "plan"})).send().await.unwrap();
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{f1}/messages")).json(&json!({"task": "third", "permission_mode": "plan", "effort": ""})).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::ACCEPTED);
     let f2: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
     let f2run = api.get_run(f2).await;
     assert_eq!(f2run.parent_id, Some(root));
     assert_eq!(f2run.permission_mode.as_deref(), Some("plan"));
+    assert_eq!(f2run.effort, None, "empty effort goes back to the agent's default");
 
     // Thread lists root first; the runs list shows one thread with two follow-ups.
     let thread: Vec<Run> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{f2}/thread")).send().await.unwrap().json().await.unwrap();

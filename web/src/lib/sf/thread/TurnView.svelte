@@ -8,7 +8,7 @@
 	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 	import GitFork from '@lucide/svelte/icons/git-fork';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
-	import { agentModel, agentName, clock, permName, repoLabel } from '../format';
+	import { agentModel, agentName, clock, effortName, permName, repoLabel } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import ToolImages from './ToolImages.svelte';
@@ -89,7 +89,7 @@
 		!prev || !run.parent_id || turn.machine !== prev.machine || (!!turn.branch && !!prev.branch && turn.branch !== prev.branch)
 	);
 	const meta = $derived(
-		[run.parent_id ? null : clock(run.created_at), run.permission_mode ? permName(run.permission_mode) : null, !run.parent_id && run.isolation === 'checkout' ? 'In place' : null].filter(Boolean)
+		[run.parent_id ? null : clock(run.created_at), run.permission_mode ? permName(run.permission_mode) : null, run.effort ? `${effortName(run.agent, run.effort)} effort` : null, !run.parent_id && run.isolation === 'checkout' ? 'In place' : null].filter(Boolean)
 	);
 </script>
 

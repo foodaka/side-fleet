@@ -14,6 +14,7 @@ fn row_to_run(r: &PgRow) -> Run {
         task: r.get("task"),
         agent: Agent::parse(r.get::<&str, _>("agent")).unwrap_or(Agent::Claude),
         model: r.get("model"),
+        effort: r.get("effort"),
         repo: r.get("repo"),
         status: RunStatus::parse(&status).unwrap_or(RunStatus::Failed),
         worker_id: r.get("worker_id"),
@@ -78,7 +79,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, pr";
+    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, pr";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -120,6 +121,7 @@ pub struct NewRun<'a> {
     pub task: &'a str,
     pub agent: Agent,
     pub model: &'a str,
+    pub effort: Option<&'a str>,
     pub repo: &'a str,
     pub permission_mode: Option<&'a str>,
     pub isolation: &'a str,
@@ -129,12 +131,12 @@ pub struct NewRun<'a> {
 }
 
 pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
-    let NewRun { task, agent, model, repo, permission_mode, isolation, pinned_worker_id, failover, images } = new;
+    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images, org_id)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images, org_id, effort)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -147,6 +149,7 @@ pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Resu
     .bind(failover)
     .bind(json!([]))
     .bind(org)
+    .bind(effort)
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
@@ -177,7 +180,7 @@ pub enum FollowUpOutcome {
     QueueFull,
     /// The previous run never reported a session id (it failed before starting, or was stopped early).
     NoSession(Run),
-    /// The model isn't one the agent takes.
+    /// The model (or effort) isn't one the agent takes.
     BadModel(String),
     /// The thread's machine doesn't have the agent asked to switch to.
     AgentMissing(String),
@@ -216,6 +219,7 @@ pub async fn create_follow_up(
     task: &str,
     agent: Option<Agent>,
     model: Option<&str>,
+    effort: Option<&str>,
     permission_mode: Option<&str>,
     images: &[ImageUpload],
 ) -> sqlx::Result<FollowUpOutcome> {
@@ -234,6 +238,15 @@ pub async fn create_follow_up(
         None => thread.iter().rev().find(|r| r.agent == agent).map(|r| r.model.clone()).unwrap_or_else(|| default_model(agent).into()),
     };
     if let Err(e) = agent.check_model(&model) {
+        return Ok(FollowUpOutcome::BadModel(e));
+    }
+    // Without an effort: the one this agent last used in the thread; empty means its default.
+    let effort = match effort {
+        Some("") => None,
+        Some(e) => Some(e.to_string()),
+        None => thread.iter().rev().find(|r| r.agent == agent).and_then(|r| r.effort.clone()),
+    };
+    if let Some(Err(e)) = effort.as_deref().map(|e| agent.check_effort(e)) {
         return Ok(FollowUpOutcome::BadModel(e));
     }
     let busy = !latest.status.is_terminal();
@@ -260,8 +273,8 @@ pub async fn create_follow_up(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover, images, org_id)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover, images, org_id, effort)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -276,6 +289,7 @@ pub async fn create_follow_up(
     .bind(latest.failover)
     .bind(json!([]))
     .bind(org)
+    .bind(&effort)
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
@@ -486,6 +500,7 @@ pub struct NewFork<'a> {
     pub task: &'a str,
     pub agent: Agent,
     pub model: &'a str,
+    pub effort: Option<&'a str>,
     pub permission_mode: Option<&'a str>,
     /// The machine chosen to run it (validated by the route), if any.
     pub worker_id: Option<&'a str>,
@@ -538,8 +553,8 @@ pub async fn create_fork(pool: &PgPool, org: Uuid, run_id: Uuid, new: NewFork<'_
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
-        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, forked_from, fork_commit, context, org_id)
-         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10, $11) RETURNING {RUN_COLS}"
+        "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, forked_from, fork_commit, context, org_id, effort)
+         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10, $11, $12) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(new.task)
@@ -552,6 +567,7 @@ pub async fn create_fork(pool: &PgPool, org: Uuid, run_id: Uuid, new: NewFork<'_
     .bind(&fork_commit)
     .bind(&context)
     .bind(org)
+    .bind(new.effort)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
@@ -1253,9 +1269,9 @@ async fn move_lost_run(
     let new_id = Uuid::new_v4();
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, parent_id, permission_mode, isolation, agent,
-                           failover, moved_from, resume_from_branch, excluded_worker_ids, images, org_id)
+                           failover, moved_from, resume_from_branch, excluded_worker_ids, images, org_id, effort)
          VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, true, $9, $10, ARRAY[$11], $12,
-                 (SELECT org_id FROM runs WHERE id = $9)) RETURNING {RUN_COLS}"
+                 (SELECT org_id FROM runs WHERE id = $9), $13) RETURNING {RUN_COLS}"
     ))
     .bind(new_id)
     .bind(&task)
@@ -1269,6 +1285,7 @@ async fn move_lost_run(
     .bind(branch.as_ref().filter(|_| run.isolation == "worktree"))
     .bind(lost_worker)
     .bind(json!(run.images))
+    .bind(&run.effort)
     .fetch_one(&mut **tx)
     .await?;
     let moved = row_to_run(&row);

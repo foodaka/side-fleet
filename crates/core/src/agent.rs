@@ -35,6 +35,14 @@ fn is_claude_model_id(model: &str) -> bool {
         })
 }
 
+/// Reasoning efforts Claude Code takes: its `--effort` levels, plus `ultrathink`
+/// (the keyword asking for deep thinking on this message) and `ultracode`
+/// (xhigh effort plus multi-agent workflow orchestration, also a keyword).
+pub const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultrathink", "ultracode"];
+
+/// Codex's `model_reasoning_effort` values.
+pub const CODEX_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+
 impl Agent {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -80,6 +88,26 @@ impl Agent {
                     Err(format!("{model:?} is not a valid {} model id", self.display_name()))
                 }
             }
+        }
+    }
+}
+
+impl Agent {
+    /// Reasoning efforts this agent takes; empty when it has no such setting (opencode).
+    pub fn efforts(&self) -> &'static [&'static str] {
+        match self {
+            Agent::Claude => CLAUDE_EFFORTS,
+            Agent::Codex => CODEX_EFFORTS,
+            Agent::Opencode => &[],
+        }
+    }
+
+    /// Check a reasoning effort for this agent.
+    pub fn check_effort(&self, effort: &str) -> Result<(), String> {
+        match self.efforts() {
+            [] => Err(format!("{} has no reasoning effort setting", self.display_name())),
+            all if all.contains(&effort) => Ok(()),
+            all => Err(format!("effort must be one of {}", all.join(", "))),
         }
     }
 }
@@ -224,6 +252,16 @@ mod tests {
         assert!(Agent::Opencode.check_model("--dangerously-skip").is_err(), "must not look like a flag");
         assert!(Agent::Codex.check_model("gpt 6; rm -rf").is_err());
         assert!(Agent::Codex.check_model(&"x".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn checks_efforts_per_agent() {
+        assert!(Agent::Claude.check_effort("max").is_ok());
+        assert!(Agent::Claude.check_effort("ultrathink").is_ok());
+        assert!(Agent::Claude.check_effort("minimal").is_err());
+        assert!(Agent::Codex.check_effort("minimal").is_ok());
+        assert!(Agent::Codex.check_effort("ultracode").is_err());
+        assert!(Agent::Opencode.check_effort("high").is_err());
     }
 
     fn results(agent: Agent, lines: &str, exit_ok: bool) -> Vec<Value> {

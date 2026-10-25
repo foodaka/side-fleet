@@ -10,6 +10,8 @@ export interface Run {
 	agent: AgentId;
 	/** Empty means the machine's default model (Codex, opencode). */
 	model: string;
+	/** Reasoning effort; null means the agent's default. */
+	effort?: string | null;
 	repo: string;
 	status: RunStatus;
 	worker_id: string | null;

@@ -53,6 +53,8 @@ pub struct AgentSpec {
     pub task: String,
     /// Empty means the agent's own default (Codex, opencode).
     pub model: String,
+    /// Reasoning effort (`Agent::efforts`); None means the agent's default.
+    pub effort: Option<String>,
     pub cwd: PathBuf,
     /// Claude Code's permission mode names; mapped onto each agent's own controls.
     pub permission_mode: String,
@@ -88,14 +90,31 @@ impl AgentSpec {
     }
 
     /// The task as the agent gets it. Claude Code has no image flag: it is told
-    /// where the images are and opens them with its Read tool.
+    /// where the images are and opens them with its Read tool. Its `ultrathink`
+    /// and `ultracode` are keywords in the message, not flags.
     fn prompt(&self) -> String {
-        if self.agent != Agent::Claude || self.images.is_empty() {
+        if self.agent != Agent::Claude {
             return self.task.clone();
         }
+        let mut p = self.task.clone();
+        if let Some(k @ ("ultrathink" | "ultracode")) = self.effort.as_deref() {
+            p.push_str(&format!("\n\n{k}"));
+        }
+        if self.images.is_empty() {
+            return p;
+        }
         let paths: Vec<String> = self.images.iter().map(|p| p.to_string_lossy().to_string()).collect();
-        format!("{}\n\nThe user attached {} for this message; open {} with the Read tool:\n{}", self.task,
+        format!("{p}\n\nThe user attached {} for this message; open {} with the Read tool:\n{}",
             if paths.len() == 1 { "an image" } else { "images" }, if paths.len() == 1 { "it" } else { "them" }, paths.join("\n"))
+    }
+
+    /// Claude Code's `--effort` level: ultracode runs at xhigh, ultrathink at the session's default.
+    fn claude_effort(&self) -> Option<&str> {
+        match self.effort.as_deref()? {
+            "ultrathink" => None,
+            "ultracode" => Some("xhigh"),
+            e => Some(e),
+        }
     }
 
     fn claude_args(&self) -> Vec<String> {
@@ -116,6 +135,9 @@ impl AgentSpec {
             a.push(crate::approval::mcp_config(&h.exe, &h.socket));
             a.push("--permission-prompt-tool".into());
             a.push(crate::approval::PROMPT_TOOL.into());
+        }
+        if let Some(e) = self.claude_effort() {
+            a.extend(["--effort".to_string(), e.to_string()]);
         }
         if let Some(sid) = &self.resume_session_id {
             a.push("--resume".into());
@@ -154,6 +176,9 @@ impl AgentSpec {
         }
         if !self.model.is_empty() {
             a.extend(["-m".into(), self.model.clone()]);
+        }
+        if let Some(e) = &self.effort {
+            a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
         }
         for img in &self.images {
             a.push(format!("--image={}", img.to_string_lossy()));

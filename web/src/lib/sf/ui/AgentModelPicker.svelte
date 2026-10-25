@@ -1,33 +1,42 @@
 <script lang="ts">
 	// The agent menu and, next to it, the model control that suits that agent:
-	// Claude's model aliases, the machine's Codex models, or a searchable field for opencode.
+	// Claude's model aliases, the machine's Codex models, or a searchable field for opencode;
+	// then the reasoning effort, for the agents that take one.
 	import * as Select from '#lib/components/ui/select';
-	import { AGENTS, MODELS, agentName, modelName, modelValid } from '../format';
+	import Brain from '@lucide/svelte/icons/brain';
+	import { AGENTS, EFFORTS, MODELS, agentName, effortName, effortValid, modelName, modelValid } from '../format';
 	import type { AgentId } from '../types';
 	import AgentIcon from './AgentIcon.svelte';
 
 	let {
 		agent = $bindable(),
 		model = $bindable(),
+		effort = $bindable(''),
 		models,
 		unavailable = () => '',
 		onagent,
 		onmodel,
+		oneffort,
 		id = 'model',
 		size = 'default'
 	}: {
 		agent: AgentId;
 		model: string;
+		/** Reasoning effort; '' is the agent's default. */
+		effort?: string;
 		/** Models the target machines offer for the agent (Codex, opencode). */
 		models: string[];
 		/** Why an agent can't be picked, or '' when it can. */
 		unavailable?: (a: AgentId) => string;
 		onagent?: (a: AgentId) => void;
 		onmodel?: (m: string) => void;
+		oneffort?: (e: string) => void;
 		id?: string;
 		/** `sm` to sit with the reply box's smaller controls. */
 		size?: 'default' | 'sm';
 	} = $props();
+
+	const efforts = $derived(EFFORTS[agent]);
 
 	const ok = $derived(modelValid(agent, model));
 	const pill = $derived(`${size === 'sm' ? 'h-7' : 'h-8'} rounded-full border-transparent bg-muted shadow-none hover:bg-accent`);
@@ -36,11 +45,17 @@
 
 	function pickAgent(v: string) {
 		agent = v as AgentId;
+		// Efforts differ per agent; the parent may pick a remembered one in onagent.
+		if (!effortValid(agent, effort)) effort = '';
 		onagent?.(agent);
 	}
 	function pickModel(v: string) {
 		model = v.trim();
 		onmodel?.(model);
+	}
+	function pickEffort(v: string) {
+		effort = v;
+		oneffort?.(effort);
 	}
 </script>
 
@@ -88,4 +103,19 @@
 		class="{size === 'sm' ? 'h-7 w-[13rem]' : 'h-8 w-[15rem]'} max-w-full rounded-full bg-muted px-3 font-mono {mono} outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {ok ? '' : 'text-err-ink'}"
 	/>
 	<datalist id="{id}-options">{#each models as m (m)}<option value={m}></option>{/each}</datalist>
+{/if}
+
+{#if efforts.length}
+	<Select.Root type="single" value={effort} onValueChange={pickEffort}>
+		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Reasoning effort"><Brain class={size === 'sm' ? 'size-3.5' : 'size-4'} strokeWidth={1.75} />{effort ? effortName(agent, effort) : size === 'sm' ? 'Effort' : 'Default effort'}</Select.Trigger>
+		<Select.Content>
+			<Select.Group>
+				<Select.GroupHeading>Reasoning</Select.GroupHeading>
+				<Select.Item value="" label="Default"><span class="flex flex-col"><span>Default</span><span class="text-xs text-muted-foreground">Whatever {agentName(agent)} uses on that machine</span></span></Select.Item>
+				{#each efforts as e (e.id)}
+					<Select.Item value={e.id} label={e.name}>{#if e.hint}<span class="flex flex-col"><span>{e.name}</span><span class="text-xs text-muted-foreground">{e.hint}</span></span>{:else}{e.name}{/if}</Select.Item>
+				{/each}
+			</Select.Group>
+		</Select.Content>
+	</Select.Root>
 {/if}

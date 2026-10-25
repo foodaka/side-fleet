@@ -12,7 +12,7 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, permsFor, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
@@ -35,6 +35,10 @@
 		return a === 'claude' ? (alias?.id ?? defaultModel(a)) : m;
 	};
 	let model = $state(initialModel(savedAgent));
+	// And one remembered reasoning effort per agent ('' is its default).
+	const effortKey = (a: AgentId) => `sidefleet_effort_${a}`;
+	const initialEffort = (a: AgentId) => (effortValid(a, load(effortKey(a))) ? load(effortKey(a)) : '');
+	let effort = $state(initialEffort(savedAgent));
 	let machine = $state(load('sidefleet_machine'));
 	let perm = $state(PERMISSIONS.some((p) => p.id === load('sidefleet_perm')) ? load('sidefleet_perm') : 'acceptEdits');
 	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
@@ -94,16 +98,21 @@
 	$effect(() => {
 		if (!withRepo.length || machines.length) return;
 		const other = AGENTS.find((a) => withRepo.some((w) => hasAgent(w, a.id)));
-		if (other && other.id !== agent) { agent = other.id; model = initialModel(other.id); }
+		if (other && other.id !== agent) { agent = other.id; model = initialModel(other.id); effort = initialEffort(other.id); }
 	});
 
 	function pickAgent(a: AgentId) {
 		save('sidefleet_agent', a);
 		model = initialModel(a);
+		effort = initialEffort(a);
 	}
 
 	function pickModel(m: string) {
 		save(modelKey(agent), m);
+	}
+
+	function pickEffort(e: string) {
+		save(effortKey(agent), e);
 	}
 
 	function pickMachine(v: string) {
@@ -118,7 +127,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload() })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload() })
 			});
 			task = '';
 			attachments.clear();
@@ -219,10 +228,12 @@
 					<AgentModelPicker
 						bind:agent
 						bind:model
+						bind:effort
 						{models}
 						unavailable={(a) => (repo && !withRepo.some((w) => hasAgent(w, a)) ? `Not on a machine with ${repoLabel(repo)}` : '')}
 						onagent={pickAgent}
 						onmodel={pickModel}
+						oneffort={pickEffort}
 					/>
 
 					<Select.Root type="single" value={repo} onValueChange={pickRepo}>

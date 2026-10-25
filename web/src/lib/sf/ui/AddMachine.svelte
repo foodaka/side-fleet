@@ -21,7 +21,7 @@
 				<Command shown={installCmd} />
 			</li>
 			<li class="flex flex-col gap-2">
-				<span class="text-[13px]"><span class="tnum mr-2 text-muted-foreground">2</span>Connect it. It checks which agents are installed and signed in, finds your git checkouts, and stays connected after a reboot.{#if !fleet.setup?.worker_token}{' '}It prints a link and a code: approve the machine on the Machines page.{/if}</span>
+				<span class="text-[13px]"><span class="tnum mr-2 text-muted-foreground">2</span>Connect it. It checks which agents are installed and signed in, finds your git checkouts, and stays connected after a reboot.{#if !fleet.setup?.worker_token}{' '}It prints a link and a code to approve it with.{/if}</span>
 				<Command shown={connectCmd(true)} copy={connectCmd(false)} />
 			</li>
 		</ol>

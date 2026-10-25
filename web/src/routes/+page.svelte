@@ -3,6 +3,7 @@
 	import * as Select from '#lib/components/ui/select';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
+	import Check from '@lucide/svelte/icons/check';
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import Cpu from '@lucide/svelte/icons/cpu';
@@ -14,6 +15,7 @@
 	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, permsFor, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
+	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
@@ -156,20 +158,24 @@
 		<div class="h-8 w-56 animate-pulse rounded-md bg-muted"></div>
 		<div class="mt-6 h-40 animate-pulse rounded-2xl bg-muted"></div>
 	</div>
+{:else if noMachines && !fleet.workers.length}
+	<section class="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 pt-[10vh] pb-16">
+		<header class="flex flex-col gap-3">
+			<h1 class="text-[28px] leading-tight font-medium tracking-tight">Put your first machine to work</h1>
+			<p class="max-w-xl text-[15px] leading-relaxed text-muted-foreground">
+				Sidefleet runs tasks with the coding agents already set up on your own machines and streams what they do back here.
+				It takes a couple of minutes.
+			</p>
+		</header>
+		<Onboarding />
+	</section>
 {:else if noMachines}
 	<section class="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 pt-[10vh] pb-16">
 		<header class="flex flex-col gap-3">
-			<h1 class="text-[28px] leading-tight font-medium tracking-tight">
-				{fleet.workers.length ? 'Your machines are offline' : 'Put your first machine to work'}
-			</h1>
+			<h1 class="text-[28px] leading-tight font-medium tracking-tight">Your machines are offline</h1>
 			<p class="max-w-xl text-[15px] leading-relaxed text-muted-foreground">
-				{#if fleet.workers.length}
-					{fleet.workers.map((w) => w.display_name).join(', ')} {fleet.workers.length === 1 ? 'has' : 'have'} stopped checking in.
-					Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or connect another machine below.
-				{:else}
-					Sidefleet runs tasks with the coding agents already set up on your own machines (Claude Code, Codex or opencode) and streams what they do back here.
-					Connect a laptop, a Mac mini or a VPS; it needs no open ports.
-				{/if}
+				{fleet.workers.map((w) => w.display_name).join(', ')} {fleet.workers.length === 1 ? 'has' : 'have'} stopped checking in.
+				Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or connect another machine below.
 			</p>
 		</header>
 		<div class="rounded-2xl border bg-card p-5 shadow-[0_1px_2px_rgb(0_0_0/0.03)]">
@@ -182,6 +188,15 @@
 {:else}
 	<section class="mx-auto flex w-full max-w-2xl flex-col gap-10 px-4 pt-[14vh] pb-16">
 		<form class="flex flex-col gap-3" onsubmit={run}>
+			{#if !fleet.runs.length}
+				<ol class="mb-4 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground" aria-label="Getting started">
+					<li class="inline-flex items-center gap-1.5"><span class="grid size-4 place-items-center rounded-full bg-ok text-white"><Check class="size-2.5" strokeWidth={3.5} /></span>Signed in</li>
+					<li aria-hidden="true" class="h-px w-5 bg-ok/50"></li>
+					<li class="inline-flex items-center gap-1.5"><span class="grid size-4 place-items-center rounded-full bg-ok text-white"><Check class="size-2.5" strokeWidth={3.5} /></span>{fleet.online[0]?.display_name ?? 'Machine'} connected</li>
+					<li aria-hidden="true" class="h-px w-5 bg-border"></li>
+					<li class="inline-flex items-center gap-1.5 font-medium text-foreground" aria-current="step"><span class="tnum grid size-4 place-items-center rounded-full bg-foreground text-[10px] text-background">{fleet.setup?.worker_token ? 3 : 4}</span>Run your first task</li>
+				</ol>
+			{/if}
 			<h1 class="text-center text-[28px] leading-tight font-medium tracking-tight">What should run?</h1>
 			<div class="relative rounded-2xl border border-input bg-card shadow-[0_1px_3px_rgb(0_0_0/0.04)] transition-shadow focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
 				{#if attachments.dragging}

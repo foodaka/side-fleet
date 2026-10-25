@@ -51,6 +51,8 @@ export interface Turn {
 	machine: string | null;
 	branch: string | null;
 	workspaceNote: string | null;
+	/** Where a new task branch started, e.g. origin/main at a commit. */
+	startedFrom: { ref: string; commit: string } | null;
 	/** Latest checkpoint pushed to origin (failover runs). */
 	checkpoint: string | null;
 	/** For a moved run: the machine that dropped it. */
@@ -84,6 +86,7 @@ function newTurn(run: Run): Turn {
 		machine: run.worker_id,
 		branch: null,
 		workspaceNote: null,
+		startedFrom: null,
 		checkpoint: null,
 		movedFrom: null,
 		command: null,
@@ -288,7 +291,10 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			else if (p.error) t.items.push({ kind: 'note', key, tone: 'err', text: `Could not push a checkpoint: ${p.error}`, at: ev.at });
 			break;
 		case 'workspace':
-			if (p.mode === 'worktree') t.branch = p.branch;
+			if (p.mode === 'worktree') {
+				t.branch = p.branch;
+				t.startedFrom = p.from ?? null;
+			}
 			else t.workspaceNote = p.note ?? 'in the checkout';
 			break;
 		case 'started':

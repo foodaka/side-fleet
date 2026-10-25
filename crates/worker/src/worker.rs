@@ -287,6 +287,42 @@ fn log_caps(caps: &Capabilities) {
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
+    /// Where a fresh task branch began, when it began from the remote's default branch.
+    pub from: Option<StartPoint>,
+}
+
+/// `origin/<default branch>` at a commit.
+#[derive(Debug, Clone)]
+pub struct StartPoint {
+    pub reference: String,
+    pub commit: String,
+}
+
+const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Fetch the default branch of `origin`; if HEAD is just behind it (an ancestor), return it
+/// as the place to start from. Offline, no remote, a failed fetch, or local commits that are
+/// not pushed all give `None`, so the task starts from HEAD as before.
+async fn latest_default_branch(repo: &Path) -> Option<StartPoint> {
+    use crate::checkpoint::git as timed_git;
+    // Never wait on an SSH passphrase or host-key prompt; fail and start from HEAD instead.
+    // A command the user set themselves is left alone.
+    let custom_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some() || timed_git(repo, &["config", "core.sshCommand"], None).await.is_ok();
+    let batch: &[&str] = if custom_ssh { &[] } else { &["-c", "core.sshCommand=ssh -o BatchMode=yes"] };
+    let head = timed_git(repo, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], None).await.ok();
+    let branch = match head.as_deref().and_then(|h| h.strip_prefix("origin/")) {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => {
+            // origin/HEAD is not set locally (git remote add, no clone): ask the remote.
+            let out = timed_git(repo, &[batch, &["ls-remote", "--symref", "origin", "HEAD"]].concat(), Some(FETCH_TIMEOUT)).await.ok()?;
+            out.lines().find_map(|l| l.strip_prefix("ref: refs/heads/")?.split_whitespace().next().map(str::to_string))?
+        }
+    };
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    timed_git(repo, &[batch, &["fetch", "--quiet", "--no-tags", "origin", &format!("+refs/heads/{branch}:{remote_ref}")]].concat(), Some(FETCH_TIMEOUT)).await.ok()?;
+    let commit = timed_git(repo, &["rev-parse", "--verify", "--quiet", &format!("{remote_ref}^{{commit}}")], None).await.ok()?;
+    timed_git(repo, &["merge-base", "--is-ancestor", "HEAD", &commit], None).await.ok()?;
+    Some(StartPoint { reference: format!("origin/{branch}"), commit })
 }
 
 pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>, start: Option<&str>) -> Result<Worktree> {
@@ -294,14 +330,14 @@ pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, workt
     let path = worktrees_dir.join(slug).join(root_id.to_string());
     let branch = format!("sidefleet/{}", &root_id.simple().to_string()[..8]);
     if path.join(".git").exists() {
-        return Ok(Worktree { path, branch });
+        return Ok(Worktree { path, branch, from: None });
     }
     std::fs::create_dir_all(path.parent().unwrap()).context("creating worktrees dir")?;
     let p = path.to_string_lossy().to_string();
     if let Some(from) = resume_from {
         let start = crate::checkpoint::fetch_branch(repo, from).await?;
         git(repo, &["worktree", "add", "-B", &branch, &p, &start]).await?;
-        return Ok(Worktree { path, branch });
+        return Ok(Worktree { path, branch, from: None });
     }
     // Create the branch at HEAD, or reuse it when it already exists (worker restarted).
     let branch_exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
@@ -313,9 +349,12 @@ pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, workt
         git(repo, &["worktree", "add", "-b", &branch, &p, &base]).await?;
         snapshot::restore(&path, snap).await.context("setting up the forked files")?;
     } else {
-        git(repo, &["worktree", "add", "-b", &branch, &p, "HEAD"]).await?;
+        let from = latest_default_branch(repo).await;
+        let base = from.as_ref().map_or("HEAD", |f| f.commit.as_str());
+        git(repo, &["worktree", "add", "-b", &branch, &p, base]).await?;
+        return Ok(Worktree { path, branch, from });
     }
-    Ok(Worktree { path, branch })
+    Ok(Worktree { path, branch, from: None })
 }
 
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -411,7 +450,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                 branch = Some(wt.branch.clone());
                 pre_events.push(NewEvent {
                     kind: "workspace".into(),
-                    payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy(), "resumed_from": resume_from}),
+                    payload: json!({"mode": "worktree", "path": wt.path.to_string_lossy(), "branch": wt.branch, "repo": repo_dir.to_string_lossy(), "resumed_from": resume_from, "from": wt.from.as_ref().map(|f| json!({"ref": f.reference, "commit": f.commit}))}),
                 });
                 if run.failover {
                     checkpoints = Some((wt.path.clone(), wt.branch.clone()));
@@ -756,5 +795,56 @@ mod tests {
         assert_eq!(resolve_repo(&repos, id), Some(PathBuf::from("/home/u/code/side-fleet")));
         assert_eq!(resolve_repo(&repos, "scratch"), Some(PathBuf::from("/home/u/scratch")));
         assert_eq!(resolve_repo(&repos, "github.com/someone/else"), None);
+    }
+
+    async fn sh(dir: &std::path::Path, args: &[&str]) -> String {
+        crate::checkpoint::git(dir, args, None).await.unwrap()
+    }
+
+    async fn commit(dir: &std::path::Path, msg: &str) -> String {
+        sh(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", msg]).await;
+        sh(dir, &["rev-parse", "HEAD"]).await
+    }
+
+    /// A clone of `origin` whose main is one commit behind it.
+    async fn stale_clone(tmp: &std::path::Path) -> (PathBuf, String) {
+        let origin = tmp.join("origin");
+        sh(tmp, &["init", "--quiet", "-b", "main", origin.to_str().unwrap()]).await;
+        commit(&origin, "one").await;
+        let repo = tmp.join("repo");
+        sh(tmp, &["clone", "--quiet", origin.to_str().unwrap(), repo.to_str().unwrap()]).await;
+        let latest = commit(&origin, "two").await;
+        (repo, latest)
+    }
+
+    #[tokio::test]
+    async fn new_task_starts_from_the_latest_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, latest) = stale_clone(tmp.path()).await;
+        let wt = super::prepare_worktree(&repo, "r", uuid::Uuid::new_v4(), &tmp.path().join("wts"), None, None).await.unwrap();
+        let from = wt.from.expect("started from origin");
+        assert_eq!((from.reference.as_str(), from.commit.as_str()), ("origin/main", latest.as_str()));
+        assert_eq!(sh(&wt.path, &["rev-parse", "HEAD"]).await, latest);
+    }
+
+    #[tokio::test]
+    async fn unpushed_local_commits_keep_the_task_on_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = stale_clone(tmp.path()).await;
+        let local = commit(&repo, "mine").await;
+        let wt = super::prepare_worktree(&repo, "r", uuid::Uuid::new_v4(), &tmp.path().join("wts"), None, None).await.unwrap();
+        assert!(wt.from.is_none());
+        assert_eq!(sh(&wt.path, &["rev-parse", "HEAD"]).await, local);
+    }
+
+    #[tokio::test]
+    async fn no_remote_keeps_the_task_on_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        sh(tmp.path(), &["init", "--quiet", "-b", "main", repo.to_str().unwrap()]).await;
+        let head = commit(&repo, "one").await;
+        let wt = super::prepare_worktree(&repo, "r", uuid::Uuid::new_v4(), &tmp.path().join("wts"), None, None).await.unwrap();
+        assert!(wt.from.is_none());
+        assert_eq!(sh(&wt.path, &["rev-parse", "HEAD"]).await, head);
     }
 }

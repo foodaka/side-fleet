@@ -132,7 +132,7 @@
 						<span>Switched to {agentModel(run.agent, run.model)}</span>
 					{:else}
 						{run.parent_id ? 'Continued' : 'Started'} on <span class="text-foreground/80">{turn.machine}</span>
-						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}
+						{#if turn.branch}<span class="inline-flex items-center gap-1"><GitBranch class="size-3" /><span class="font-mono">{turn.branch}</span></span>{#if turn.startedFrom}<span>from <span class="font-mono">{turn.startedFrom.ref} @ {turn.startedFrom.commit.slice(0, 7)}</span></span>{/if}{:else if turn.workspaceNote}<span>{turn.workspaceNote}</span>{/if}
 						{#if turn.checkpoint}<span title="Last checkpoint pushed to origin">pushed <span class="font-mono">{turn.checkpoint.slice(0, 7)}</span></span>{/if}
 						<span>with {agentModel(run.agent, turn.sessionModel || run.model)}</span>
 					{/if}

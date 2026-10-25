@@ -189,6 +189,15 @@ canvas.fibres { position: absolute; inset: 0; width: 100%; height: 100%; pointer
 .hero-copy > :nth-child(2) { animation-delay: 0.35s; }
 .hero-copy > :nth-child(3) { animation-delay: 0.45s; }
 .hero-copy > :nth-child(4) { animation-delay: 0.55s; }
+.hero-copy > :nth-child(5) { animation-delay: 0.65s; }
+
+/* What happens after "Start free": three numbered steps. */
+.next-steps { list-style: none; margin: 30px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; max-width: 620px; }
+.next-steps li { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.35; color: var(--ink); font-weight: 500; }
+.next-steps b { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--ground); font-size: 11.5px; font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.next-steps li:first-child b { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+.next-steps span { padding-top: 2px; }
+.next-steps small { display: block; margin-top: 3px; font-size: 12.5px; font-weight: 400; color: var(--muted); }
 
 .hero-nodes { grid-area: nodes; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 26px; align-self: center; }
 .node {
@@ -514,6 +523,7 @@ h2 { font-size: clamp(32px, 3.6vw, 44px); line-height: 1.08; }
 	.arc { height: 200px; }
 }
 @media (max-width: 520px) {
+	.next-steps { grid-template-columns: minmax(0, 1fr); gap: 12px; }
 	.nav-gh span { display: none; }
 	.tag { display: none; }
 	.hc-row .pill-ghost { display: none; }

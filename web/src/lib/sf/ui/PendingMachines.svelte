@@ -12,6 +12,9 @@
 	import { fleet } from '../state.svelte';
 	import type { Enrollment } from '../types';
 
+	/** Bare: just the code box and the requests, under a heading someone else gives (onboarding). */
+	let { bare = false }: { bare?: boolean } = $props();
+
 	/** Requests found by code (not in the org's list until approved). */
 	let found = $state<Enrollment[]>([]);
 	let code = $state('');
@@ -67,16 +70,16 @@
 </script>
 
 {#if items.length || hosted}
-	<section class="flex flex-col gap-3" aria-labelledby="pending-h">
+	<section class="flex flex-col gap-3" aria-labelledby={bare ? undefined : 'pending-h'} aria-label={bare ? 'Pending machines' : undefined}>
 		<div class="flex flex-wrap items-end justify-between gap-3">
-			<div>
+			{#if !bare}<div>
 				<h2 id="pending-h" class="text-[15px] font-semibold tracking-tight">Pending machines</h2>
 				<p class="mt-0.5 text-[13px] text-muted-foreground">
 					{hosted
 						? 'Run `sidefleet connect --control ' + location.origin + '` on a machine, then enter the code it prints.'
 						: 'Machines that asked to join with `sidefleet connect` and no token.'}
 				</p>
-			</div>
+			</div>{/if}
 			{#if hosted}
 				<form class="flex gap-2" onsubmit={(e) => { e.preventDefault(); void lookup(code); }}>
 					<Input bind:value={code} placeholder="ABCD-EFGH" maxlength={12} class="h-8 w-32 font-mono text-[13px] uppercase" aria-label="Code from the machine" />

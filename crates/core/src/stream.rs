@@ -80,7 +80,7 @@ impl ClaudeStream {
         if v.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
             return None;
         }
-        let Some(ev) = v.get("event") else { return None };
+        let ev = v.get("event")?;
         match ev.get("type").and_then(Value::as_str)? {
             "content_block_start" => {
                 let is_text = ev.pointer("/content_block/type").and_then(Value::as_str) == Some("text");
@@ -154,7 +154,7 @@ fn map_value(v: &Value) -> MappedLine {
         }
         "rate_limit_event" | "stream_event" => {}
         "assistant" => {
-            for block in content_blocks(&v) {
+            for block in content_blocks(v) {
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         let text = block.get("text").and_then(Value::as_str).unwrap_or("");
@@ -189,7 +189,7 @@ fn map_value(v: &Value) -> MappedLine {
             }
         }
         "user" => {
-            for block in content_blocks(&v) {
+            for block in content_blocks(v) {
                 if block.get("type").and_then(Value::as_str) == Some("tool_result") {
                     let content = tool_result_text(block.get("content"));
                     let truncated = content.len() > TOOL_RESULT_MAX_BYTES;

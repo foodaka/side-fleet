@@ -797,3 +797,108 @@ async fn api_tokens_act_as_their_user_in_one_org_within_their_scope() {
 
     env.teardown().await;
 }
+
+/// A chat agent talking MCP: one JSON-RPC call with an API token.
+async fn mcp(env: &TestEnv, token: &str, method: &str, params: Value) -> Value {
+    let (s, v) = with_token(env, token, Method::POST, "/mcp", Some(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))).await;
+    assert_eq!(s, StatusCode::OK, "{method}: {v}");
+    assert_eq!(v["id"], 1);
+    v["result"].clone()
+}
+
+/// A tool's text, and whether it reported an error.
+async fn tool(env: &TestEnv, token: &str, name: &str, args: Value) -> (String, bool) {
+    let r = mcp(env, token, "tools/call", json!({"name": name, "arguments": args})).await;
+    (r["content"][0]["text"].as_str().unwrap_or_default().to_string(), r["isError"] == true)
+}
+
+#[tokio::test]
+async fn chat_agents_run_and_follow_tasks_over_mcp_within_their_scope() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let org = alice.org_id().await;
+    let wt = alice.create_token(&org, "mac").await.1["token"].as_str().unwrap().to_string();
+    let w = Worker::new(&env, &wt);
+    let repos: Vec<Value> = vec![json!({"name": "code/shop", "path": "/tmp/shop", "id": "github.com/alice/shop"})];
+    let reg = json!({"id": "mac", "display_name": "Mac mini", "capabilities": {"repos": repos, "agents": {"claude": {"version": "1", "signed_in": true}}}, "active_runs": []});
+    assert_eq!(w.call(Method::POST, "/v1/worker/register", Some(reg)).await.0, StatusCode::OK);
+    let mint = |scope: &'static str| alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": scope, "scope": scope})));
+    let read = mint("read").await.1["token"].as_str().unwrap().to_string();
+    let tasks = mint("tasks").await.1["token"].as_str().unwrap().to_string();
+    let full = mint("full").await.1["token"].as_str().unwrap().to_string();
+
+    // Handshake: the agent learns what Sidefleet is; notifications get 202.
+    let init = mcp(&env, &tasks, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "hermes", "version": "1"}})).await;
+    assert_eq!(init["protocolVersion"], "2025-06-18");
+    assert_eq!(init["serverInfo"]["name"], "sidefleet");
+    assert!(init["instructions"].as_str().unwrap().contains("start_task"));
+    let (s, _) = with_token(&env, &tasks, Method::POST, "/mcp", Some(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    assert_eq!(with_token(&env, &tasks, Method::GET, "/mcp", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(Client::new().post(format!("{}/mcp", env.base_url)).json(&json!({})).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
+    // Each token sees the tools its scope allows.
+    let names = |r: Value| r["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(names(mcp(&env, &read, "tools/list", json!({})).await), ["fleet_overview", "list_tasks", "task_status"]);
+    assert_eq!(names(mcp(&env, &tasks, "tools/list", json!({})).await).len(), 7);
+    assert_eq!(names(mcp(&env, &full, "tools/list", json!({})).await).len(), 9);
+
+    // The overview names the machine and its repo.
+    let (t, err) = tool(&env, &read, "fleet_overview", json!({})).await;
+    assert!(!err, "{t}");
+    assert!(t.contains("Mac mini (online") && t.contains("alice/shop"), "{t}");
+
+    // read can't start work; tasks can, by the repo's short name, but never with full access.
+    let (t, err) = tool(&env, &read, "start_task", json!({"task": "fix it", "repo": "shop"})).await;
+    assert!(err && t.contains("limited"), "{t}");
+    let (t, err) = tool(&env, &tasks, "start_task", json!({"task": "fix it", "repo": "shop", "access": "full"})).await;
+    assert!(err && t.contains("full scope"), "{t}");
+    let (t, err) = tool(&env, &tasks, "start_task", json!({"task": "Fix the checkout bug\nIt double-charges.", "repo": "shop", "machine": "mac mini"})).await;
+    assert!(!err, "{t}");
+    let id = t.split_whitespace().nth(2).unwrap().to_string();
+    assert!(t.contains(&format!("/#/runs/{id}")), "{t}");
+    let (_, threads) = alice.json(Method::GET, "/v1/runs", None).await;
+    assert_eq!(threads[0]["repo"], "github.com/alice/shop");
+    assert_eq!(threads[0]["permission_mode"], "acceptEdits");
+    let (t, _) = tool(&env, &read, "task_status", json!({"task_id": id})).await;
+    assert!(t.contains("Status: waiting for a machine"), "{t}");
+
+    // The machine runs it; task_status with wait follows it to the end.
+    assert_eq!(w.claim("mac", &["github.com/alice/shop"]).await.0, StatusCode::OK);
+    let events = json!({"events": [
+        {"kind": "agent_init", "payload": {"session_id": "s1"}},
+        {"kind": "assistant_text", "payload": {"text": "Looking at the checkout."}},
+        {"kind": "diff", "payload": {"turn": {"files": [{"path": "src/pay.rs", "status": "modified", "additions": 3, "deletions": 1}], "file_count": 1, "additions": 3, "deletions": 1}, "total": null}},
+        {"kind": "result", "payload": {"result": "Fixed: the retry charged twice."}},
+    ]});
+    let finish = async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/events?worker_id=mac"), Some(events)).await.0, StatusCode::OK);
+        assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/finish?worker_id=mac"), Some(json!({"status": "succeeded"}))).await.0, StatusCode::OK);
+    };
+    let ((t, err), ()) = tokio::join!(tool(&env, &read, "task_status", json!({"task_id": id, "wait": true})), finish);
+    assert!(!err, "{t}");
+    assert!(t.contains("Status: done on mac"), "{t}");
+    assert!(t.contains("Fixed: the retry charged twice."), "{t}");
+    assert!(t.contains("src/pay.rs (+3 -1)"), "{t}");
+    let (t, _) = tool(&env, &read, "list_tasks", json!({})).await;
+    assert!(t.contains("[succeeded] Fix the checkout bug (alice/shop, on mac)"), "{t}");
+
+    // Replies continue it; stop stops it.
+    let (t, err) = tool(&env, &tasks, "reply", json!({"task_id": id, "message": "also add a test"})).await;
+    assert!(!err && t.starts_with("Sent."), "{t}");
+    let (t, err) = tool(&env, &tasks, "stop_task", json!({"task_id": id})).await;
+    assert!(!err && t.starts_with("Stopping"), "{t}");
+    let (t, _) = tool(&env, &tasks, "stop_task", json!({"task_id": id})).await;
+    assert!(t.starts_with("Nothing to stop"), "{t}");
+
+    // Bad input reads as a tool error, never a request elsewhere.
+    let (t, err) = tool(&env, &full, "task_status", json!({"task_id": "../../v1/setup"})).await;
+    assert!(err && t.contains("not a Sidefleet id"), "{t}");
+    let (t, err) = tool(&env, &full, "start_task", json!({"task": "x", "repo": "nope"})).await;
+    assert!(err && t.contains("The machines have: alice/shop"), "{t}");
+    let (t, err) = tool(&env, &full, "approve", json!({"task_id": id, "approval_id": Uuid::new_v4().to_string()})).await;
+    assert!(err, "{t}");
+
+    env.teardown().await;
+}

@@ -4,6 +4,7 @@
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import MessageSquare from '@lucide/svelte/icons/message-square';
+	import MessagesSquare from '@lucide/svelte/icons/messages-square';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, Settings, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
@@ -37,7 +38,8 @@
 	);
 	const nav = [
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
-		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
+		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') },
+		{ href: '#/chat', label: 'Chat apps', icon: MessagesSquare, on: (p: string) => p.startsWith('/chat') }
 	];
 
 	function onkeydown(e: KeyboardEvent) {

@@ -145,10 +145,12 @@ impl Caller {
 pub fn scope_allows(scope: Scope, method: &Method, path: &str) -> bool {
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     let need = match (method, seg.as_slice()) {
-        (&Method::GET, ["v1", "runs"] | ["v1", "runs", _] | ["v1", "runs", _, "thread" | "events" | "approvals"]) => Scope::Read,
+        (&Method::GET, ["v1", "runs"] | ["v1", "runs", _] | ["v1", "runs", _, "thread" | "events" | "approvals" | "summary"]) => Scope::Read,
         (&Method::GET, ["v1", "images", _] | ["v1", "workers"] | ["v1", "repos"]) => Scope::Read,
         (&Method::POST, ["v1", "runs"] | ["v1", "runs", _, "messages" | "stop" | "restore" | "fork" | "pr" | "archive"]) => Scope::Tasks,
         (&Method::POST, ["v1", "runs", _, "approvals", _, "approve" | "deny"]) => Scope::Full,
+        // Each MCP tool calls the routes above as the token, so the token's scope still decides.
+        (&Method::GET | &Method::POST, ["mcp"]) => Scope::Read,
         _ => return false,
     };
     scope >= need

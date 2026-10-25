@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs", post(create_run).get(list_runs).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/thread", get(get_thread))
+        .route("/v1/runs/{id}/summary", get(run_summary))
         .route("/v1/runs/{id}/messages", post(follow_up).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
@@ -68,6 +69,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers/{id}/update", post(request_update))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
+        // Chat agents (Hermes, OpenClaw, Claude) drive the fleet through MCP with an API token.
+        .route("/mcp", get(crate::mcp::get).post(crate::mcp::post))
         .route("/v1/api-tokens", get(list_api_tokens).post(create_api_token))
         .route("/v1/api-tokens/{id}", axum::routing::delete(revoke_api_token))
         .route("/v1/orgs", post(create_org))
@@ -327,6 +330,12 @@ fn check_ask_agent(mode: Option<&str>, agent: Agent) -> Result<(), ApiError> {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("\"Ask me\" works with Claude Code only for now, not {}", agent.display_name())));
     }
     Ok(())
+}
+
+/// The thread in a few lines, for scripts and chat agents (see `summary`).
+async fn run_summary(State(state): State<AppState>, Extension(caller): Extension<Caller>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let base = public_base(&state, &headers);
+    Ok(Json(crate::summary::thread(&state.pool, caller.org_id(), id, &base).await?.ok_or_else(not_found)?))
 }
 
 /// All runs of the thread this run belongs to, root first.

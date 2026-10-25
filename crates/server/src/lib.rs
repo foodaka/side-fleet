@@ -8,10 +8,12 @@ pub mod db;
 pub mod events;
 pub mod fork;
 pub mod inbox;
+pub mod mcp;
 pub mod notify;
 pub mod oauth;
 pub mod push;
 pub mod routes;
+pub mod summary;
 pub mod tenancy;
 pub mod test_support;
 

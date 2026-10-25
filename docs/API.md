@@ -95,7 +95,7 @@ what it can call; anything else answers `403`:
 | `full` | also approve or deny tool calls, and use full access |
 
 No token manages orgs, members, worker or API tokens, enrollments or machines, or reads
-`/v1/setup`. Tokens are made on the Machines page, or with these routes (session cookie or
+`/v1/setup`. Tokens are made on the Chat apps page, or with these routes (session cookie or
 developer key only; the developer key's tokens act in the default org):
 
 | Method | Path | |
@@ -104,12 +104,35 @@ developer key only; the developer key's tokens act in the default org):
 | `POST` | `/v1/api-tokens` `{name, scope}` | `201` with `token`, shown this once; only its SHA-256 is stored |
 | `DELETE` | `/v1/api-tokens/:id` | revoke; its next call gets `401` |
 
+### MCP (chat agents)
+
+`POST /mcp` is an MCP server (Streamable HTTP, answered with plain JSON; no sessions, `GET`
+answers `405`), for a chat agent such as Hermes or OpenClaw, Claude Code or any other MCP client,
+with an API token as `Authorization: Bearer sfa_…`. The Chat apps page hands out the setup for each.
+Its tools, each listed only for tokens whose scope allows it:
+
+| Tool | Scope | |
+|---|---|---|
+| `fleet_overview` | `read` | machines (online, agents, repos, busy slots, usage limits) and recent tasks |
+| `list_tasks` `{limit?}` | `read` | recent threads with their status |
+| `task_status` `{task_id, wait?}` | `read` | the thread's summary; with `wait`, follows a running task for up to 45 s until it finishes or asks for approval |
+| `start_task` `{task, repo?, machine?, agent?, model?, access?}` | `tasks` | a new run. `repo` by identity, `owner/name` or just its name (optional with one repo), `machine` by name or id, `access` one of `edit` (`acceptEdits`, the default), `ask`, `read_only` (`plan`), `full` (`bypassPermissions`, `full` scope only) |
+| `reply` `{task_id, message}` | `tasks` | a follow-up message |
+| `stop_task` `{task_id}` | `tasks` | stop the thread's latest message |
+| `open_pull_request` `{task_id}` | `tasks` | as `POST /v1/runs/:id/pr` |
+| `approve`, `deny` `{task_id, approval_id, reason?}` | `full` | decide a pending tool approval |
+
+Each tool calls the routes above in-process with the caller's own credentials, so it can do exactly
+what the token can do on the API, with the same checks and plan limits. Ids are checked before they
+go into a path.
+
 | Method | Path | |
 |---|---|---|
 | `POST` | `/v1/runs` `{task, agent?, model, repo, permission_mode?, isolation?, worker_id?, failover?, images?}` | `202 {id, status}`; agent is `claude` (default), `codex` or `opencode`; for `claude` the model is one of `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, for the others any model id the machine offers, or empty for its default; mode one of `acceptEdits`, `bypassPermissions`, `plan`, `ask` (Claude Code only; `400` with another agent), `default`, `dontAsk`; isolation `worktree` (default) or `checkout`; `worker_id` pins the run to that machine (any machine with the repo when omitted); `failover: true` moves the run to another machine if its machine drops, pushing checkpoints of its branch to `origin` (see step 4; default false; follow-ups inherit it); `images` is up to 8 `{media_type, data}` (base64 PNG, JPEG, GIF or WebP, 10 MB each) for the agent to look at; the run lists them as `images: [{id, media_type, bytes}]` |
 | `GET` | `/v1/runs?limit=50` | threads (root runs) with `thread_status`, `follow_ups`, `last_activity_at` |
 | `GET` | `/v1/runs/:id` | the run |
 | `GET` | `/v1/runs/:id/thread` | all runs in the thread, root first |
+| `GET` | `/v1/runs/:id/summary` | the thread in a few lines, for scripts and chat agents: `status` (of its latest message), `machine`, `reply` (what the agent last said, the end of it when over 4,000 characters), `error`, `changed_files` (`count`, `additions`, `deletions`, up to 30 `files` with their stats), `pending_approvals` (`id`, `tool`, `input`), `pr` and the page's `url` |
 | `POST` | `/v1/runs/:id/messages` `{task, agent?, model?, permission_mode?, images?}` | `202`: a follow-up that resumes the thread's session with the same agent on the same machine. While an earlier message is queued or running, it waits behind it and resumes the latest session once claimed (stop the running one to send it now). With another `agent` the thread switches to it: the new agent starts its own session in the same worktree, and when claimed gets a transcript of the thread so far in `context` (as a fork does). Switching back later does the same, since the old session misses the other agent's turns. Without `model`, the model that agent last used in the thread, else its default. `400` when the thread's machine doesn't have the agent; `409` when the thread has no session to continue or 10 messages are already waiting |
 | `GET` | `/v1/runs/:id/events` | SSE; `id:` is the seq, `event:` is the kind; replays then live; ends with `end` |
 | `POST` | `/v1/runs/:id/restore` | `202`: put the thread's worktree back to before this run; `409` while a message in the thread is queued or running, for in-place threads, or when the run has no snapshot |

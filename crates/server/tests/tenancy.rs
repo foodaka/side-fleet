@@ -653,3 +653,426 @@ async fn a_new_sign_up_sends_one_telegram_message() {
 
     env.teardown().await;
 }
+
+/// A script or chat agent using a personal API token.
+async fn with_token(env: &TestEnv, token: &str, m: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut r = Client::new().request(m, format!("{}{}", env.base_url, path)).bearer_auth(token);
+    if let Some(b) = body {
+        r = r.json(&b);
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status();
+    (s, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn api_tokens_act_as_their_user_in_one_org_within_their_scope() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let org = alice.org_id().await;
+    // Room for the handful of runs below.
+    sqlx::query("UPDATE orgs SET plan = 'pro' WHERE id = $1::uuid").bind(&org).execute(&env.pool).await.unwrap();
+    let run = |mode: Option<&str>| {
+        let mut b = json!({"task": "do it", "model": "claude-sonnet-5-5", "repo": "app"});
+        if let Some(m) = mode {
+            b["permission_mode"] = json!(m);
+        }
+        b
+    };
+
+    // Minted on the page; the value is in the 201 only.
+    let mint = |scope: &'static str| alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": format!("hermes {scope}"), "scope": scope})));
+    let (s, read) = mint("read").await;
+    assert_eq!(s, StatusCode::CREATED, "{read}");
+    let read_tok = read["token"].as_str().unwrap().to_string();
+    assert!(read_tok.starts_with("sfa_"));
+    assert_eq!(read["scope"], "read");
+    assert_eq!(read["prefix"], &read_tok[..8]);
+    let tasks_tok = mint("tasks").await.1["token"].as_str().unwrap().to_string();
+    let full_tok = mint("full").await.1["token"].as_str().unwrap().to_string();
+    assert_eq!(alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": "x", "scope": "admin"}))).await.0, StatusCode::BAD_REQUEST);
+    let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+    assert!(list.to_string().find(&read_tok).is_none(), "values are never listed");
+    let stored: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM api_tokens").fetch_all(&env.pool).await.unwrap();
+    assert!(!stored.contains(&read_tok), "only digests are stored");
+
+    // It is alice, in her org only.
+    let (s, me) = with_token(&env, &read_tok, Method::GET, "/v1/me", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(me["user"]["login"], "alice");
+    assert_eq!(me["orgs"].as_array().unwrap().len(), 1);
+    assert_eq!(me["orgs"][0]["id"], org.as_str());
+    assert_eq!(me["token"]["scope"], "read");
+
+    // read: looks, never acts.
+    assert_eq!(with_token(&env, &read_tok, Method::GET, "/v1/runs", None).await.0, StatusCode::OK);
+    assert_eq!(with_token(&env, &read_tok, Method::GET, "/v1/workers", None).await.0, StatusCode::OK);
+    assert_eq!(with_token(&env, &read_tok, Method::POST, "/v1/runs", Some(run(None))).await.0, StatusCode::FORBIDDEN);
+
+    // tasks: starts work in alice's org, but never with full access.
+    let (s, r) = with_token(&env, &tasks_tok, Method::POST, "/v1/runs", Some(run(Some("acceptEdits")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{r}");
+    let (_, threads) = alice.json(Method::GET, "/v1/runs", None).await;
+    assert!(threads.as_array().unwrap().iter().any(|t| t["id"] == r["id"]), "the page sees the token's run");
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, "/v1/runs", Some(run(Some("bypassPermissions")))).await.0, StatusCode::FORBIDDEN);
+    let rid = r["id"].as_str().unwrap();
+    let approve = format!("/v1/runs/{rid}/approvals/{}/approve", Uuid::new_v4());
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, &approve, None).await.0, StatusCode::FORBIDDEN);
+
+    // A thread alice started with full access: tasks can't continue it as is, only in a safer mode.
+    let (_, b) = alice.json(Method::POST, "/v1/runs", Some(run(Some("bypassPermissions")))).await;
+    let bid = b["id"].as_str().unwrap();
+    let reply = |mode: Option<&str>| {
+        let mut v = json!({"task": "and then"});
+        if let Some(m) = mode {
+            v["permission_mode"] = json!(m);
+        }
+        v
+    };
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/messages"), Some(reply(None))).await.0, StatusCode::FORBIDDEN);
+    let (s, v) = with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/messages"), Some(reply(Some("acceptEdits")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    // Forking it is the same.
+    assert_eq!(alice.json(Method::POST, &format!("/v1/runs/{bid}/stop"), None).await.0, StatusCode::OK);
+    let fork = |mode: Option<&str>| {
+        let mut v = json!({"task": "try another way", "model": "claude-sonnet-5-5"});
+        if let Some(m) = mode {
+            v["permission_mode"] = json!(m);
+        }
+        v
+    };
+    assert_eq!(with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/fork"), Some(fork(None))).await.0, StatusCode::FORBIDDEN);
+    let (s, v) = with_token(&env, &tasks_tok, Method::POST, &format!("/v1/runs/{bid}/fork"), Some(fork(Some("plan")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+
+    // full: may use full access and decide approvals.
+    let (s, v) = with_token(&env, &full_tok, Method::POST, "/v1/runs", Some(run(Some("bypassPermissions")))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(with_token(&env, &full_tok, Method::POST, &approve, None).await.0, StatusCode::NOT_FOUND, "allowed, but no such approval");
+
+    // No token manages orgs, tokens, members or machines, or sees the setup (it carries a worker token).
+    for (m, p) in [
+        (Method::GET, "/v1/setup".to_string()),
+        (Method::GET, "/v1/api-tokens".to_string()),
+        (Method::GET, format!("/v1/orgs/{org}/tokens")),
+        (Method::GET, format!("/v1/orgs/{org}/members")),
+        (Method::GET, "/v1/enrollments".to_string()),
+    ] {
+        assert_eq!(with_token(&env, &full_tok, m.clone(), &p, None).await.0, StatusCode::FORBIDDEN, "{m} {p}");
+    }
+    assert_eq!(
+        with_token(&env, &full_tok, Method::POST, "/v1/api-tokens", Some(json!({"name": "more", "scope": "full"}))).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Pointing it at another org: 403.
+    let bob = Browser::login(&env, "bob").await;
+    let bob_org = bob.org_id().await;
+    let r = Client::new().get(format!("{}/v1/runs", env.base_url)).bearer_auth(&read_tok).header("x-sidefleet-org", &bob_org).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+    // Only its owner sees and revokes it.
+    let read_id = read["id"].as_str().unwrap();
+    assert_eq!(bob.json(Method::GET, "/v1/api-tokens", None).await.1, json!([]));
+    assert_eq!(bob.json(Method::DELETE, &format!("/v1/api-tokens/{read_id}"), None).await.0, StatusCode::NOT_FOUND);
+    let (s, v) = alice.json(Method::DELETE, &format!("/v1/api-tokens/{read_id}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["revoked_at"].is_string());
+    assert_eq!(with_token(&env, &read_tok, Method::GET, "/v1/runs", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(with_token(&env, "sfa_made_up", Method::GET, "/v1/runs", None).await.0, StatusCode::UNAUTHORIZED);
+
+    // Leaving the org ends its tokens there.
+    sqlx::query("DELETE FROM org_members WHERE org_id = $1::uuid").bind(&org).execute(&env.pool).await.unwrap();
+    assert_eq!(with_token(&env, &tasks_tok, Method::GET, "/v1/runs", None).await.0, StatusCode::UNAUTHORIZED);
+
+    // The developer key mints tokens for the default org.
+    let (s, v) = with_token(&env, DEV_KEY, Method::POST, "/v1/api-tokens", Some(json!({"name": "openclaw", "scope": "read"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let (s, me) = with_token(&env, v["token"].as_str().unwrap(), Method::GET, "/v1/me", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(me["user"], Value::Null);
+    assert_eq!(me["orgs"][0]["slug"], "default");
+    assert_eq!(with_token(&env, DEV_KEY, Method::GET, "/v1/api-tokens", None).await.1.as_array().unwrap().len(), 1);
+
+    env.teardown().await;
+}
+
+/// A chat agent talking MCP: one JSON-RPC call with an API token.
+async fn mcp(env: &TestEnv, token: &str, method: &str, params: Value) -> Value {
+    let (s, v) = with_token(env, token, Method::POST, "/mcp", Some(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))).await;
+    assert_eq!(s, StatusCode::OK, "{method}: {v}");
+    assert_eq!(v["id"], 1);
+    v["result"].clone()
+}
+
+/// A tool's text, and whether it reported an error.
+async fn tool(env: &TestEnv, token: &str, name: &str, args: Value) -> (String, bool) {
+    let r = mcp(env, token, "tools/call", json!({"name": name, "arguments": args})).await;
+    (r["content"][0]["text"].as_str().unwrap_or_default().to_string(), r["isError"] == true)
+}
+
+#[tokio::test]
+async fn chat_agents_run_and_follow_tasks_over_mcp_within_their_scope() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let org = alice.org_id().await;
+    let wt = alice.create_token(&org, "mac").await.1["token"].as_str().unwrap().to_string();
+    let w = Worker::new(&env, &wt);
+    let repos: Vec<Value> = vec![json!({"name": "code/shop", "path": "/tmp/shop", "id": "github.com/alice/shop"})];
+    let reg = json!({"id": "mac", "display_name": "Mac mini", "capabilities": {"repos": repos, "agents": {"claude": {"version": "1", "signed_in": true}}}, "active_runs": []});
+    assert_eq!(w.call(Method::POST, "/v1/worker/register", Some(reg)).await.0, StatusCode::OK);
+    let mint = |scope: &'static str| alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": scope, "scope": scope})));
+    let read = mint("read").await.1["token"].as_str().unwrap().to_string();
+    let tasks = mint("tasks").await.1["token"].as_str().unwrap().to_string();
+    let full = mint("full").await.1["token"].as_str().unwrap().to_string();
+
+    // Handshake: the agent learns what Sidefleet is; notifications get 202.
+    let init = mcp(&env, &tasks, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "hermes", "version": "1"}})).await;
+    assert_eq!(init["protocolVersion"], "2025-06-18");
+    assert_eq!(init["serverInfo"]["name"], "sidefleet");
+    assert!(init["instructions"].as_str().unwrap().contains("start_task"));
+    let (s, _) = with_token(&env, &tasks, Method::POST, "/mcp", Some(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    assert_eq!(with_token(&env, &tasks, Method::GET, "/mcp", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(Client::new().post(format!("{}/mcp", env.base_url)).json(&json!({})).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
+    // Each token sees the tools its scope allows.
+    let names = |r: Value| r["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(names(mcp(&env, &read, "tools/list", json!({})).await), ["fleet_overview", "list_tasks", "task_status"]);
+    assert_eq!(names(mcp(&env, &tasks, "tools/list", json!({})).await).len(), 7);
+    assert_eq!(names(mcp(&env, &full, "tools/list", json!({})).await).len(), 9);
+
+    // The overview names the machine and its repo.
+    let (t, err) = tool(&env, &read, "fleet_overview", json!({})).await;
+    assert!(!err, "{t}");
+    assert!(t.contains("Mac mini (online") && t.contains("alice/shop"), "{t}");
+
+    // read can't start work; tasks can, by the repo's short name, but never with full access.
+    let (t, err) = tool(&env, &read, "start_task", json!({"task": "fix it", "repo": "shop"})).await;
+    assert!(err && t.contains("limited"), "{t}");
+    let (t, err) = tool(&env, &tasks, "start_task", json!({"task": "fix it", "repo": "shop", "access": "full"})).await;
+    assert!(err && t.contains("full scope"), "{t}");
+    let (t, err) = tool(&env, &tasks, "start_task", json!({"task": "Fix the checkout bug\nIt double-charges.", "repo": "shop", "machine": "mac mini"})).await;
+    assert!(!err, "{t}");
+    let id = t.split_whitespace().nth(2).unwrap().to_string();
+    assert!(t.contains(&format!("/#/runs/{id}")), "{t}");
+    let (_, threads) = alice.json(Method::GET, "/v1/runs", None).await;
+    assert_eq!(threads[0]["repo"], "github.com/alice/shop");
+    assert_eq!(threads[0]["permission_mode"], "acceptEdits");
+    let (t, _) = tool(&env, &read, "task_status", json!({"task_id": id})).await;
+    assert!(t.contains("Status: waiting for a machine"), "{t}");
+
+    // The machine runs it; task_status with wait follows it to the end.
+    assert_eq!(w.claim("mac", &["github.com/alice/shop"]).await.0, StatusCode::OK);
+    let events = json!({"events": [
+        {"kind": "agent_init", "payload": {"session_id": "s1"}},
+        {"kind": "assistant_text", "payload": {"text": "Looking at the checkout."}},
+        {"kind": "diff", "payload": {"turn": {"files": [{"path": "src/pay.rs", "status": "modified", "additions": 3, "deletions": 1}], "file_count": 1, "additions": 3, "deletions": 1}, "total": null}},
+        {"kind": "result", "payload": {"result": "Fixed: the retry charged twice."}},
+    ]});
+    let finish = async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/events?worker_id=mac"), Some(events)).await.0, StatusCode::OK);
+        assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/finish?worker_id=mac"), Some(json!({"status": "succeeded"}))).await.0, StatusCode::OK);
+    };
+    let ((t, err), ()) = tokio::join!(tool(&env, &read, "task_status", json!({"task_id": id, "wait": true})), finish);
+    assert!(!err, "{t}");
+    assert!(t.contains("Status: done on mac"), "{t}");
+    assert!(t.contains("Fixed: the retry charged twice."), "{t}");
+    assert!(t.contains("src/pay.rs (+3 -1)"), "{t}");
+    let (t, _) = tool(&env, &read, "list_tasks", json!({})).await;
+    assert!(t.contains("[succeeded] Fix the checkout bug (alice/shop, on mac)"), "{t}");
+
+    // Replies continue it; stop stops it.
+    let (t, err) = tool(&env, &tasks, "reply", json!({"task_id": id, "message": "also add a test"})).await;
+    assert!(!err && t.starts_with("Sent."), "{t}");
+    let (t, err) = tool(&env, &tasks, "stop_task", json!({"task_id": id})).await;
+    assert!(!err && t.starts_with("Stopping"), "{t}");
+    let (t, _) = tool(&env, &tasks, "stop_task", json!({"task_id": id})).await;
+    assert!(t.starts_with("Nothing to stop"), "{t}");
+
+    // Bad input reads as a tool error, never a request elsewhere.
+    let (t, err) = tool(&env, &full, "task_status", json!({"task_id": "../../v1/setup"})).await;
+    assert!(err && t.contains("not a Sidefleet id"), "{t}");
+    let (t, err) = tool(&env, &full, "start_task", json!({"task": "x", "repo": "nope"})).await;
+    assert!(err && t.contains("The machines have: alice/shop"), "{t}");
+    let (t, err) = tool(&env, &full, "approve", json!({"task_id": id, "approval_id": Uuid::new_v4().to_string()})).await;
+    assert!(err, "{t}");
+
+    env.teardown().await;
+}
+
+/// Stands in for Hermes or OpenClaw: records each request, answers with `status`.
+#[derive(Clone)]
+struct Receiver {
+    url: String,
+    got: std::sync::Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Value)>>>,
+    status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+}
+
+impl Receiver {
+    async fn start() -> Receiver {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(202));
+        let (g, st) = (got.clone(), status.clone());
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let (g, st) = (g.clone(), st.clone());
+            async move {
+                g.lock().unwrap().push((headers, serde_json::from_slice(&body).unwrap_or(Value::Null)));
+                axum::http::StatusCode::from_u16(st.load(std::sync::atomic::Ordering::SeqCst)).unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Receiver { url, got, status }
+    }
+    fn count(&self) -> usize {
+        self.got.lock().unwrap().len()
+    }
+    /// The `n`th request, waiting up to 5 s for it.
+    async fn nth(&self, n: usize) -> (axum::http::HeaderMap, Value) {
+        for _ in 0..100 {
+            if let Some(r) = self.got.lock().unwrap().get(n) {
+                return r.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("no request #{n} arrived");
+    }
+}
+
+/// A Hermes route's check: hex HMAC-SHA256 of `<timestamp>.<body>`.
+fn signed_by(h: &axum::http::HeaderMap, body: &Value, secret: &str) -> bool {
+    let ts = h["x-webhook-timestamp"].to_str().unwrap();
+    let want = sidefleet_server::chat_updates::hex(&sidefleet_server::chat_updates::hmac_sha256(secret.as_bytes(), format!("{ts}.{body}").as_bytes()));
+    h["x-webhook-signature-v2"].to_str().unwrap() == want
+}
+
+#[tokio::test]
+async fn chat_apps_hear_when_their_tasks_finish_or_need_approval() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let org = alice.org_id().await;
+    let w = Worker::new(&env, alice.create_token(&org, "mac").await.1["token"].as_str().unwrap());
+    let reg = json!({"id": "mac", "display_name": "Mac mini", "capabilities": {"repos": [{"name": "shop", "path": "/tmp/shop", "id": ""}], "agents": {"claude": {"version": "1", "signed_in": true}}}, "active_runs": []});
+    assert_eq!(w.call(Method::POST, "/v1/worker/register", Some(reg)).await.0, StatusCode::OK);
+    let (hermes, openclaw, hook) = (Receiver::start().await, Receiver::start().await, Receiver::start().await);
+    let mint = |name: &'static str, scope: &'static str| alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": name, "scope": scope})));
+    let h = mint("Hermes", "full").await.1;
+    let (h_id, h_tok) = (h["id"].as_str().unwrap().to_string(), h["token"].as_str().unwrap().to_string());
+    let o_id = mint("OpenClaw", "tasks").await.1["id"].as_str().unwrap().to_string();
+    let k_id = mint("Watcher", "read").await.1["id"].as_str().unwrap().to_string();
+
+    // Turning updates on hands out the secret the app checks them with; listing never shows it.
+    async fn put(b: &Browser, id: &str, kind: &str, url: String, all: bool) -> (StatusCode, Value) {
+        b.json(Method::PUT, &format!("/v1/api-tokens/{id}/updates"), Some(json!({"kind": kind, "url": url, "all_tasks": all}))).await
+    }
+    let on = |id: &str, kind: &'static str, url: String, all: bool| {
+        let id = id.to_string();
+        let alice = &alice;
+        async move { put(alice, &id, kind, url, all).await }
+    };
+    let (s, v) = on(&h_id, "hermes", format!("{}/webhooks/sidefleet", hermes.url), false).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let h_secret = v["secret"].as_str().unwrap().to_string();
+    assert_eq!(v["updates"]["kind"], "hermes");
+    let (_, v) = on(&h_id, "hermes", format!("{}/webhooks/sidefleet", hermes.url), false).await;
+    assert_eq!(v["secret"], h_secret.as_str(), "changing the address keeps the secret");
+    let o_secret = on(&o_id, "openclaw", format!("{}/hooks/agent", openclaw.url), false).await.1["secret"].as_str().unwrap().to_string();
+    let k_secret = on(&k_id, "webhook", format!("{}/sidefleet", hook.url), true).await.1["secret"].as_str().unwrap().to_string();
+    assert_eq!(on(&k_id, "slack", hook.url.clone(), false).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(on(&k_id, "webhook", "file:///etc/passwd".into(), false).await.0, StatusCode::BAD_REQUEST);
+    let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
+    assert!(!list.to_string().contains(&h_secret));
+    // Tokens can't change where updates go.
+    assert_eq!(with_token(&env, &h_tok, Method::PUT, &format!("/v1/api-tokens/{h_id}/updates"), Some(json!({"kind": "webhook", "url": "http://x"}))).await.0, StatusCode::FORBIDDEN);
+
+    // A test: Hermes gets a signed payload, OpenClaw its hook token and a message.
+    assert_eq!(alice.json(Method::POST, &format!("/v1/api-tokens/{h_id}/updates/test"), None).await.0, StatusCode::OK);
+    let (hd, body) = hermes.nth(0).await;
+    assert_eq!(body["event_type"], "test");
+    assert!(signed_by(&hd, &body, &h_secret));
+    assert!(!signed_by(&hd, &body, "wrong"));
+    assert_eq!(alice.json(Method::POST, &format!("/v1/api-tokens/{o_id}/updates/test"), None).await.0, StatusCode::OK);
+    let (od, body) = openclaw.nth(0).await;
+    assert_eq!(od["authorization"].to_str().unwrap(), format!("Bearer {o_secret}"));
+    assert_eq!(body["name"], "Sidefleet");
+    assert!(body["message"].as_str().unwrap().contains("test update"));
+    // A refused test says why, and the page shows it.
+    openclaw.status.store(401, std::sync::atomic::Ordering::SeqCst);
+    let (s, v) = alice.json(Method::POST, &format!("/v1/api-tokens/{o_id}/updates/test"), None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY);
+    assert!(v["error"].as_str().unwrap().contains("secret doesn't match"), "{v}");
+    let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
+    let o = list.as_array().unwrap().iter().find(|t| t["id"] == o_id.as_str()).unwrap().clone();
+    assert!(o["updates"]["last_error"].as_str().unwrap().contains("secret"));
+    openclaw.status.store(202, std::sync::atomic::Ordering::SeqCst);
+
+    // Hermes starts a task over MCP; the machine asks to run a command: Hermes hears it, with the ids to decide.
+    let (t, err) = tool(&env, &h_tok, "start_task", json!({"task": "Fix the checkout bug", "repo": "shop", "access": "ask"})).await;
+    assert!(!err, "{t}");
+    let id = t.split_whitespace().nth(2).unwrap().to_string();
+    assert_eq!(w.claim("mac", &["shop"]).await.0, StatusCode::OK);
+    let (s, a) = w.call(Method::POST, &format!("/v1/worker/runs/{id}/approvals?worker_id=mac"), Some(json!({"tool_name": "Bash", "input": {"command": "pnpm test"}}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{a}");
+    let (hd, body) = hermes.nth(1).await;
+    assert_eq!(body["event_type"], "task.needs_approval");
+    assert!(signed_by(&hd, &body, &h_secret));
+    let text = body["text"].as_str().unwrap();
+    assert!(text.contains("`pnpm test`") && text.contains(a["id"].as_str().unwrap()) && text.contains(&id), "{text}");
+    // ...and approves it once the user says yes.
+    let (t, err) = tool(&env, &h_tok, "approve", json!({"task_id": id, "approval_id": a["id"]})).await;
+    assert!(!err, "{t}");
+
+    // It finishes: Hermes and the all-tasks webhook hear; OpenClaw (not its task) doesn't.
+    let events = json!({"events": [
+        {"kind": "agent_init", "payload": {"session_id": "s1"}},
+        {"kind": "diff", "payload": {"turn": {"files": [{"path": "src/pay.rs", "status": "modified", "additions": 3, "deletions": 1}], "file_count": 1, "additions": 3, "deletions": 1}, "total": null}},
+        {"kind": "result", "payload": {"result": "Fixed: the retry charged twice."}},
+    ]});
+    assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/events?worker_id=mac"), Some(events)).await.0, StatusCode::OK);
+    assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{id}/finish?worker_id=mac"), Some(json!({"status": "succeeded"}))).await.0, StatusCode::OK);
+    let (_, body) = hermes.nth(2).await;
+    assert_eq!(body["event_type"], "task.finished");
+    let text = body["text"].as_str().unwrap();
+    assert!(text.contains("Fixed: the retry charged twice.") && text.contains("src/pay.rs") && text.contains("open_pull_request"), "{text}");
+    assert_eq!(hook.nth(0).await.1["event_type"], "task.needs_approval", "it wants every task");
+    let (kd, body) = hook.nth(1).await;
+    assert_eq!(body["event_type"], "task.finished");
+    assert_eq!(body["task"]["id"], id.as_str());
+    assert!(signed_by(&kd, &body, &k_secret));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(openclaw.count(), 2, "only the two tests");
+
+    // A task started on the page: only the all-tasks webhook hears it.
+    let (_, r) = alice.create_run("shop").await;
+    let pid = r["id"].as_str().unwrap();
+    assert_eq!(w.claim("mac", &["shop"]).await.0, StatusCode::OK);
+    assert_eq!(w.call(Method::POST, &format!("/v1/worker/runs/{pid}/finish?worker_id=mac"), Some(json!({"status": "failed", "result": {"error": "boom"}}))).await.0, StatusCode::OK);
+    let (_, body) = hook.nth(2).await;
+    assert_eq!(body["event_type"], "task.failed");
+    assert!(body["text"].as_str().unwrap().contains("Error: boom"));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(hermes.count(), 3);
+
+    // Off means off; a disconnected app hears nothing more.
+    assert_eq!(alice.json(Method::DELETE, &format!("/v1/api-tokens/{k_id}/updates"), None).await.0, StatusCode::OK);
+    assert_eq!(alice.json(Method::POST, &format!("/v1/api-tokens/{k_id}/updates/test"), None).await.0, StatusCode::NOT_FOUND);
+    env.teardown().await;
+
+    // Hosted with the default: no private or local addresses.
+    let env = TestEnv::start_with(|c| {
+        c.github = Some(sidefleet_server::GithubOAuth::new("x".into(), "y".into()));
+        c.private_webhooks = false;
+    })
+    .await;
+    let (s, v) = with_token(&env, DEV_KEY, Method::POST, "/v1/api-tokens", Some(json!({"name": "Hermes", "scope": "read"}))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let id = v["id"].as_str().unwrap();
+    let (s, v) = with_token(&env, DEV_KEY, Method::PUT, &format!("/v1/api-tokens/{id}/updates"), Some(json!({"kind": "hermes", "url": hermes.url}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap().contains("private or local"), "{v}");
+    env.teardown().await;
+}

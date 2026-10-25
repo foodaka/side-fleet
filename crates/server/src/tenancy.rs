@@ -299,6 +299,281 @@ pub async fn token_org(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<U
     Ok(Some(row.get("org_id")))
 }
 
+// ---- API tokens ----
+
+/// What an API token may do. Browser sessions and the developer key are not limited.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Look: threads, their events and approvals, machines, repos.
+    Read,
+    /// Also start tasks, reply, stop, restore, fork, archive and open PRs; never with full access.
+    Tasks,
+    /// Also approve or deny tool calls and run with full access (`bypassPermissions`).
+    Full,
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Option<Scope> {
+        match s {
+            "read" => Some(Scope::Read),
+            "tasks" => Some(Scope::Tasks),
+            "full" => Some(Scope::Full),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Read => "read",
+            Scope::Tasks => "tasks",
+            Scope::Full => "full",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiToken {
+    pub id: Uuid,
+    pub name: String,
+    pub scope: Scope,
+    /// First characters of the value, to tell tokens apart; the rest is never shown again.
+    pub prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// Updates in chat, when its app is told how tasks go. The secret is never listed.
+    pub updates: Option<ChatUpdates>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatUpdates {
+    /// `hermes`, `openclaw` or `webhook`: how updates are sent.
+    pub kind: String,
+    pub url: String,
+    /// Every task in the org, not only the ones this connection started or replied to.
+    pub all_tasks: bool,
+    /// When an update last went out, and why it failed if it did.
+    pub last_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+fn row_to_api_token(r: &PgRow) -> ApiToken {
+    let updates = match (r.get::<Option<String>, _>("notify_kind"), r.get::<Option<String>, _>("notify_url")) {
+        (Some(kind), Some(url)) => Some(ChatUpdates {
+            kind,
+            url,
+            all_tasks: r.get("notify_all"),
+            last_at: r.get("notify_last_at"),
+            last_error: r.get("notify_last_error"),
+        }),
+        _ => None,
+    };
+    ApiToken {
+        id: r.get("id"),
+        name: r.get("name"),
+        scope: Scope::parse(r.get("scope")).unwrap_or(Scope::Read),
+        prefix: "sfa_".into(),
+        created_at: r.get("created_at"),
+        revoked_at: r.get("revoked_at"),
+        last_used_at: r.get("last_used_at"),
+        updates,
+    }
+}
+
+const API_TOKEN_COLS: &str =
+    "id, name, scope, created_at, revoked_at, last_used_at, notify_kind, notify_url, notify_all, notify_last_at, notify_last_error";
+
+/// Mint an API token for `user` (none: the developer key) in `org`. Returns its record and the value, which is not stored.
+pub async fn create_api_token(pool: &PgPool, org: Uuid, user: Option<Uuid>, name: &str, scope: Scope) -> sqlx::Result<(ApiToken, String)> {
+    let value = format!("sfa_{}", random_hex(24));
+    let row = sqlx::query(&format!(
+        "INSERT INTO api_tokens (id, org_id, user_id, name, scope, token_hash) VALUES ($1, $2, $3, $4, $5, $6) RETURNING {API_TOKEN_COLS}"
+    ))
+    .bind(Uuid::new_v4())
+    .bind(org)
+    .bind(user)
+    .bind(name)
+    .bind(scope.as_str())
+    .bind(sha256_hex(&value))
+    .fetch_one(pool)
+    .await?;
+    let mut t = row_to_api_token(&row);
+    t.prefix = value[..8].to_string();
+    Ok((t, value))
+}
+
+/// The caller's own tokens in `org`, newest first.
+pub async fn list_api_tokens(pool: &PgPool, org: Uuid, user: Option<Uuid>) -> sqlx::Result<Vec<ApiToken>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {API_TOKEN_COLS} FROM api_tokens WHERE org_id = $1 AND user_id IS NOT DISTINCT FROM $2 ORDER BY created_at DESC"
+    ))
+    .bind(org)
+    .bind(user)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_api_token).collect())
+}
+
+/// Revoke one of the caller's tokens in `org`. It gets 401 on its next call.
+pub async fn revoke_api_token(pool: &PgPool, org: Uuid, user: Option<Uuid>, id: Uuid) -> sqlx::Result<Option<ApiToken>> {
+    let row = sqlx::query(&format!(
+        "UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, now())
+         WHERE id = $1 AND org_id = $2 AND user_id IS NOT DISTINCT FROM $3 RETURNING {API_TOKEN_COLS}"
+    ))
+    .bind(id)
+    .bind(org)
+    .bind(user)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_api_token))
+}
+
+/// Turn on (or change) updates in chat for one of the caller's live tokens. Returns
+/// the token and the secret its app checks updates with: kept across changes,
+/// made the first time.
+pub async fn set_chat_updates(
+    pool: &PgPool,
+    org: Uuid,
+    user: Option<Uuid>,
+    id: Uuid,
+    kind: &str,
+    url: &str,
+    all_tasks: bool,
+) -> sqlx::Result<Option<(ApiToken, String)>> {
+    let row = sqlx::query(&format!(
+        "UPDATE api_tokens SET notify_kind = $4, notify_url = $5, notify_all = $6,
+             notify_secret = COALESCE(notify_secret, $7), notify_last_error = NULL
+         WHERE id = $1 AND org_id = $2 AND user_id IS NOT DISTINCT FROM $3 AND revoked_at IS NULL
+         RETURNING {API_TOKEN_COLS}, notify_secret"
+    ))
+    .bind(id)
+    .bind(org)
+    .bind(user)
+    .bind(kind)
+    .bind(url)
+    .bind(all_tasks)
+    .bind(random_hex(24))
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| (row_to_api_token(&r), r.get("notify_secret"))))
+}
+
+/// Turn updates in chat off. The secret goes too, so turning them on again makes a new one.
+pub async fn clear_chat_updates(pool: &PgPool, org: Uuid, user: Option<Uuid>, id: Uuid) -> sqlx::Result<Option<ApiToken>> {
+    let row = sqlx::query(&format!(
+        "UPDATE api_tokens SET notify_kind = NULL, notify_url = NULL, notify_secret = NULL, notify_all = false,
+             notify_last_at = NULL, notify_last_error = NULL
+         WHERE id = $1 AND org_id = $2 AND user_id IS NOT DISTINCT FROM $3 RETURNING {API_TOKEN_COLS}"
+    ))
+    .bind(id)
+    .bind(org)
+    .bind(user)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_api_token))
+}
+
+/// Where one connection's updates go.
+#[derive(Debug, Clone)]
+pub struct UpdateTarget {
+    pub token: Uuid,
+    pub kind: String,
+    pub url: String,
+    pub secret: String,
+}
+
+fn row_to_target(r: &PgRow) -> UpdateTarget {
+    UpdateTarget { token: r.get("id"), kind: r.get("notify_kind"), url: r.get("notify_url"), secret: r.get("notify_secret") }
+}
+
+/// One of the caller's connections with updates on (for a test update).
+pub async fn chat_update_target(pool: &PgPool, org: Uuid, user: Option<Uuid>, id: Uuid) -> sqlx::Result<Option<UpdateTarget>> {
+    let row = sqlx::query(
+        "SELECT id, notify_kind, notify_url, notify_secret FROM api_tokens
+         WHERE id = $1 AND org_id = $2 AND user_id IS NOT DISTINCT FROM $3 AND revoked_at IS NULL AND notify_url IS NOT NULL",
+    )
+    .bind(id)
+    .bind(org)
+    .bind(user)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_target))
+}
+
+/// The live connections of `org` to tell about the thread rooted at `root`: those
+/// that sent one of its messages, and those that want every task. A token whose
+/// user left the org is left out, as it is for the API.
+pub async fn chat_update_targets(pool: &PgPool, org: Uuid, root: Uuid) -> sqlx::Result<Vec<UpdateTarget>> {
+    let rows = sqlx::query(
+        "SELECT t.id, t.notify_kind, t.notify_url, t.notify_secret FROM api_tokens t
+         WHERE t.org_id = $1 AND t.revoked_at IS NULL AND t.notify_url IS NOT NULL
+           AND (t.user_id IS NULL OR EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = t.org_id AND m.user_id = t.user_id))
+           AND (t.notify_all OR EXISTS (SELECT 1 FROM runs r WHERE r.org_id = $1 AND (r.id = $2 OR r.parent_id = $2) AND r.api_token_id = t.id))",
+    )
+    .bind(org)
+    .bind(root)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_target).collect())
+}
+
+/// How the last update went: shown on the Chat apps page.
+pub async fn record_chat_update(pool: &PgPool, token: Uuid, error: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE api_tokens SET notify_last_at = now(), notify_last_error = $2 WHERE id = $1").bind(token).bind(error).execute(pool).await?;
+    Ok(())
+}
+
+/// Remember which connection sent a message (a run), so its app hears how it goes.
+pub async fn tag_run(pool: &PgPool, run: Uuid, token: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE runs SET api_token_id = $2 WHERE id = $1").bind(run).bind(token).execute(pool).await?;
+    Ok(())
+}
+
+/// A live API token, resolved to who it acts as.
+#[derive(Debug, Clone)]
+pub struct ApiTokenUse {
+    pub id: Uuid,
+    pub name: String,
+    pub scope: Scope,
+    /// None for a token minted with the developer key.
+    pub user: Option<User>,
+    pub org: OrgMembership,
+}
+
+/// Resolve a presented token: live (not revoked), and its user still a member
+/// of its org (the membership carries their current role). Records when it was last used.
+pub async fn api_token_use(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<ApiTokenUse>> {
+    let row = sqlx::query(
+        "SELECT t.id, t.name, t.scope, t.org_id, t.user_id, t.last_used_at, u.github_id, u.login, u.email
+         FROM api_tokens t LEFT JOIN users u ON u.id = t.user_id
+         WHERE t.token_hash = $1 AND t.revoked_at IS NULL",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let org_id: Uuid = row.get("org_id");
+    let user_id: Option<Uuid> = row.get("user_id");
+    let (user, org) = match user_id {
+        Some(uid) => {
+            let user = User { id: uid, github_id: row.get("github_id"), login: row.get("login"), email: row.get("email") };
+            match memberships(pool, uid).await?.into_iter().find(|m| m.id == org_id) {
+                Some(m) => (Some(user), m),
+                None => return Ok(None),
+            }
+        }
+        None if org_id == DEFAULT_ORG => (None, default_org(pool).await?),
+        None => return Ok(None),
+    };
+    let Some(scope) = Scope::parse(row.get("scope")) else { return Ok(None) };
+    let id: Uuid = row.get("id");
+    let last: Option<DateTime<Utc>> = row.get("last_used_at");
+    if last.is_none_or(|t| Utc::now() - t > Duration::minutes(1)) {
+        sqlx::query("UPDATE api_tokens SET last_used_at = now() WHERE id = $1").bind(id).execute(pool).await?;
+    }
+    Ok(Some(ApiTokenUse { id, name: row.get("name"), scope, user, org }))
+}
+
 // ---- enrollment ----
 
 #[derive(Debug, Clone, Serialize)]

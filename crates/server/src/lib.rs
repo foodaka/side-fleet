@@ -4,14 +4,17 @@
 pub mod approvals;
 pub mod attention;
 pub mod auth;
+pub mod chat_updates;
 pub mod db;
 pub mod events;
 pub mod fork;
 pub mod inbox;
+pub mod mcp;
 pub mod notify;
 pub mod oauth;
 pub mod push;
 pub mod routes;
+pub mod summary;
 pub mod tenancy;
 pub mod test_support;
 
@@ -48,6 +51,10 @@ pub struct Config {
     pub telegram: Option<Telegram>,
     /// Web push identity (`SIDEFLEET_VAPID_PRIVATE_KEY`); push is off without it.
     pub vapid: Option<push::Vapid>,
+    /// Updates in chat may go to private and local addresses (a self-hosted
+    /// control plane on the same network as Hermes). Off when hosted, unless
+    /// `SIDEFLEET_PRIVATE_WEBHOOKS=1`.
+    pub private_webhooks: bool,
 }
 
 /// A GitHub OAuth app. The URLs are configurable so tests can stand in for GitHub.
@@ -131,7 +138,11 @@ impl Config {
             }
             None => None,
         };
-        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, telegram, vapid })
+        let private_webhooks = match env_nonempty("SIDEFLEET_PRIVATE_WEBHOOKS").as_deref() {
+            Some(v) => matches!(v, "1" | "true" | "yes"),
+            None => github.is_none(),
+        };
+        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, telegram, vapid, private_webhooks })
     }
 
     /// Hosted (multi-tenant) mode: people sign in and have their own orgs.

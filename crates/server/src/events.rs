@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use sidefleet_core::RunEvent;
+use sidefleet_core::{RunEvent, RunStatus};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -20,6 +20,8 @@ pub struct EventBus {
 pub struct Touched {
     pub run_id: Uuid,
     pub kind: String,
+    /// The status a `status` event moved the run to.
+    pub status: Option<RunStatus>,
 }
 
 impl Default for EventBus {
@@ -41,15 +43,11 @@ impl EventBus {
     }
 
     pub fn publish(&self, ev: RunEvent) {
-        let _ = self.all.send(Touched { run_id: ev.run_id, kind: ev.kind.clone() });
-        let terminal = ev.kind == "status"
-            && ev
-                .payload
-                .get("status")
-                .and_then(|s| s.as_str())
-                .and_then(sidefleet_core::RunStatus::parse)
-                .map(|s| s.is_terminal())
-                .unwrap_or(false);
+        let status = (ev.kind == "status")
+            .then(|| ev.payload.get("status").and_then(|s| s.as_str()).and_then(RunStatus::parse))
+            .flatten();
+        let _ = self.all.send(Touched { run_id: ev.run_id, kind: ev.kind.clone(), status });
+        let terminal = status.is_some_and(|s| s.is_terminal());
         let mut map = self.inner.lock().unwrap();
         if let Some(tx) = map.get(&ev.run_id) {
             // Send errors only mean there are no live subscribers right now.

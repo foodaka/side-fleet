@@ -127,7 +127,8 @@ enum Cmd {
         /// Extra arguments appended to the claude command line (repeatable).
         #[arg(long = "claude-arg")]
         claude_args: Vec<String>,
-        /// Seconds between claim polls.
+        /// Seconds between claim polls, when the control plane can't hold a claim
+        /// open until a run is queued (an older one, or while a repo is busy here).
         #[arg(long, default_value_t = 2)]
         poll_interval: u64,
         /// Skip the sign-in checks (a trivial `claude -p`, `codex login status`) at start.
@@ -517,9 +518,12 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     }
     println!();
 
+    let claims = state.claims.clone();
     axum::serve(listener, sidefleet_server::router(state))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             shutdown_signal().await;
+            // Answer workers' held claims, which would otherwise hold up the shutdown.
+            claims.close();
             let n = sidefleet_worker::agent::kill_all_agents();
             if n > 0 {
                 eprintln!("stopped {n} running agent(s)");

@@ -141,11 +141,22 @@ impl ControlClient {
         Ok(())
     }
 
-    pub async fn claim(&self, repos: &[String], busy_repos: &[String], agents: &[String], slots: &Slots) -> Result<Option<Run>, ClientError> {
+    /// Ask for a run, letting the control plane hold the request up to `wait` until
+    /// one is claimable (older control planes answer at once).
+    pub async fn claim(
+        &self,
+        repos: &[String],
+        busy_repos: &[String],
+        agents: &[String],
+        slots: &Slots,
+        wait: Duration,
+    ) -> Result<Option<Run>, ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/claim"))
             .bearer_auth(&self.token)
+            // Outlast the wait, or a slow answer would be cut off as a timeout.
+            .timeout(wait + Duration::from_secs(30))
             .json(&ClaimRequest {
                 worker_id: self.worker_id.clone(),
                 repos: repos.to_vec(),
@@ -153,6 +164,7 @@ impl ControlClient {
                 agents: agents.to_vec(),
                 slots: Some(slots.clone()),
                 kinds: vec!["agent".into(), "restore".into(), "fork".into(), "pr".into()],
+                wait_secs: (!wait.is_zero()).then_some(wait.as_secs()),
             })
             .send()
             .await

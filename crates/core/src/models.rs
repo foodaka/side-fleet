@@ -665,6 +665,10 @@ pub struct ClaimRequest {
     /// from older workers, which only run plain `agent` runs.
     #[serde(default)]
     pub kinds: Vec<String>,
+    /// Hold the request up to this many seconds until a run is claimable,
+    /// instead of answering 204 at once. None from older workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

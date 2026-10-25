@@ -1,1 +1,0 @@
-export{t as component}from"../chunks/yhSwZl45.js";

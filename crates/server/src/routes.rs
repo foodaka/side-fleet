@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
-    HeartbeatRequest, HeartbeatResponse, ImageUpload, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, ISOLATION_MODES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
+    HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::approvals::{DecideOutcome, RequestOutcome};
 use crate::auth::{self, Caller, Identity, WorkerAuth};
+use crate::events::Update;
 use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, PrOutcome, RestoreOutcome};
 use crate::oauth::{self, public_base};
 use crate::tenancy::{self, Decide, NewEnrollment, Poll, DEFAULT_ORG};
@@ -97,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/claim", post(claim_run))
         // Events can carry screenshots (base64), well past axum's 2 MB default.
         .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
+        .route("/v1/worker/runs/{id}/live", post(post_live_text))
         .route("/v1/worker/runs/{id}/control", get(run_control))
         .route("/v1/worker/runs/{id}/approvals", post(request_approval))
         .route("/v1/worker/runs/{id}/approvals/{approval}", get(poll_approval))
@@ -741,6 +743,8 @@ struct EventsQuery {
 
 /// SSE: replays stored events from `from`/`Last-Event-ID + 1`, then streams
 /// live ones. Each event's `id` is its seq, so browsers resume on reconnect.
+/// Between them come `assistant_live` frames without an id: the text the agent
+/// is writing, which the next stored `assistant_text` replaces.
 /// Ends with an `end` event once the run reaches a terminal status.
 async fn run_events_sse(
     State(state): State<AppState>,
@@ -786,7 +790,8 @@ async fn run_events_sse(
         }
         loop {
             match rx.recv().await {
-                Ok(ev) => {
+                Ok(Update::Live(text)) => yield Ok(live_sse(id, &text)),
+                Ok(Update::Event(ev)) => {
                     if ev.seq < next_seq {
                         continue; // already replayed from history
                     }
@@ -847,6 +852,12 @@ fn is_terminal_event(ev: &RunEvent) -> bool {
             .and_then(RunStatus::parse)
             .map(|s| s.is_terminal())
             .unwrap_or(false)
+}
+
+/// Shaped like a stored event so the page handles both alike, but with no seq.
+fn live_sse(run_id: Uuid, text: &str) -> Event {
+    let data = json!({"run_id": run_id, "kind": LIVE_TEXT, "payload": {"text": text}, "at": chrono::Utc::now()});
+    Event::default().event(LIVE_TEXT).data(data.to_string())
 }
 
 fn to_sse(ev: &RunEvent) -> Event {
@@ -994,6 +1005,33 @@ async fn post_events(
             Ok(Json(RunControl { status: run.status, stop_requested: true }))
         }
     }
+}
+
+/// The text the agent is writing, passed straight to whoever follows the run:
+/// never stored, as the `assistant_text` event that ends it is.
+async fn post_live_text(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WorkerQuery>,
+    Json(req): Json<LiveTextRequest>,
+) -> Result<StatusCode, ApiError> {
+    // Redaction can lengthen the text a little.
+    if req.text.len() > 2 * LIVE_TEXT_MAX_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "live text too long".into()));
+    }
+    // Most of the time nobody is looking: skip the database.
+    if !state.events.watched(id) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let run = db::get_run(&state.pool, auth.org, id).await?.ok_or_else(not_found)?;
+    if run.worker_id.as_deref() != Some(q.worker_id.as_str()) {
+        return Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into()));
+    }
+    if run.status == RunStatus::Running {
+        state.events.publish_live(id, sidefleet_core::redact(&req.text));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn run_control(

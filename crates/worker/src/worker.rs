@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunStatus, Slots, ASK_MODE};
+use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunStatus, Slots, ASK_MODE, LIVE_TEXT};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -616,8 +616,9 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         tx
     });
 
-    // Forwarder: sends each event immediately; also polls control every second
-    // while idle so a stop is noticed even if the agent is silent.
+    // Forwarder: sends each event immediately, and the text the agent is writing
+    // every LIVE_TEXT_EVERY; also polls control every second while idle so a stop
+    // is noticed even if the agent is silent.
     let forwarder = {
         let client = client.clone();
         let stop_tx = stop_tx.clone();
@@ -626,18 +627,21 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
             let mut poll = tokio::time::interval(Duration::from_secs(1));
             poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut backoff = Backoff::new(Duration::from_secs(10));
+            let mut live = LiveText::default();
             loop {
                 tokio::select! {
                     ev = event_rx.recv() => {
                         let Some(ev) = ev else { break };
                         // Batch whatever else is already waiting; an event with images goes on its own.
                         let has_images = |e: &NewEvent| e.payload.get("images").is_some();
-                        let mut batch = vec![ev];
-                        while !has_images(&batch[0]) {
+                        let mut batch = Vec::new();
+                        live.route(ev, &mut batch, tokio::time::Instant::now());
+                        while batch.last().is_none_or(|e| !has_images(e)) && batch.len() < 100 {
                             let Ok(more) = event_rx.try_recv() else { break };
-                            let last = has_images(&more);
-                            batch.push(more);
-                            if last || batch.len() >= 100 { break; }
+                            live.route(more, &mut batch, tokio::time::Instant::now());
+                        }
+                        if batch.is_empty() {
+                            continue;
                         }
                         loop {
                             match client.post_events(run_id, batch.clone()).await {
@@ -664,6 +668,15 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                                     tracing::warn!(error = %e, retry_in = ?wait, "posting events failed");
                                     tokio::time::sleep(wait).await;
                                 }
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep_until(live.due.unwrap_or_else(tokio::time::Instant::now)), if live.due.is_some() => {
+                        if let Some(text) = live.take(tokio::time::Instant::now()) {
+                            match client.post_live(run_id, &text).await {
+                                Ok(true) => {}
+                                Ok(false) => live.off = true,
+                                Err(e) => tracing::debug!(error = %e, "posting live text failed"),
                             }
                         }
                     }
@@ -720,6 +733,57 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
 }
 
 /// Listen for the run's permission prompts and relay each to the page.
+/// Live text goes to the page at most this often.
+const LIVE_TEXT_EVERY: Duration = Duration::from_millis(100);
+
+/// The text the agent is writing, on its way to the page. Each update holds the
+/// whole text block so far, so only the newest one waiting matters; none is stored.
+#[derive(Debug, Default)]
+struct LiveText {
+    pending: Option<String>,
+    /// When to send `pending`.
+    due: Option<tokio::time::Instant>,
+    sent_at: Option<tokio::time::Instant>,
+    /// What the page shows now.
+    shown: String,
+    /// The control plane takes no live text.
+    off: bool,
+}
+
+impl LiveText {
+    /// Keep a live text update for later, or put any other event in `batch`.
+    fn route(&mut self, ev: NewEvent, batch: &mut Vec<NewEvent>, now: tokio::time::Instant) {
+        if ev.kind != LIVE_TEXT {
+            if ev.kind == "assistant_text" {
+                // The final message replaces the live text on the page.
+                self.pending = None;
+                self.due = None;
+                self.shown.clear();
+            }
+            batch.push(ev);
+            return;
+        }
+        let text = ev.payload.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+        if self.off || text == self.shown {
+            self.pending = None;
+            self.due = None;
+            return;
+        }
+        self.pending = Some(text.to_string());
+        let sent_at = self.sent_at;
+        self.due.get_or_insert_with(|| sent_at.map_or(now, |t| (t + LIVE_TEXT_EVERY).max(now)));
+    }
+
+    /// The update to send now.
+    fn take(&mut self, now: tokio::time::Instant) -> Option<String> {
+        self.due = None;
+        let text = self.pending.take()?;
+        self.sent_at = Some(now);
+        self.shown = text.clone();
+        Some(text)
+    }
+}
+
 fn start_approvals(client: &ControlClient, cfg: &WorkerConfig, run_id: Uuid, stop: &watch::Sender<bool>) -> Result<Bridge> {
     anyhow::ensure!(cfg.approval_exe.is_some(), "this worker does not know its own executable");
     let (client, timeout, stop) = (client.clone(), cfg.approval_timeout, stop.subscribe());
@@ -810,9 +874,44 @@ pub fn default_worker_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_repo;
-    use sidefleet_core::RepoInfo;
+    use super::{resolve_repo, LiveText, LIVE_TEXT_EVERY};
+    use sidefleet_core::{NewEvent, RepoInfo, LIVE_TEXT};
+    use serde_json::json;
     use std::path::PathBuf;
+    use tokio::time::Instant;
+
+    fn live(text: &str) -> NewEvent {
+        NewEvent { kind: LIVE_TEXT.into(), payload: json!({"text": text}) }
+    }
+
+    #[test]
+    fn live_text_is_coalesced_and_never_batched_for_storage() {
+        let mut l = LiveText::default();
+        let mut batch = Vec::new();
+        let t0 = Instant::now();
+        l.route(live("Hello "), &mut batch, t0);
+        assert_eq!(l.due, Some(t0), "the first update goes out at once");
+        assert_eq!(l.take(t0).as_deref(), Some("Hello "));
+        // Updates within the interval replace each other; the newest goes when it is up.
+        l.route(live("Hello there "), &mut batch, t0);
+        l.route(NewEvent { kind: "stderr".into(), payload: json!({"text": "warn"}) }, &mut batch, t0);
+        l.route(live("Hello there friend "), &mut batch, t0);
+        assert_eq!(l.due, Some(t0 + LIVE_TEXT_EVERY));
+        assert_eq!(l.take(t0 + LIVE_TEXT_EVERY).as_deref(), Some("Hello there friend "));
+        assert_eq!(l.take(t0 + LIVE_TEXT_EVERY), None);
+        // The final message drops what was waiting, and the page needs no clearing after it.
+        l.route(live("Hello there friend, how "), &mut batch, t0);
+        l.route(NewEvent { kind: "assistant_text".into(), payload: json!({"text": "Hello there friend, how are you?"}) }, &mut batch, t0);
+        assert_eq!((l.pending.as_deref(), l.due), (None, None));
+        l.route(live(""), &mut batch, t0);
+        assert_eq!((l.pending.as_deref(), l.due), (None, None));
+        let kinds: Vec<&str> = batch.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["stderr", "assistant_text"]);
+        // A control plane without live text is asked no more.
+        l.off = true;
+        l.route(live("Next "), &mut batch, t0);
+        assert_eq!(l.due, None);
+    }
 
     fn r(name: &str, id: &str) -> RepoInfo {
         RepoInfo { name: name.into(), path: format!("/home/u/{name}"), id: id.into() }

@@ -199,6 +199,7 @@ async fn worker_claims_runs_and_streams_narration_live() {
             let mut stream = r.bytes_stream();
             let mut buf = String::new();
             let mut out: Vec<(RunEvent, std::time::Instant)> = Vec::new();
+            let mut live: Vec<String> = Vec::new();
             'outer: while let Ok(Some(Ok(b))) = tokio::time::timeout(Duration::from_secs(15), stream.next()).await {
                 buf.push_str(&String::from_utf8_lossy(&b));
                 while let Some(idx) = buf.find("\n\n") {
@@ -207,16 +208,20 @@ async fn worker_claims_runs_and_streams_narration_live() {
                     if frame.lines().any(|l| l.trim() == "event: end" || l.trim() == "event:end") {
                         break 'outer;
                     }
+                    let is_live = frame.lines().any(|l| l.strip_prefix("event:").is_some_and(|n| n.trim() == "assistant_live"));
                     for line in frame.lines() {
                         if let Some(d) = line.strip_prefix("data:") {
-                            if let Ok(ev) = serde_json::from_str::<RunEvent>(d.trim()) {
+                            if is_live {
+                                let v: serde_json::Value = serde_json::from_str(d.trim()).unwrap();
+                                live.push(v["payload"]["text"].as_str().unwrap().to_string());
+                            } else if let Ok(ev) = serde_json::from_str::<RunEvent>(d.trim()) {
                                 out.push((ev, std::time::Instant::now()));
                             }
                         }
                     }
                 }
             }
-            out
+            (out, live)
         }
     });
 
@@ -225,7 +230,11 @@ async fn worker_claims_runs_and_streams_narration_live() {
     assert!(run.started_at.is_some() && run.finished_at.is_some());
     assert!(run.result.unwrap()["result"].as_str().unwrap().contains("Model was claude-haiku-5-5"));
 
-    let events = collector.await.unwrap();
+    let (events, live) = collector.await.unwrap();
+    // The last message streamed to the page as it was written, ahead of the stored one.
+    let last = "The working tree has one untracked file.";
+    assert!(live.iter().any(|t| t.len() > "The working ".len()), "{live:?}");
+    assert!(live.iter().all(|t| last.starts_with(t.as_str())), "{live:?}");
     let kinds: Vec<&str> = events.iter().map(|(e, _)| e.kind.as_str()).collect();
     assert!(kinds.contains(&"stderr"), "{kinds:?}");
     // stderr interleaving relative to stdout is inherently unordered; check the stdout-derived order.

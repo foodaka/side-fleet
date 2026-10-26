@@ -1,5 +1,6 @@
-//! The "waiting on you" inbox: tasks that finished, failed, paused on a usage
-//! limit or lost their machine, until the developer opens or dismisses them.
+//! The "waiting on you" inbox: tasks that need a tool call approved, finished,
+//! failed, paused on a usage limit or lost their machine, until the developer
+//! opens or dismisses them (or, for an approval, it is answered).
 //!
 //! Attention is derived from runs and their events (see [`crate::attention`]);
 //! only what each viewer has seen is stored. A viewer is the signed-in user, or
@@ -26,7 +27,7 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sidefleet_core::RunStatus;
+use sidefleet_core::{summarize_tool_input, RunStatus};
 use sqlx::{PgPool, Row};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -37,9 +38,9 @@ use crate::push;
 use crate::AppState;
 
 /// Run event kinds that can move a task in or out of the inbox. The inbox
-/// recomputes the task's state when one is published. Approval events belong here
-/// once they exist (or call [`touch`] after changing approval state).
-pub const TRIGGER_KINDS: &[&str] = &["status", "usage_limit"];
+/// recomputes the task's state when one is published. State the inbox reads that
+/// changes without one of these needs a call to [`touch`].
+pub const TRIGGER_KINDS: &[&str] = &["status", "usage_limit", "approval_requested", "approval_decided"];
 
 /// Tasks whose latest run is older than this are not looked at.
 const WINDOW_DAYS: i32 = 30;
@@ -143,16 +144,34 @@ impl Inbox {
 
 // ---- deriving attention ----
 
-/// Approvals the developer has not answered, per task: since when and what for.
+/// Approvals the developer has not answered, per task: since when (the oldest
+/// pending one) and what for (its tool and a redacted one-line summary).
 ///
-/// Hook for tool-permission relaying: nothing records approvals yet, so this is
-/// empty. Fill it from wherever pending approvals are stored; the inbox then
-/// shows those tasks first with [`Reason::ApprovalNeeded`].
-pub async fn pending_approvals(_pool: &PgPool, _org: Uuid) -> sqlx::Result<HashMap<Uuid, (DateTime<Utc>, String)>> {
-    Ok(HashMap::new())
+/// One past its deadline counts as answered: it only becomes `expired` when the
+/// worker next reads it, and the agent has stopped waiting by then.
+pub async fn pending_approvals(pool: &PgPool, org: Uuid) -> sqlx::Result<HashMap<Uuid, (DateTime<Utc>, String)>> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (root_id) coalesce(r.parent_id, r.id) AS root_id, a.created_at, a.tool_name, a.input
+         FROM approvals a JOIN runs r ON r.id = a.run_id
+         WHERE a.status = 'pending' AND a.expires_at > now() AND a.org_id = $1 AND r.org_id = $1
+         ORDER BY root_id, a.created_at",
+    )
+    .bind(org)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let tool: String = r.get("tool_name");
+            let summary = summarize_tool_input(&tool, &r.get::<serde_json::Value, _>("input"));
+            let what = if summary.is_empty() { tool } else { format!("{tool}: {summary}") };
+            (r.get("root_id"), (r.get("created_at"), what))
+        })
+        .collect())
 }
 
-/// Every task of `org` (or just `root`) that waits on someone, newest first.
+/// Every task of `org` (or just `root`) that waits on someone: those waiting for
+/// an approval first, then newest first.
 async fn waiting(pool: &PgPool, org: Uuid, root: Option<Uuid>) -> sqlx::Result<Vec<InboxItem>> {
     let rows = sqlx::query(
         "SELECT root.id AS root_id, root.task AS title, root.repo, l.id AS run_id, l.agent, l.status, l.kind,
@@ -212,7 +231,8 @@ async fn waiting(pool: &PgPool, org: Uuid, root: Option<Uuid>) -> sqlx::Result<V
             });
         }
     }
-    out.sort_by_key(|i| std::cmp::Reverse(i.since));
+    // An agent blocked on a tool call comes before everything else, then newest first.
+    out.sort_by_key(|i| std::cmp::Reverse((i.reason == Reason::ApprovalNeeded, i.since)));
     Ok(out)
 }
 

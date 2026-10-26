@@ -67,9 +67,10 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   WhatsApp or Discord: "fix the failing test in my web repo", "how did it go?", "open a PR". You
   choose what it may do: check on tasks, run them, or also approve commands. With updates in chat
   on, it messages you when a task finishes, fails or needs your OK, and you answer right there.
-- **Permission modes**: read and edit files (default), full access for unattended commands, read
-  only for questions, or "Ask me": Claude Code edits files on its own and asks you on the page
-  (phone included) before anything else, such as a shell command, and waits for Approve or Deny.
+- **Permission modes**: full access for unattended commands (the default for new tasks on the
+  page), read and edit files, read only for questions, or "Ask me": Claude Code edits files on its
+  own and asks you on the page (phone included) before anything else, such as a shell command,
+  and waits for Approve or Deny.
 - **Zero-config workers**: `connect` checks which agents are installed and signed in, finds your
   git checkouts (repos match by their git remote, whatever the folder is called), and installs a
   launchd or systemd service that survives reboots. Or click "Copy prompt" and let Claude Code or

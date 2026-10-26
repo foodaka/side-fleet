@@ -3,7 +3,6 @@
 	import { goto } from '$app/navigation';
 	import { untrack } from 'svelte';
 	import { toast } from 'svelte-sonner';
-	import * as Select from '#lib/components/ui/select';
 	import { Button } from '#lib/components/ui/button';
 	import { Conversation, ConversationContent, ConversationScrollButton } from '#lib/components/ai-elements/conversation';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
@@ -15,7 +14,7 @@
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
 	import type { AgentId, Run } from '#lib/sf/types';
-	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, permName, permsFor, repoLabel } from '#lib/sf/format';
+	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
@@ -23,6 +22,7 @@
 	import PrIcon from '#lib/sf/ui/PrIcon.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
+	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
@@ -326,7 +326,7 @@
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
 					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
-					<div class="flex flex-wrap items-center gap-2 px-2.5 pb-2.5 max-sm:flex-nowrap max-sm:gap-1.5">
+					<div class="flex flex-wrap items-center gap-0.5 px-2 pb-2 max-sm:flex-nowrap">
 						<AgentModelPicker
 							bind:agent
 							bind:model
@@ -337,16 +337,8 @@
 							unavailable={(a) => (!host.length || host.some((w) => hasAgent(w, a)) ? '' : `Not on ${thread?.machine}`)}
 							onagent={(a) => { model = lastModel(a); effort = lastEffort(a); }}
 						/>
-						<Select.Root type="single" value={replyPerm} onValueChange={(v) => (perm = v)}>
-							<Select.Trigger size="sm" class="h-7 min-w-0 rounded-full border-transparent bg-muted text-xs shadow-none hover:bg-accent max-sm:[&>span]:truncate" aria-label="Permissions for this reply">
-								{#if replyPerm}{permName(replyPerm)}{:else if latest?.permission_mode}<span class="max-sm:hidden">Same permissions ({permName(latest.permission_mode)})</span><span class="sm:hidden">{permName(latest.permission_mode)}</span>{:else}Same permissions{/if}
-							</Select.Trigger>
-							<Select.Content>
-								<Select.Item value="" label="Same permissions">Same permissions</Select.Item>
-								{#each permsFor(agent) as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{p.hint}</span></span></Select.Item>{/each}
-							</Select.Content>
-						</Select.Root>
-						<span class="hidden min-w-0 truncate text-xs text-faint sm:inline">{hint}</span>
+						<ComposerOptions {agent} perm={replyPerm} onperm={(v) => (perm = v)} defaultPerm="" sameAs={latest?.permission_mode ?? null} size="sm" />
+						<span class="hidden min-w-0 flex-1 basis-0 truncate px-1 text-xs text-faint sm:inline" title={hint}>{hint}</span>
 						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canReply} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
 							<Paperclip class="size-4" />
 						</button>

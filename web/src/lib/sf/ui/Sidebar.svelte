@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { setMode, userPrefersMode } from 'mode-watcher';
 	import * as Tooltip from '#lib/components/ui/tooltip';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
@@ -126,7 +127,7 @@
 			</a>
 		{/each}
 		<DropdownMenu.Root bind:open={settingsOpen}>
-			<DropdownMenu.Trigger class="{item(false)} w-full data-[state=open]:bg-sidebar-accent data-[state=open]:text-foreground">
+			<DropdownMenu.Trigger class="{item(path === '/settings')} w-full data-[state=open]:bg-sidebar-accent data-[state=open]:text-foreground">
 				<Settings size={14} animate={settingsOpen} />Settings
 			</DropdownMenu.Trigger>
 			<DropdownMenu.Content align="start" side="top" class="w-60">
@@ -137,6 +138,7 @@
 					<DropdownMenu.RadioItem value="dark">Dark</DropdownMenu.RadioItem>
 				</DropdownMenu.RadioGroup>
 				<DropdownMenu.Separator />
+				<DropdownMenu.Item onclick={() => goto('#/settings')}>All settings…</DropdownMenu.Item>
 				<DropdownMenu.Item onclick={() => (fleet.pickerOpen = true)}>Choose repos…</DropdownMenu.Item>
 				{#if fleet.me?.user}
 					<DropdownMenu.Separator />

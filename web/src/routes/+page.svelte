@@ -12,6 +12,7 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
+	import { prefs } from '#lib/sf/prefs.svelte';
 	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
@@ -140,7 +141,7 @@
 	}
 
 	function keydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) run(e);
+		if (prefs.sends(e, 'task')) run(e);
 	}
 	function grow() {
 		if (!box) return;
@@ -150,7 +151,6 @@
 	$effect(() => { void task; grow(); });
 
 	const recent = $derived(fleet.runs.slice(0, 6));
-	const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 	const noMachines = $derived(fleet.loaded && fleet.online.length === 0);
 	const examples = [
 		'Find why the login test is flaky and fix it',
@@ -299,7 +299,7 @@
 							<Paperclip class="size-4" />
 						</button>
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-						<span class="hidden items-center gap-1 text-xs text-faint sm:flex"><Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd><Kbd>↵</Kbd></span>
+						<a href="#/settings" title="Change which key sends in Settings" class="hidden items-center gap-1 text-xs text-faint hover:text-muted-foreground sm:flex pointer-coarse:hidden">{#each prefs.sendKeys('task') as k (k)}<Kbd>{k}</Kbd>{/each}</a>
 						<button type="submit" disabled={!canRun} aria-label="Run task" class="grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />
 						</button>

@@ -19,8 +19,8 @@ pub enum Reason {
     UsageLimit,
     /// The machine running it dropped: the run failed, or it was moved and waits for another machine.
     MachineLost,
-    /// The agent asked for permission to use a tool. Filled in by
-    /// [`crate::inbox::pending_approvals`]; nothing reports it yet.
+    /// The agent asked for permission to use a tool and waits for an answer
+    /// (see [`crate::inbox::pending_approvals`]).
     ApprovalNeeded,
 }
 
@@ -61,7 +61,8 @@ pub struct Attention {
     /// When the task started waiting. It stays in the inbox until the developer
     /// has seen it after this time.
     pub since: DateTime<Utc>,
-    /// Extra structured detail (never agent output): when a limit resets, or that the task moved.
+    /// Extra structured detail (never agent output): when a limit resets, that the
+    /// task moved, or which tool call waits for approval (redacted, one line).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

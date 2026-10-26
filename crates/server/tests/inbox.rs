@@ -1,7 +1,8 @@
-//! The "waiting on you" inbox end to end: tasks enter it when they finish, fail,
-//! hit a usage limit or lose their machine, leave it when opened, replied to or
-//! dismissed, per viewer; the SSE stream follows along and opted-in browsers get
-//! a web push. Needs Postgres (docker compose up -d).
+//! The "waiting on you" inbox end to end: tasks enter it when a tool call needs
+//! approval, or they finish, fail, hit a usage limit or lose their machine, and
+//! leave it when answered, opened, replied to or dismissed, per viewer; the SSE
+//! stream follows along and opted-in browsers get a web push. Needs Postgres
+//! (docker compose up -d).
 
 use std::time::Duration;
 
@@ -69,6 +70,11 @@ impl Api {
         assert_eq!(s, StatusCode::OK, "{v}");
         v["items"].as_array().unwrap().iter().map(|i| (i["id"].as_str().unwrap().to_string(), i["reason"].as_str().unwrap().to_string())).collect()
     }
+    /// Approve or deny (`verb`) a tool call of `run`.
+    async fn decide(&self, run: &str, approval: &str, verb: &str) {
+        let (s, v) = self.call(Method::POST, &format!("/v1/runs/{run}/approvals/{approval}/{verb}"), None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
     async fn dismiss(&self, id: &str) {
         let (s, v) = self.call(Method::POST, &format!("/v1/inbox/{id}/dismiss"), None).await;
         assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
@@ -103,6 +109,13 @@ impl Machine {
     async fn claim(&self) -> String {
         let (s, v) = self.call("/v1/worker/claim", json!({"worker_id": self.id, "repos": ["proj"], "busy_repos": [], "agents": ["claude"]})).await;
         assert_eq!(s, StatusCode::OK, "nothing to claim: {v}");
+        v["id"].as_str().unwrap().to_string()
+    }
+    /// Ask whether a tool call of `run` may go ahead; returns the approval's id.
+    async fn ask(&self, run: &str, tool: &str, input: Value, timeout_secs: Option<u64>) -> String {
+        let body = json!({"tool_name": tool, "input": input, "timeout_secs": timeout_secs});
+        let (s, v) = self.call(&format!("/v1/worker/runs/{run}/approvals?worker_id={}", self.id), body).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
         v["id"].as_str().unwrap().to_string()
     }
     async fn finish(&self, run: &str, status: &str, extra: Value) {
@@ -242,6 +255,76 @@ async fn each_person_has_their_own_inbox() {
 
     // The developer key's inbox is the default org's: none of this.
     assert!(Api::dev(&env).inbox().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_tool_call_waiting_for_approval_puts_its_task_first_until_answered() {
+    let env = TestEnv::start().await;
+    let api = Api::dev(&env);
+    let m = Machine::start(&env, WORKER_TOKEN, "box").await;
+    let m2 = Machine::start(&env, WORKER_TOKEN, "box2").await;
+
+    let done = api.create_run("Done earlier", json!({})).await;
+    m.claim().await;
+    m.finish(&done, "succeeded", json!({})).await;
+
+    let a = api.create_run("Asks first", json!({"permission_mode": "ask"})).await;
+    assert_eq!(m.claim().await, a);
+    assert_eq!(api.inbox().await, vec![(done.clone(), "finished".into())], "running is not news");
+
+    // Asking puts it in the inbox, with what it wants to do.
+    let first = m.ask(&a, "Bash", json!({"command": "rm -rf build"}), None).await;
+    assert_eq!(api.inbox().await, vec![(a.clone(), "approval_needed".into()), (done.clone(), "finished".into())]);
+    let (_, v) = api.call(Method::GET, "/v1/inbox", None).await;
+    assert_eq!(v["items"][0]["label"], "Needs your approval");
+    assert_eq!(v["items"][0]["detail"], "Bash: rm -rf build");
+    assert_eq!(v["items"][0]["run_id"], a.as_str());
+
+    // It outranks a task that finished after it asked.
+    let later = api.create_run("Finished later", json!({})).await;
+    m2.claim().await;
+    m2.finish(&later, "succeeded", json!({})).await;
+    assert_eq!(ids(&api.inbox().await), [a.as_str(), later.as_str(), done.as_str()]);
+
+    // A second question while the first waits: still one entry, for the first.
+    let second = m.ask(&a, "WebFetch", json!({"url": "https://example.com"}), None).await;
+    let (_, v) = api.call(Method::GET, "/v1/inbox", None).await;
+    assert_eq!(v["items"][0]["detail"], "Bash: rm -rf build");
+    api.decide(&a, &first, "approve").await;
+    let (_, v) = api.call(Method::GET, "/v1/inbox", None).await;
+    assert_eq!((v["items"][0]["id"].as_str(), v["items"][0]["detail"].as_str()), (Some(a.as_str()), Some("WebFetch: https://example.com")));
+
+    // Answered: the agent is back at work and the task leaves the inbox.
+    api.decide(&a, &second, "deny").await;
+    assert_eq!(ids(&api.inbox().await), [later.as_str(), done.as_str()]);
+
+    // Asked again and approved: in, then out.
+    let third = m.ask(&a, "Edit", json!({"file_path": "src/main.rs"}), None).await;
+    assert_eq!(api.inbox().await[0], (a.clone(), "approval_needed".into()));
+    api.decide(&a, &third, "approve").await;
+    assert_eq!(ids(&api.inbox().await), [later.as_str(), done.as_str()]);
+
+    // Past its deadline it no longer counts, even before the worker reads it and it turns expired.
+    m.ask(&a, "Bash", json!({"command": "make"}), Some(1)).await;
+    assert_eq!(api.inbox().await[0].1, "approval_needed");
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(ids(&api.inbox().await), [later.as_str(), done.as_str()]);
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM approvals WHERE status = 'pending'").fetch_one(&env.pool).await.unwrap();
+    assert_eq!(pending, 1, "still pending in the table");
+
+    // The run ending cancels what it asked: the task is then simply finished.
+    m.ask(&a, "Bash", json!({"command": "make test"}), None).await;
+    assert_eq!(api.inbox().await[0].1, "approval_needed");
+    m.finish(&a, "succeeded", json!({})).await;
+    assert_eq!(api.inbox().await, vec![(a.clone(), "finished".into()), (later.clone(), "finished".into()), (done.clone(), "finished".into())]);
+
+    // A follow-up's question belongs to its task.
+    let r = api.reply(&a).await;
+    assert_eq!(m.claim().await, r);
+    let q = m.ask(&r, "Bash", json!({"command": "ls"}), None).await;
+    assert_eq!(api.inbox().await[0], (a.clone(), "approval_needed".into()));
+    api.decide(&r, &q, "approve").await;
+    assert_eq!(ids(&api.inbox().await), [later.as_str(), done.as_str()]);
 }
 
 /// Next `inbox` event's items from an SSE response, within `timeout`.
@@ -401,6 +484,56 @@ async fn opted_in_browsers_get_a_push_with_only_title_and_reason() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM push_subscriptions").fetch_one(&env.pool).await.unwrap();
     assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn each_approval_wait_is_pushed_once() {
+    let key = generate_private_key();
+    let env = TestEnv::start_with(|c| c.vapid = Some(Vapid::from_private_key(&key, DEFAULT_SUBJECT).unwrap())).await;
+    env.state.inbox.allow_any_push_host(true);
+    env.state.inbox.set_push_delay(Duration::from_millis(300));
+    let api = Api::dev(&env);
+    let m = Machine::start(&env, WORKER_TOKEN, "box").await;
+    let (push_base, mut pushes) = fake_push_service().await;
+    let (secret, auth, sub) = browser(&format!("{push_base}/push/phone"));
+    let (s, _) = api.call(Method::POST, "/v1/push/subscriptions", Some(sub)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let next_push = |pushes: &mut mpsc::UnboundedReceiver<(String, String, Vec<u8>)>| {
+        let body = pushes.try_recv().expect("a push").2;
+        let plain = web_push_native::decrypt(body, &secret, web_push_native::Auth::from_slice(&auth)).unwrap();
+        serde_json::from_slice::<Value>(&plain).unwrap()
+    };
+
+    let a = api.create_run("Clean the build", json!({"permission_mode": "ask"})).await;
+    m.claim().await;
+    let first = m.ask(&a, "Bash", json!({"command": "rm -rf build"}), None).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let msg = next_push(&mut pushes);
+    assert_eq!((msg["reason"].as_str(), msg["title"].as_str()), (Some("approval_needed"), Some("Clean the build")));
+    assert_eq!(msg["label"], "Needs your approval");
+    assert!(!msg.to_string().contains("rm -rf"), "the tool call stays off the push: {msg}");
+
+    // Another question during the same wait: no second push.
+    let second = m.ask(&a, "Bash", json!({"command": "make"}), None).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(pushes.try_recv().is_err(), "one push per wait");
+
+    // Answered, then a new question later: a new wait, a new push.
+    api.decide(&a, &first, "approve").await;
+    api.decide(&a, &second, "approve").await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(pushes.try_recv().is_err(), "an answer is not pushed");
+    let third = m.ask(&a, "Bash", json!({"command": "make test"}), None).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(next_push(&mut pushes)["reason"], "approval_needed");
+
+    // Answered before the push went out: no push.
+    env.state.inbox.set_push_delay(Duration::from_millis(1500));
+    api.decide(&a, &third, "approve").await;
+    let fourth = m.ask(&a, "Bash", json!({"command": "make lint"}), None).await;
+    api.decide(&a, &fourth, "deny").await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(pushes.try_recv().is_err(), "an approval answered right away is not pushed");
 }
 
 #[tokio::test]

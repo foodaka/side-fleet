@@ -1,6 +1,7 @@
 <script lang="ts">
 	import './layout.css';
 	import { page } from '$app/state';
+	import { afterNavigate, beforeNavigate } from '$app/navigation';
 	import { onMount, untrack } from 'svelte';
 	import { Dialog as DialogPrimitive } from 'bits-ui';
 	import { ModeWatcher } from 'mode-watcher';
@@ -24,6 +25,26 @@
 
 	let { children }: LayoutProps = $props();
 	onMount(() => fleet.start());
+
+	// A deploy replaces the hashed page chunks, so a tab opened before it can't load a page it
+	// hasn't visited yet (it 404s and SvelteKit shows "500 Internal Error"). Reload onto the page
+	// it was heading to instead, at most once a minute so a genuinely missing chunk can't loop.
+	const RELOADED = 'sidefleet_stale_reload';
+	let heading: URL | null = null;
+	beforeNavigate(({ to }) => { heading = to?.url ?? null; });
+	afterNavigate(() => { heading = null; });
+	onMount(() => {
+		const stale = () => {
+			try {
+				if (Date.now() - Number(sessionStorage.getItem(RELOADED) ?? 0) < 60_000) return;
+				sessionStorage.setItem(RELOADED, String(Date.now()));
+			} catch { /* storage blocked */ }
+			if (heading) history.replaceState(history.state, '', heading.href);
+			location.reload();
+		};
+		window.addEventListener('vite:preloadError', stale);
+		return () => window.removeEventListener('vite:preloadError', stale);
+	});
 
 	const path = $derived(page.url.hash.replace(/^#/, '') || '/');
 	const running = $derived(fleet.runs.filter((r) => r.thread_status === 'running').length);

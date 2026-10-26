@@ -11,7 +11,6 @@ use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 /// Process groups of agents currently running, so a shutting-down worker can
@@ -292,7 +291,7 @@ pub async fn execute(
         }
     };
 
-    let mut cmd = Command::new(&spec.bin);
+    let mut cmd = crate::detect::agent_command(&spec.bin);
     cmd.args(spec.args())
         .envs(spec.env())
         .current_dir(&spec.cwd)

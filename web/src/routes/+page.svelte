@@ -4,7 +4,6 @@
 	import { Kbd } from '#lib/components/ui/kbd';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import Check from '@lucide/svelte/icons/check';
-	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import Cpu from '@lucide/svelte/icons/cpu';
 	import MemoryStick from '@lucide/svelte/icons/memory-stick';
@@ -12,17 +11,17 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, MODELS, PERMISSIONS, WORKSPACES, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, permHint, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, WORKSPACES, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
+	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
 	const PICK = '__pick__';
-	const ANY = '__any__';
 	let task = $state('');
 	const savedAgent: AgentId = AGENTS.some((a) => a.id === load('sidefleet_agent')) ? (load('sidefleet_agent') as AgentId) : 'claude';
 	let agent = $state<AgentId>(savedAgent);
@@ -40,7 +39,8 @@
 	const initialEffort = (a: AgentId) => (effortValid(a, load(effortKey(a))) ? load(effortKey(a)) : '');
 	let effort = $state(initialEffort(savedAgent));
 	let machine = $state(load('sidefleet_machine'));
-	let perm = $state(PERMISSIONS.some((p) => p.id === load('sidefleet_perm')) ? load('sidefleet_perm') : 'acceptEdits');
+	// Every new task starts with full access; a narrower mode is chosen per task and not remembered.
+	let perm = $state('bypassPermissions');
 	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
 	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
 	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
@@ -116,7 +116,7 @@
 	}
 
 	function pickMachine(v: string) {
-		machine = v === ANY ? '' : v;
+		machine = v;
 		save('sidefleet_machine', machine);
 	}
 
@@ -145,7 +145,7 @@
 	function grow() {
 		if (!box) return;
 		box.style.height = 'auto';
-		box.style.height = Math.min(window.innerHeight * 0.55, Math.max(88, box.scrollHeight)) + 'px';
+		box.style.height = Math.min(window.innerHeight * 0.55, Math.max(72, box.scrollHeight)) + 'px';
 	}
 	$effect(() => { void task; grow(); });
 
@@ -163,7 +163,7 @@
 <svelte:window ondragenter={attachments.dragenter} ondragleave={attachments.dragleave} ondragover={attachments.dragover} ondrop={attachments.drop} />
 
 {#if !fleet.loaded}
-	<div class="mx-auto mt-[18vh] w-full max-w-2xl px-4">
+	<div class="mx-auto mt-[18vh] w-full max-w-3xl px-4">
 		<div class="h-8 w-56 animate-pulse rounded-md bg-muted"></div>
 		<div class="mt-6 h-40 animate-pulse rounded-2xl bg-muted"></div>
 	</div>
@@ -195,7 +195,7 @@
 		</p>
 	</section>
 {:else}
-	<section class="mx-auto flex w-full max-w-2xl flex-col gap-10 px-4 pt-[14vh] pb-16">
+	<section class="mx-auto flex w-full max-w-3xl flex-col gap-10 px-4 pt-[14vh] pb-16">
 		<form class="flex flex-col gap-3" onsubmit={run}>
 			{#if !fleet.runs.length}
 				<ol class="mb-4 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground" aria-label="Getting started">
@@ -218,13 +218,13 @@
 					bind:value={task}
 					onkeydown={keydown}
 					onpaste={attachments.paste}
-					rows="3"
+					rows="2"
 					placeholder="Describe the task. It runs in a repo on one of your machines."
-					class="block max-h-[55vh] min-h-[88px] w-full resize-none bg-transparent px-4 pt-4 pb-2 text-[15px] leading-relaxed outline-none placeholder:text-faint"
+					class="block max-h-[55vh] min-h-[72px] w-full resize-none bg-transparent px-4 pt-4 pb-1 text-[15px] leading-relaxed outline-none placeholder:text-faint"
 				></textarea>
 				<AttachedImages {attachments} class="px-4 pt-1 pb-3" />
-				<div class="flex items-end gap-2 px-3 pb-3">
-					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+				<div class="flex items-end gap-2 px-2.5 pb-2.5">
+					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-0.5">
 					<AgentModelPicker
 						bind:agent
 						bind:model
@@ -237,7 +237,7 @@
 					/>
 
 					<Select.Root type="single" value={repo} onValueChange={pickRepo}>
-						<Select.Trigger size="sm" class="h-8 max-w-[15rem] rounded-full border-transparent bg-muted font-mono text-[12.5px] shadow-none hover:bg-accent" aria-label="Repo">
+						<Select.Trigger size="sm" class="h-8 max-w-[15rem] rounded-full border-transparent bg-transparent px-2.5 font-mono text-[12.5px] shadow-none hover:bg-accent dark:bg-transparent dark:hover:bg-accent data-[state=open]:bg-accent [&>svg:last-child]:size-3.5 [&>svg:last-child]:opacity-60" aria-label="Repo">
 							<span class="truncate">{repoLabel(repo) || 'Choose a repo'}</span>
 						</Select.Trigger>
 						<Select.Content class="max-h-80">
@@ -249,49 +249,18 @@
 						</Select.Content>
 					</Select.Root>
 
-					{#if machines.length > 1}
-						<Select.Root type="single" value={pinned?.id ?? ANY} onValueChange={pickMachine}>
-							<Select.Trigger size="sm" class="h-8 max-w-[12rem] rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Machine">
-								<span class="truncate">{pinned?.display_name ?? 'Any machine'}</span>
-							</Select.Trigger>
-							<Select.Content>
-								<Select.Item value={ANY} label="Any machine"><span class="flex flex-col"><span>Any machine</span><span class="text-xs text-muted-foreground">The first one with a free slot</span></span></Select.Item>
-								<Select.Separator />
-								{#each machines as w (w.id)}
-									<Select.Item value={w.id} label={w.display_name}>
-										<span class="flex flex-col"><span>{w.display_name}</span>{#if w.capabilities.slots}<span class="tnum text-xs text-muted-foreground">{w.capabilities.slots.active} of {w.capabilities.slots.parallel} slots busy</span>{/if}</span>
-									</Select.Item>
-								{/each}
-							</Select.Content>
-						</Select.Root>
-					{/if}
-
-					<Select.Root type="single" value={effectivePerm} onValueChange={(v) => { perm = v; save('sidefleet_perm', v); }}>
-						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Permissions">{PERMISSIONS.find((p) => p.id === effectivePerm)?.name}</Select.Trigger>
-						<Select.Content>
-							{#each permsFor(agent) as p (p.id)}<Select.Item value={p.id} label={p.name}><span class="flex flex-col"><span>{p.name}</span><span class="text-xs text-muted-foreground">{permHint(p.id, agent)}</span></span></Select.Item>{/each}
-						</Select.Content>
-					</Select.Root>
-
-					<Select.Root type="single" value={iso} onValueChange={(v) => { iso = v; save('sidefleet_iso', v); }}>
-						<Select.Trigger size="sm" class="h-8 rounded-full border-transparent bg-muted text-[13px] shadow-none hover:bg-accent" aria-label="Workspace">{WORKSPACES.find((w) => w.id === iso)?.name}</Select.Trigger>
-						<Select.Content>
-							{#each WORKSPACES as w (w.id)}<Select.Item value={w.id} label={w.name}><span class="flex flex-col"><span>{w.name}</span><span class="text-xs text-muted-foreground">{w.hint}</span></span></Select.Item>{/each}
-						</Select.Content>
-					</Select.Root>
-
-					{#if iso === 'worktree'}
-						<button
-							type="button"
-							aria-pressed={failover}
-							onclick={() => (failover = !failover)}
-							title="Move to another machine if this one drops. Pushes checkpoints of the task's branch to origin while it runs."
-							class="inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[13px] {failover ? 'bg-primary/10 text-foreground ring-1 ring-primary/25' : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'}"
-						>
-							<ArrowRightLeft class="size-3.5" />Move if it drops
-						</button>
-					{/if}
-
+					<ComposerOptions
+						{agent}
+						perm={effectivePerm}
+						onperm={(v) => (perm = v)}
+						defaultPerm="bypassPermissions"
+						{machines}
+						machine={pinned?.id ?? ''}
+						onmachine={pickMachine}
+						{iso}
+						oniso={(v) => { iso = v; save('sidefleet_iso', v); }}
+						bind:failover
+					/>
 					</div>
 					<span class="flex shrink-0 items-center gap-2">
 						{#if task.length > 2000}<span class="tnum text-xs text-faint">{task.length.toLocaleString()} characters</span>{/if}
@@ -299,7 +268,7 @@
 							<Paperclip class="size-4" />
 						</button>
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-						<span class="hidden items-center gap-1 text-xs text-faint sm:flex"><Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd><Kbd>↵</Kbd></span>
+						{#if task.trim()}<span class="hidden items-center gap-1 text-xs text-faint sm:flex"><Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd><Kbd>↵</Kbd></span>{/if}
 						<button type="submit" disabled={!canRun} aria-label="Run task" class="grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />
 						</button>
@@ -316,7 +285,7 @@
 						Runs with {agentName(agent)} on whichever of the {machines.length} machines with this repo is free first
 					{:else}
 						Runs with {agentName(agent)} on <span class="text-foreground">{target.display_name}</span>{#if warning}, <span class="text-err-ink">{warning}</span>{/if}
-					{/if}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
+					{/if}{effectivePerm === 'bypassPermissions' ? ' with full access' : ''}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
 					{#if iso === 'worktree' && failover}<br />If that machine drops, the task moves to another one; its branch is pushed to origin as it goes.{/if}
 				{/if}
 			</p>

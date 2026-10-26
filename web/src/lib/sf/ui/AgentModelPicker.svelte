@@ -3,7 +3,7 @@
 	// Claude's model aliases, the machine's Codex models, or a searchable field for opencode;
 	// then the reasoning effort, for the agents that take one.
 	import * as Select from '#lib/components/ui/select';
-	import Brain from '@lucide/svelte/icons/brain';
+	import GaugeIcon from '@lucide/svelte/icons/gauge';
 	import { AGENTS, EFFORTS, MODELS, agentName, effortName, effortValid, modelName, modelValid } from '../format';
 	import type { AgentId } from '../types';
 	import AgentIcon from './AgentIcon.svelte';
@@ -39,7 +39,8 @@
 	const efforts = $derived(EFFORTS[agent]);
 
 	const ok = $derived(modelValid(agent, model));
-	const pill = $derived(`${size === 'sm' ? 'h-7' : 'h-8'} rounded-full border-transparent bg-muted shadow-none hover:bg-accent`);
+	// Quiet controls: no fill at rest, the same hover as the composer's other buttons.
+	const pill = $derived(`${size === 'sm' ? 'h-7' : 'h-8'} rounded-full border-transparent bg-transparent px-2.5 shadow-none hover:bg-accent dark:bg-transparent dark:hover:bg-accent data-[state=open]:bg-accent [&>svg:last-child]:size-3.5 [&>svg:last-child]:opacity-60`);
 	const text = $derived(size === 'sm' ? 'text-xs' : 'text-[13px]');
 	const mono = $derived(size === 'sm' ? 'text-[11.5px]' : 'text-[12.5px]');
 
@@ -100,14 +101,14 @@
 		placeholder="Default model"
 		spellcheck="false"
 		autocomplete="off"
-		class="{size === 'sm' ? 'h-7 w-[13rem]' : 'h-8 w-[15rem]'} max-w-full rounded-full bg-muted px-3 font-mono {mono} outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {ok ? '' : 'text-err-ink'}"
+		class="{size === 'sm' ? 'h-7 w-[13rem]' : 'h-8 w-[15rem]'} max-w-full rounded-full bg-transparent px-3 font-mono {mono} outline-none placeholder:text-muted-foreground hover:bg-accent focus:bg-accent {ok ? '' : 'text-err-ink'}"
 	/>
 	<datalist id="{id}-options">{#each models as m (m)}<option value={m}></option>{/each}</datalist>
 {/if}
 
 {#if efforts.length}
 	<Select.Root type="single" value={effort} onValueChange={pickEffort}>
-		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Reasoning effort"><Brain class={size === 'sm' ? 'size-3.5' : 'size-4'} strokeWidth={1.75} />{effort ? effortName(agent, effort) : size === 'sm' ? 'Effort' : 'Default effort'}</Select.Trigger>
+		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Reasoning effort"><GaugeIcon class="size-3.5 text-muted-foreground" />{#if effort}{effortName(agent, effort)}{:else}<span class="text-muted-foreground">Effort</span>{/if}</Select.Trigger>
 		<Select.Content>
 			<Select.Group>
 				<Select.GroupHeading>Reasoning</Select.GroupHeading>

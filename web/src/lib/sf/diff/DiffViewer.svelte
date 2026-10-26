@@ -17,6 +17,7 @@
 	import { Dialog as DialogPrimitive } from 'bits-ui';
 	import { tick, untrack } from 'svelte';
 	import * as Select from '#lib/components/ui/select';
+	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import X from '@lucide/svelte/icons/x';
 	import Folder from '@lucide/svelte/icons/folder';
 	import Check from '@lucide/svelte/icons/check';
@@ -27,6 +28,9 @@
 	import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
 	import FoldVertical from '@lucide/svelte/icons/fold-vertical';
 	import UnfoldVertical from '@lucide/svelte/icons/unfold-vertical';
+	import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
+	import { goto } from '$app/navigation';
+	import { prefs } from '../prefs.svelte';
 	import DiffStat from './DiffStat.svelte';
 	import FileDiff from './FileDiff.svelte';
 	import FileStatus from './FileStatus.svelte';
@@ -41,9 +45,8 @@
 
 	const current = $derived(scopes.find((s) => s.id === scope) ?? scopes[0]);
 
-	let view = $state<'unified' | 'split'>((typeof localStorage !== 'undefined' && (localStorage.getItem('sf.diffView') as 'split')) || 'unified');
+	const view = $derived(prefs.diffView);
 	let tree = $state(typeof localStorage === 'undefined' || localStorage.getItem('sf.diffTree') !== 'off');
-	$effect(() => { localStorage.setItem('sf.diffView', view); });
 	$effect(() => { localStorage.setItem('sf.diffTree', tree ? 'on' : 'off'); });
 
 	// The tree, with single-child folders folded into one row ("src/lib/sf").
@@ -106,6 +109,18 @@
 		}
 	}
 
+	// With "start collapsed" on, each set of changes opens folded the first time (bar the file asked for).
+	const folded = new Set<string>();
+	$effect(() => {
+		if (!open || !prefs.diffCollapsed || !current || files.length < 2) return;
+		const id = current.id, paths = files.map((f) => f.path), target = focus;
+		untrack(() => {
+			if (folded.has(id)) return;
+			folded.add(id);
+			for (const p of paths) if (p !== target) closed.add(`${id}\u0000${p}`);
+		});
+	});
+
 	let scroller = $state<HTMLElement>();
 	let active = $state<string | null>(null);
 	async function jump(path: string) {
@@ -151,6 +166,8 @@
 			if (next) void jump(next.path);
 		} else if (e.key === 'v' && active) {
 			setViewed(active, !viewedFiles.has(vkey(active)));
+		} else if (e.key === 'w') {
+			prefs.set({ diffHideWhitespace: !prefs.diffHideWhitespace });
 		}
 	}
 </script>
@@ -214,12 +231,32 @@
 								role="radio"
 								aria-checked={view === o.id}
 								class="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] transition-colors {view === o.id ? 'bg-card font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}"
-								onclick={() => (view = o.id as typeof view)}
+								onclick={() => prefs.set({ diffView: o.id as typeof view })}
 							>
 								<o.icon class="size-3.5" />{o.label}
 							</button>
 						{/each}
 					</div>
+					<DropdownMenu.Root>
+						<DropdownMenu.Trigger
+							class="relative grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground data-[state=open]:bg-muted data-[state=open]:text-foreground"
+							aria-label="View options"
+							title="View options"
+						>
+							<SlidersHorizontal class="size-4" />
+							{#if prefs.diffHideWhitespace}<span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary" aria-hidden="true"></span>{/if}
+						</DropdownMenu.Trigger>
+						<DropdownMenu.Content align="end" class="w-64">
+							<DropdownMenu.CheckboxItem checked={prefs.diffHideWhitespace} onCheckedChange={(v) => prefs.set({ diffHideWhitespace: v })}>
+								<span class="flex-1">Hide whitespace changes</span><kbd class="rounded border bg-card px-1 font-mono text-[10.5px] text-muted-foreground pointer-coarse:hidden">w</kbd>
+							</DropdownMenu.CheckboxItem>
+							<DropdownMenu.CheckboxItem checked={prefs.diffCollapsed} onCheckedChange={(v) => prefs.set({ diffCollapsed: v })}>
+								Open with files collapsed
+							</DropdownMenu.CheckboxItem>
+							<DropdownMenu.Separator />
+							<DropdownMenu.Item onclick={() => { open = false; void goto('#/settings'); }}>All settings…</DropdownMenu.Item>
+						</DropdownMenu.Content>
+					</DropdownMenu.Root>
 					<DialogPrimitive.Close class="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Close">
 						<X class="size-4" />
 					</DialogPrimitive.Close>

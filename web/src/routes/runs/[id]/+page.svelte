@@ -26,6 +26,8 @@
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
+	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
+	import { prefs } from '#lib/sf/prefs.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 	import FileDiffIcon from '@lucide/svelte/icons/file-diff';
@@ -167,6 +169,13 @@
 		}
 		opening = false;
 	}
+	// Stopping asks first, unless you said not to.
+	let stopAsk = $state(false);
+	const queued = $derived(Math.max(0, (thread?.runs.filter((r) => r.status === 'queued' || r.status === 'running').length ?? 0) - 1));
+	function askStop() {
+		if (prefs.confirmStop) stopAsk = true;
+		else void stop();
+	}
 	async function stop() {
 		stopping = true;
 		try { await thread?.stop(); } catch (err) { toast.error('Could not stop', { description: (err as Error).message }); }
@@ -204,7 +213,7 @@
 				<div class="flex items-start justify-between gap-4">
 					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight max-md:line-clamp-2 max-md:text-[16px]">{root.task}</h1>
 					{#if live}
-						<Button variant="outline" size="sm" class="h-8 shrink-0 rounded-full border-err/40 text-err-ink hover:bg-err-soft" onclick={stop} disabled={stopping || latest.stop_requested}>
+						<Button variant="outline" size="sm" class="h-8 shrink-0 rounded-full border-err/40 text-err-ink hover:bg-err-soft" onclick={askStop} disabled={stopping || latest.stop_requested}>
 							<Square class="size-3 fill-current" />{stopping || latest.stop_requested ? 'Stopping…' : 'Stop'}
 						</Button>
 					{/if}
@@ -250,6 +259,7 @@
 		</div>
 	</header>
 
+	<StopDialog bind:open={stopAsk} agent={agentName(threadAgent ?? agent)} {queued} onstop={stop} />
 	{#if forkTurn}<ForkDialog bind:open={forkOpen} run={forkTurn.run} hasFiles={!!forkTurn.snapshot} />{/if}
 
 	<Conversation class="min-h-0 flex-1">
@@ -322,7 +332,7 @@
 						disabled={!canReply}
 						onpaste={attachments.paste}
 						placeholder={switching ? `Message ${agentName(agent)}…` : live ? 'Queue your next message…' : 'Reply to continue on the same machine…'}
-						onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) send(e); }}
+						onkeydown={(e) => { if (prefs.sends(e, 'reply')) send(e); }}
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
 					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />

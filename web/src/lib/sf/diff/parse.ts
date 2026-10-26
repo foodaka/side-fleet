@@ -56,7 +56,7 @@ export interface Parsed {
 
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
 
-export function parsePatch(patch: string): Parsed {
+export function parsePatch(patch: string, opts: { hideWhitespace?: boolean } = {}): Parsed {
 	const hunks: Hunk[] = [];
 	const oldText: string[] = [];
 	const newText: string[] = [];
@@ -88,8 +88,52 @@ export function parsePatch(patch: string): Parsed {
 		// `\ No newline at end of file` and anything unexpected are skipped.
 		prevOldEnd = o;
 	}
-	for (const hk of hunks) markWords(hk.lines);
+	for (const hk of hunks) {
+		if (opts.hideWhitespace) hk.lines = dropWhitespace(hk.lines);
+		markWords(hk.lines);
+	}
 	return { hunks, oldText, newText };
+}
+
+/** Whether a parsed file still changes anything (it may not once whitespace is hidden). */
+export const changes = (p: Parsed) => p.hunks.some((h) => h.lines.some((l) => l.kind !== 'ctx'));
+
+const squash = (s: string) => s.replace(/\s+/g, '');
+
+/**
+ * Like `git diff -w`: in each run of deletions and the additions after it, lines that
+ * match once all whitespace is ignored become context (numbered on both sides).
+ */
+function dropWhitespace(lines: Line[]): Line[] {
+	const out: Line[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		if (lines[i].kind === 'ctx') { out.push(lines[i++]); continue; }
+		const dels: Line[] = [], adds: Line[] = [];
+		while (i < lines.length && lines[i].kind === 'del') dels.push(lines[i++]);
+		while (i < lines.length && lines[i].kind === 'add') adds.push(lines[i++]);
+		const a = dels.map((l) => squash(l.text)), b = adds.map((l) => squash(l.text));
+		const n = a.length, m = b.length;
+		if (!n || !m || n * m > 250_000) { out.push(...dels, ...adds); continue; }
+		const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+		for (let x = n - 1; x >= 0; x--)
+			for (let y = m - 1; y >= 0; y--)
+				dp[x][y] = a[x] === b[y] ? dp[x + 1][y + 1] + 1 : Math.max(dp[x + 1][y], dp[x][y + 1]);
+		// Walk the match, keeping deletions before additions between matched lines.
+		let x = 0, y = 0;
+		const pd: Line[] = [], pa: Line[] = [];
+		const flush = () => { out.push(...pd.splice(0), ...pa.splice(0)); };
+		while (x < n || y < m) {
+			if (x < n && y < m && a[x] === b[y]) {
+				flush();
+				const d = dels[x++], ad = adds[y++];
+				out.push({ kind: 'ctx', old: d.old, new: ad.new, text: ad.text, oi: d.oi, ni: ad.ni });
+			} else if (x < n && (y === m || dp[x + 1][y] >= dp[x][y + 1])) pd.push(dels[x++]);
+			else pa.push(adds[y++]);
+		}
+		flush();
+	}
+	return out;
 }
 
 /** Pair each run of deletions with the additions that follow it and mark the words that differ. */

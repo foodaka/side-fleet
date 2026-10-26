@@ -179,6 +179,10 @@ Code's `acceptEdits` already lets simple file commands in the workspace (`mkdir`
 through without asking; everything else, such as running a script, a network call or an MCP tool,
 is asked.
 
+Whatever you have already allowed Claude Code on that machine still applies: rules in
+`~/.claude/settings.json`, and the checkout's own `.claude/settings.local.json` (where "don't ask
+again" answers go), which the worker copies into each task's worktree while git ignores it.
+
 ## Command line
 
 ```sh

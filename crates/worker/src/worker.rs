@@ -356,6 +356,33 @@ async fn latest_default_branch(repo: &Path) -> Option<StartPoint> {
 }
 
 pub async fn prepare_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>, start: Option<&str>) -> Result<Worktree> {
+    let wt = add_worktree(repo, repo_name, root_id, worktrees_dir, resume_from, start).await?;
+    copy_local_settings(repo, &wt.path).await;
+    Ok(wt)
+}
+
+/// Claude Code keeps the person's "don't ask again" answers in the checkout's
+/// `.claude/settings.local.json`, which git ignores, so a new worktree starts without
+/// them and the agent is refused what was already allowed. Copy it in when the
+/// worktree has none; one the agent saved there itself is left alone. Only while git
+/// ignores it there, so a checkpoint never commits and pushes it.
+async fn copy_local_settings(repo: &Path, worktree: &Path) {
+    const LOCAL_SETTINGS: &str = ".claude/settings.local.json";
+    let (src, dst) = (repo.join(LOCAL_SETTINGS), worktree.join(LOCAL_SETTINGS));
+    if !src.is_file() || dst.exists() {
+        return;
+    }
+    if git(worktree, &["check-ignore", "--quiet", LOCAL_SETTINGS]).await.is_err() {
+        tracing::warn!(repo = %repo.display(), "{LOCAL_SETTINGS} is not ignored by git; not copying it into the task's worktree");
+        return;
+    }
+    let copied = std::fs::create_dir_all(dst.parent().unwrap()).and_then(|()| std::fs::copy(&src, &dst));
+    if let Err(e) = copied {
+        tracing::warn!(error = %e, "could not copy {LOCAL_SETTINGS} into the task's worktree");
+    }
+}
+
+async fn add_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>, start: Option<&str>) -> Result<Worktree> {
     let slug: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let path = worktrees_dir.join(slug).join(root_id.to_string());
     let branch = format!("sidefleet/{}", &root_id.simple().to_string()[..8]);
@@ -993,5 +1020,39 @@ mod tests {
         let wt = super::prepare_worktree(&repo, "r", uuid::Uuid::new_v4(), &tmp.path().join("wts"), None, None).await.unwrap();
         assert!(wt.from.is_none());
         assert_eq!(sh(&wt.path, &["rev-parse", "HEAD"]).await, head);
+    }
+
+    /// The person's saved Claude Code permissions follow the task into its worktree,
+    /// but only while git ignores them, so they are never committed.
+    #[tokio::test]
+    async fn local_claude_settings_follow_the_task_when_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        sh(tmp.path(), &["init", "--quiet", "-b", "main", repo.to_str().unwrap()]).await;
+        // Claude Code adds the file to the global ignore list; leave that out here.
+        sh(&repo, &["config", "core.excludesFile", "/dev/null"]).await;
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        let rules = r#"{"permissions":{"allow":["Bash(git fetch:*)","mcp__linear"]}}"#;
+        std::fs::write(repo.join(".claude/settings.local.json"), rules).unwrap();
+        commit(&repo, "one").await;
+        let wts = tmp.path().join("wts");
+
+        // Not ignored: left behind.
+        let wt = super::prepare_worktree(&repo, "r", uuid::Uuid::new_v4(), &wts, None, None).await.unwrap();
+        assert!(!wt.path.join(".claude/settings.local.json").exists());
+
+        std::fs::write(repo.join(".gitignore"), ".claude/settings.local.json\n").unwrap();
+        sh(&repo, &["add", ".gitignore"]).await;
+        commit(&repo, "ignore").await;
+        let id = uuid::Uuid::new_v4();
+        let wt = super::prepare_worktree(&repo, "r", id, &wts, None, None).await.unwrap();
+        let copied = wt.path.join(".claude/settings.local.json");
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), rules);
+        assert_eq!(sh(&wt.path, &["status", "--porcelain"]).await, "");
+
+        // A follow-up keeps what the agent saved in the worktree.
+        std::fs::write(&copied, "{}").unwrap();
+        super::prepare_worktree(&repo, "r", id, &wts, None, None).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "{}");
     }
 }

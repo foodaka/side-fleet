@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunStatus, Slots, ASK_MODE, LIVE_TEXT};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,6 +22,8 @@ use crate::snapshot;
 use crate::detect::{self, DetectOptions};
 
 /// How long the control plane may hold a claim open waiting for a run.
+/// How often to look again for agents that were not installed at start-up.
+const AGENT_RECHECK: Duration = Duration::from_secs(300);
 const CLAIM_WAIT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Clone)]
@@ -90,12 +92,25 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let root = cfg.repos_root.clone();
         let depth = cfg.scan_depth;
         let cfg2 = cfg.clone();
+        let detect_opts = detect_opts.clone();
         let parallel = cfg.parallel.max(1);
         let active_count = active_count.clone();
         let active = active.clone();
         tokio::spawn(async move {
+            let mut agents_checked = Instant::now();
             loop {
                 tokio::time::sleep(interval).await;
+                // Agents installed after start-up show up without a restart.
+                if agents_checked.elapsed() >= AGENT_RECHECK {
+                    agents_checked = Instant::now();
+                    let current = caps.lock().await.agents.clone();
+                    if let Some(agents) = detect::detect_missing(&current, &detect_opts).await {
+                        let mut c = caps.lock().await;
+                        c.agents = agents;
+                        tracing::info!("found a newly installed agent");
+                        log_caps(&c);
+                    }
+                }
                 {
                     let mut c = caps.lock().await;
                     c.repos = detect::scan_repos(&root, depth);

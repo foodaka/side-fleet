@@ -12,6 +12,71 @@ use tokio::process::Command;
 /// Claude Code does not think it is running inside another session.
 pub const STRIPPED_ENV: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"];
 
+/// Where npm, pnpm, bun, volta and the agents' own installers put executables.
+/// A background service's PATH is the shell's at `sidefleet connect` time, so
+/// an agent installed later (or under another nvm Node) is often not on it.
+fn user_bin_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        ".local/bin", ".npm-global/bin", ".local/share/pnpm", "Library/pnpm", ".bun/bin", ".volta/bin",
+        ".opencode/bin", ".claude/local", ".cargo/bin",
+    ]
+    .iter()
+    .map(|d| home.join(d))
+    .collect();
+    // nvm: every installed Node's bin, newest version first.
+    if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        let mut nodes: Vec<(Vec<u64>, PathBuf)> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let v = e.file_name().to_string_lossy().trim_start_matches('v').split('.').filter_map(|n| n.parse().ok()).collect();
+                (v, e.path().join("bin"))
+            })
+            .collect();
+        nodes.sort_by(|a, b| b.0.cmp(&a.0));
+        dirs.extend(nodes.into_iter().map(|(_, p)| p));
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    dirs
+}
+
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// The executable to run for `bin`: as given when it is a path or on PATH,
+/// otherwise the first match in the usual user install folders.
+pub fn resolve_bin(bin: &str) -> PathBuf {
+    resolve_in(bin, std::env::var_os("PATH").as_deref(), &home_dir())
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+}
+
+fn resolve_in(bin: &str, path: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf {
+    if bin.contains('/') || path.is_some_and(|p| std::env::split_paths(p).any(|d| is_executable(&d.join(bin)))) {
+        return PathBuf::from(bin);
+    }
+    user_bin_dirs(home).into_iter().map(|d| d.join(bin)).find(|p| is_executable(p)).unwrap_or_else(|| PathBuf::from(bin))
+}
+
+/// A command for an agent CLI, found even when it is not on PATH. Its folder is
+/// put first on the child's PATH: npm-installed CLIs start with
+/// `#!/usr/bin/env node`, and the right `node` lives next to them.
+pub fn agent_command(bin: &str) -> Command {
+    let exe = resolve_bin(bin);
+    let mut cmd = Command::new(&exe);
+    if let Some(dir) = exe.parent().filter(|d| exe.is_absolute() && !d.as_os_str().is_empty()) {
+        let mut dirs = vec![dir.to_path_buf()];
+        dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+        if let Ok(p) = std::env::join_paths(dirs) {
+            cmd.env("PATH", p);
+        }
+    }
+    cmd
+}
+
 async fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<(bool, String, String)> {
     for k in STRIPPED_ENV {
         cmd.env_remove(k);
@@ -36,7 +101,7 @@ fn version_from(s: &str) -> String {
 }
 
 pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = agent_command(bin);
     cmd.arg("--version");
     let (ok, out, _) = run_with_timeout(cmd, Duration::from_secs(15)).await?;
     if !ok {
@@ -47,7 +112,7 @@ pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent
         return Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some("not checked".into()) });
     }
     // A trivial prompt: succeeds only when the CLI has valid credentials.
-    let mut cmd = Command::new(bin);
+    let mut cmd = agent_command(bin);
     cmd.args(["-p", "Reply with the single word OK.", "--output-format", "json", "--max-turns", "1"]);
     cmd.current_dir(std::env::temp_dir());
     match run_with_timeout(cmd, Duration::from_secs(60)).await {
@@ -69,7 +134,7 @@ pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent
 /// Codex: version, sign-in (`codex login status`, no model call) and the models
 /// its catalog lists for this account (`codex debug models`).
 pub async fn detect_codex(bin: &str, check_sign_in: bool) -> Option<CodexAgent> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = agent_command(bin);
     cmd.arg("--version");
     let (ok, out, _) = run_with_timeout(cmd, Duration::from_secs(10)).await?;
     if !ok {
@@ -77,13 +142,13 @@ pub async fn detect_codex(bin: &str, check_sign_in: bool) -> Option<CodexAgent> 
     }
     let version = version_from(&out);
     let signed_in = if check_sign_in {
-        let mut cmd = Command::new(bin);
+        let mut cmd = agent_command(bin);
         cmd.args(["login", "status"]);
         Some(matches!(run_with_timeout(cmd, Duration::from_secs(15)).await, Some((true, out, err)) if format!("{out}{err}").contains("Logged in")))
     } else {
         None
     };
-    let mut cmd = Command::new(bin);
+    let mut cmd = agent_command(bin);
     cmd.args(["debug", "models"]);
     let models = match run_with_timeout(cmd, Duration::from_secs(15)).await {
         Some((true, out, _)) => codex_models(&out),
@@ -114,14 +179,14 @@ pub const OPENCODE_MODELS_MAX: usize = 400;
 /// opencode: version and the `provider/model` ids it can use here (only
 /// providers that are configured or signed in are listed).
 pub async fn detect_opencode(bin: &str) -> Option<OpencodeAgent> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = agent_command(bin);
     cmd.arg("--version");
     let (ok, out, _) = run_with_timeout(cmd, Duration::from_secs(15)).await?;
     if !ok {
         return None;
     }
     let version = version_from(&out);
-    let mut cmd = Command::new(bin);
+    let mut cmd = agent_command(bin);
     cmd.arg("models");
     let all: Vec<String> = match run_with_timeout(cmd, Duration::from_secs(30)).await {
         Some((true, out, _)) => out
@@ -306,6 +371,7 @@ pub fn system_stats(repos_root: &Path) -> SystemStats {
     }
 }
 
+#[derive(Clone)]
 pub struct DetectOptions {
     pub claude_bin: String,
     pub codex_bin: String,
@@ -333,8 +399,49 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
     }
 }
 
+/// Looks for the agents missing from `current`; the updated set when any turned up.
+pub async fn detect_missing(current: &Agents, opts: &DetectOptions) -> Option<Agents> {
+    let (claude, codex, opencode, ollama) = tokio::join!(
+        async { if current.claude.is_none() { detect_claude(&opts.claude_bin, opts.check_sign_in).await } else { None } },
+        async { if current.codex.is_none() { detect_codex(&opts.codex_bin, opts.check_sign_in).await } else { None } },
+        async { if current.opencode.is_none() { detect_opencode(&opts.opencode_bin).await } else { None } },
+        async { if current.ollama.is_none() { detect_ollama().await } else { None } },
+    );
+    if claude.is_none() && codex.is_none() && opencode.is_none() && ollama.is_none() {
+        return None;
+    }
+    let mut agents = current.clone();
+    agents.claude = agents.claude.or(claude);
+    agents.codex = agents.codex.or(codex);
+    agents.opencode = agents.opencode.or(opencode);
+    agents.ollama = agents.ollama.or(ollama);
+    Some(agents)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn finds_agents_outside_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let exe = |p: &Path| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exe(&home.join(".nvm/versions/node/v9.0.0/bin/codex"));
+        exe(&home.join(".nvm/versions/node/v22.1.0/bin/codex"));
+        exe(&home.join(".opencode/bin/opencode"));
+        let empty = std::ffi::OsStr::new("/nonexistent");
+        assert_eq!(resolve_in("codex", Some(empty), home), home.join(".nvm/versions/node/v22.1.0/bin/codex"), "newest Node first");
+        assert_eq!(resolve_in("opencode", Some(empty), home), home.join(".opencode/bin/opencode"));
+        assert_eq!(resolve_in("claude", Some(empty), home), PathBuf::from("claude"), "not found: left to PATH");
+        assert_eq!(resolve_in("/opt/x/codex", Some(empty), home), PathBuf::from("/opt/x/codex"));
+        let on_path = home.join(".nvm/versions/node/v9.0.0/bin");
+        assert_eq!(resolve_in("codex", Some(on_path.as_os_str()), home), PathBuf::from("codex"), "PATH wins");
+    }
     use super::*;
 
     #[test]

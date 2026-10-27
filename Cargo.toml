@@ -30,10 +30,10 @@ subtle = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "compression-br"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "compression-br", "request-id", "catch-panic"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 gethostname = "1"
 tempfile = "3"

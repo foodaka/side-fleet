@@ -21,6 +21,7 @@ kill_timeout = "10s"
   SIDEFLEET_PUBLIC_URL = "https://app.sidefleet.xyz"
   SIDEFLEET_BIND = "0.0.0.0:8080"
   RUST_LOG = "sidefleet=info,sidefleet_server=info,tower_http=warn"
+  SIDEFLEET_LOG_FORMAT = "json"
 
 [deploy]
   # Migrations run on start; one machine at a time keeps them from racing.

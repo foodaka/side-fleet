@@ -373,7 +373,7 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": self.1}))).into_response()
+        crate::request_log::error_response(self.0, self.1)
     }
 }
 

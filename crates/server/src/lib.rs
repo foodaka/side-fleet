@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod notify;
 pub mod oauth;
 pub mod push;
+pub mod request_log;
 pub mod rooms;
 pub mod routes;
 pub mod summary;

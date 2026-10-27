@@ -10,6 +10,7 @@
 	import GitFork from '@lucide/svelte/icons/git-fork';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import Square from '@lucide/svelte/icons/square';
+	import CircleStop from '@lucide/svelte/icons/circle-stop';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
@@ -216,7 +217,8 @@
 			{:else if thread && root && latest}
 				<div class="flex items-start justify-between gap-4">
 					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight max-md:line-clamp-2 max-md:text-[16px] short:line-clamp-1 short:text-[16px]">{root.task}</h1>
-					{#if live && (!theirs || fleet.isOwner)}
+					{#if live && theirs && fleet.isOwner}
+						<!-- Your own tasks stop from the composer; an owner watching a teammate's has none. -->
 						<Button variant="outline" size="sm" class="h-8 shrink-0 rounded-full border-err/40 text-err-ink hover:bg-err-soft" onclick={stop} disabled={stopping || latest.stop_requested}>
 							<Square class="size-3 fill-current" />{stopping || latest.stop_requested ? 'Stopping…' : 'Stop'}
 						</Button>
@@ -382,9 +384,17 @@
 							<Paperclip class="size-4" />
 						</button>
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-						<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending || !modelValid(agent, model)} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
-							<ArrowUp class="size-4" strokeWidth={2.2} />
-						</button>
+						{#if live}
+							<button type="button" aria-label={stopping || latest?.stop_requested ? 'Stopping' : 'Stop'} title={stopping || latest?.stop_requested ? 'Stopping…' : 'Stop this message and any queued after it'} disabled={stopping || !!latest?.stop_requested} onclick={stop} class="grid size-8 shrink-0 place-items-center rounded-full text-foreground/80 hover:bg-accent hover:text-foreground disabled:animate-pulse disabled:opacity-50">
+								<CircleStop class="size-[18px]" />
+							</button>
+						{/if}
+						<!-- While it runs and the box is empty, Stop stands in for Send. -->
+						{#if !live || reply.trim()}
+							<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending || !modelValid(agent, model)} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
+								<ArrowUp class="size-4" strokeWidth={2.2} />
+							</button>
+						{/if}
 					</div>
 				</div>
 			</form>

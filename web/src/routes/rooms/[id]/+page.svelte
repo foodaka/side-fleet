@@ -16,10 +16,11 @@
 	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 	import Check from '@lucide/svelte/icons/check';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { api, ApiError } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { AGENTS, agentModel, agentName, defaultModel, hasAgent, machineModels, modelValid, rel, repoKey, repoLabel } from '#lib/sf/format';
-	import type { AgentId, RoomDetail, TaskCard } from '#lib/sf/types';
+	import type { AgentId, RoomDetail, RoomNote, TaskCard } from '#lib/sf/types';
 	import { compareUrl, fixConflictsPrompt } from '#lib/sf/rooms';
 	import Avatar from '#lib/sf/ui/Avatar.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
@@ -213,6 +214,39 @@
 			toast.error('Could not post the note', { description: (err as Error).message });
 		}
 		posting = false;
+	}
+	// Its author, the room's creator or an org owner can take a note back; agents stop getting it in their brief.
+	const canDeleteNote = (n: RoomNote) => !n.author_id || n.author_id === fleet.userId || canEdit;
+	// Only its author rewrites a note.
+	let editingNote = $state<string | null>(null);
+	let noteDraft = $state('');
+	let savingNote = $state(false);
+	function editNote(n: RoomNote) {
+		noteDraft = n.body;
+		editingNote = n.id;
+	}
+	async function saveNote(n: RoomNote) {
+		const body = noteDraft.trim();
+		if (!room || !body || savingNote) return;
+		if (body === n.body) return void (editingNote = null);
+		savingNote = true;
+		try {
+			const saved = await api<RoomNote>(`/v1/rooms/${room.id}/notes/${n.id}`, { method: 'PATCH', body: JSON.stringify({ body }) });
+			if (data) data.notes = data.notes.map((x) => (x.id === n.id ? saved : x));
+			editingNote = null;
+		} catch (err) {
+			toast.error('Could not save the note', { description: (err as Error).message });
+		}
+		savingNote = false;
+	}
+	async function deleteNote(n: RoomNote) {
+		if (!room || !confirm('Delete this note? Agents starting tasks in the room stop seeing it.')) return;
+		try {
+			await api(`/v1/rooms/${room.id}/notes/${n.id}`, { method: 'DELETE' });
+			if (data) data.notes = data.notes.filter((x) => x.id !== n.id);
+		} catch (err) {
+			toast.error('Could not delete the note', { description: (err as Error).message });
+		}
 	}
 </script>
 
@@ -440,14 +474,50 @@
 						<p class="text-[13px] leading-relaxed text-muted-foreground">Decide things here: who takes what, what to avoid, what's done. Every task's agent gets the latest notes.</p>
 					{/if}
 					{#each notes as n (n.id)}
-						<div class="flex gap-2.5">
+						<div class="group flex gap-2.5">
 							<Avatar login={n.author_login} size={24} class="mt-0.5" />
 							<div class="min-w-0 flex-1">
 								<p class="flex items-baseline gap-2 text-xs">
 									<span class="font-medium">{n.author_id && n.author_id === fleet.userId ? 'You' : n.author_login ? `@${n.author_login}` : 'Someone'}</span>
-									<span class="tnum text-faint">{rel(n.created_at, fleet.now)}</span>
+									<span class="tnum text-faint">{rel(n.created_at, fleet.now)}{#if n.edited_at}<span title={`Edited ${rel(n.edited_at, fleet.now)}`}> · edited</span>{/if}</span>
+									{#if editingNote !== n.id}
+										<span class="ml-auto flex items-center gap-0.5 self-center transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:group-hover:opacity-100">
+											{#if n.author_id && n.author_id === fleet.userId}
+												<button type="button" aria-label="Edit note" title="Edit note" onclick={() => editNote(n)} class="rounded p-0.5 text-faint hover:text-foreground">
+													<Pencil class="size-3.5" />
+												</button>
+											{/if}
+											{#if canDeleteNote(n)}
+												<button type="button" aria-label="Delete note" title="Delete note" onclick={() => deleteNote(n)} class="rounded p-0.5 text-faint hover:text-destructive">
+													<Trash2 class="size-3.5" />
+												</button>
+											{/if}
+										</span>
+									{/if}
 								</p>
-								<p class="mt-0.5 text-[13.5px] leading-relaxed break-words whitespace-pre-wrap">{n.body}</p>
+								{#if editingNote === n.id}
+									<form class="mt-1 flex flex-col gap-1.5" onsubmit={(e) => { e.preventDefault(); void saveNote(n); }}>
+										<!-- svelte-ignore a11y_autofocus -->
+										<textarea
+											bind:value={noteDraft}
+											autofocus
+											rows="3"
+											maxlength={4000}
+											aria-label="Edit note"
+											onkeydown={(e) => {
+												if (e.key === 'Escape') editingNote = null;
+												else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveNote(n); }
+											}}
+											class="block w-full resize-y rounded-lg bg-muted/60 px-2.5 py-1.5 text-[13.5px] leading-relaxed outline-none focus:bg-muted"
+										></textarea>
+										<div class="flex justify-end gap-1.5">
+											<Button type="button" variant="ghost" size="sm" onclick={() => (editingNote = null)}>Cancel</Button>
+											<Button type="submit" size="sm" disabled={!noteDraft.trim() || savingNote}>Save</Button>
+										</div>
+									</form>
+								{:else}
+									<p class="mt-0.5 text-[13.5px] leading-relaxed break-words whitespace-pre-wrap">{n.body}</p>
+								{/if}
 							</div>
 						</div>
 					{/each}

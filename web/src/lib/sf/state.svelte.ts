@@ -1,5 +1,5 @@
 import { api, ApiError, currentKey, currentOrg, keyWorks, setKey, setOrg, Unauthorized } from './api';
-import type { AuthMethods, Enrollment, Me, RunSummary, Setup, Worker } from './types';
+import type { AuthMethods, Enrollment, Me, Member, RunSummary, Setup, Worker } from './types';
 import { telemetry } from './telemetry.svelte';
 import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
@@ -32,8 +32,20 @@ class Fleet {
 	/** Machines waiting for someone in this org to approve them. */
 	pending = $state<Enrollment[]>([]);
 	orgId = $state(currentOrg());
+	/** People in the org the page acts in (empty with the developer key). */
+	members = $state<Member[]>([]);
+	#membersFor = '';
+	#membersAt = 0;
 
 	online = $derived(this.workers.filter((w) => w.online));
+	/** Machines that run your tasks: each machine only runs its owner's. */
+	mine = $derived(this.workers.filter((w) => w.mine !== false));
+	myOnline = $derived(this.mine.filter((w) => w.online));
+	/** The signed-in user's id; null with the developer key. */
+	userId = $derived(this.me?.user?.id ?? null);
+	/** Several people share this org: show who started what. */
+	multi = $derived(this.members.length > 1);
+	memberLogin = $derived(new Map(this.members.map((m) => [m.id, m.login])));
 	needsSignIn = $derived(this.conn === 'unauthorized');
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
@@ -82,6 +94,7 @@ class Fleet {
 			this.added = new Set(repos.added);
 			void this.#migrateAdded(workers, repos.added);
 			if (!this.setup) this.setup = await api<Setup>('/v1/setup');
+			void this.#loadMembers();
 			this.conn = 'ok';
 			this.loaded = true;
 		} catch (e) {
@@ -92,6 +105,37 @@ class Fleet {
 			}
 			this.conn = e instanceof Unauthorized ? 'unauthorized' : 'unreachable';
 		}
+	}
+
+	/** The org's members, refreshed when the org changes and every minute or so. */
+	async #loadMembers(force = false) {
+		const org = this.org;
+		if (!this.me?.user || !org) {
+			this.members = [];
+			return;
+		}
+		if (!force && this.#membersFor === org.id && Date.now() - this.#membersAt < 60_000) return;
+		this.#membersFor = org.id;
+		this.#membersAt = Date.now();
+		try {
+			this.members = await api<Member[]>(`/v1/orgs/${org.id}/members`);
+		} catch {
+			/* keep what we had */
+		}
+	}
+
+	reloadMembers() {
+		return this.#loadMembers(true);
+	}
+
+	/** A user's login, if they are in this org. */
+	login(id: string | null | undefined): string | null {
+		return id ? (this.memberLogin.get(id) ?? null) : null;
+	}
+
+	/** Whether a thread (or message) was started by someone else; unknown authors count as yours. */
+	othersRun(r: { created_by?: string | null }): boolean {
+		return !!r.created_by && !!this.userId && r.created_by !== this.userId;
 	}
 
 	async loadArchived() {
@@ -127,12 +171,15 @@ class Fleet {
 		this.runs = [];
 		this.archived = null;
 		this.pending = [];
+		this.members = [];
+		this.#membersFor = '';
 		this.added = null;
 		this.setup = null;
 		this.#migrated = false;
 		this.loaded = false;
 		this.conn = 'connecting';
 		if (location.hash.startsWith('#/runs/')) location.hash = '#/runs';
+		else if (location.hash.startsWith('#/rooms/')) location.hash = '#/rooms';
 		void this.refresh(false);
 	}
 

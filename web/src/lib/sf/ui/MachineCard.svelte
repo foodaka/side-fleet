@@ -12,10 +12,14 @@
 	import { telemetry } from '../telemetry.svelte';
 	import { duration } from '../format';
 	import StatusDot from './StatusDot.svelte';
+	import Avatar from './Avatar.svelte';
 	import type { Worker } from '../types';
 
 	let { w, hot = false, onhover }: { w: Worker; hot?: boolean; onhover?: (id: string | null) => void } = $props();
 	const c = $derived(w.capabilities);
+	const yours = $derived(w.mine !== false);
+	/** Its owner, or an org owner (to clean up after someone who left), may update or remove it. */
+	const canManage = $derived(yours || fleet.isOwner);
 	const sys = $derived(c.system);
 	const slots = $derived(c.slots);
 	const build = $derived(parseBuild(c.version));
@@ -82,7 +86,18 @@
 >
 	<header class="flex items-start justify-between gap-3">
 		<div class="min-w-0">
-			<h2 class="truncate text-[15px] font-semibold tracking-tight">{w.display_name}</h2>
+			<h2 class="flex min-w-0 items-center gap-2 text-[15px] font-semibold tracking-tight">
+				<span class="truncate">{w.display_name}</span>
+				{#if fleet.multi && w.owner}
+					{#if yours}
+						<span class="shrink-0 rounded-full bg-ok-soft px-1.5 py-px text-[11px] font-medium text-ok-ink">Yours</span>
+					{:else}
+						<span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted py-px pr-1.5 pl-0.5 text-[11px] font-normal text-muted-foreground" title="Runs only @{w.owner.login}'s tasks">
+							<Avatar login={w.owner.login} size={14} class="ring-0" />@{w.owner.login}
+						</span>
+					{/if}
+				{/if}
+			</h2>
 			<p class="mt-0.5 truncate text-xs text-muted-foreground">
 				{c.os}{#if w.display_name !== c.hostname && c.hostname}, {c.hostname}{/if}{#if sys}, up {uptime(sys.uptime_secs)}{/if}
 			</p>
@@ -183,7 +198,9 @@
 		<span class="min-w-0 truncate text-muted-foreground" title={c.version}>
 			{#if build.sha}Sidefleet {build.version}, build <span class="font-mono">{build.sha}</span>{:else}Version unknown{/if}
 		</span>
-		{#if !w.online}
+		{#if !canManage}
+			<span class="shrink-0 text-muted-foreground">Runs only {w.owner ? `@${w.owner.login}'s` : 'its owner\'s'} tasks</span>
+		{:else if !w.online}
 			<button type="button" class="shrink-0 text-muted-foreground hover:text-err-ink" onclick={remove}>Remove</button>
 		{:else if w.update_requested}
 			<span class="flex shrink-0 items-center gap-1.5 text-run-ink"><RefreshCw class="size-3.5 animate-spin [animation-duration:2.5s]" />Updating when idle</span>

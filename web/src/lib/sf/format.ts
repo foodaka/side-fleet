@@ -126,6 +126,17 @@ export function rel(iso: string | null | undefined, now = Date.now()): string {
 	return Math.round(s / 86400) + 'd ago';
 }
 
+/** A time ahead: `in 7 days`, `in 5 hours`, `in 20 minutes`, `soon`. */
+export function until(iso: string | null | undefined, now = Date.now()): string {
+	if (!iso) return '';
+	const s = (new Date(iso).getTime() - now) / 1000;
+	const n = (v: number, unit: string) => `in ${v} ${unit}${v === 1 ? '' : 's'}`;
+	if (s < 60) return 'soon';
+	if (s < 3600) return n(Math.round(s / 60), 'minute');
+	if (s < 86400) return n(Math.round(s / 3600), 'hour');
+	return n(Math.round(s / 86400), 'day');
+}
+
 /** The compact form for tight spaces: `now`, `5m`, `2h`, `3d`, then the date. */
 export function ago(iso: string | null | undefined, now = Date.now()): string {
 	if (!iso) return '';

@@ -29,6 +29,9 @@
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 	import FileDiffIcon from '@lucide/svelte/icons/file-diff';
+	import Boxes from '@lucide/svelte/icons/boxes';
+	import Avatar from '#lib/sf/ui/Avatar.svelte';
+	import type { Room } from '#lib/sf/types';
 
 	let thread = $state<Thread | null>(null);
 	let loaded = $state(false);
@@ -68,6 +71,16 @@
 		if (from) api<Run[]>(`/v1/runs/${from}/thread`).then((t) => (forkSource = t[0]?.task ?? null)).catch(() => {});
 	});
 	const latest = $derived(thread?.current);
+	/** Someone else's task: it runs on their machine, so you watch it and can continue it on yours. */
+	const theirs = $derived(!!root && fleet.othersRun(root));
+	const ownerLogin = $derived(root ? fleet.login(root.created_by) : null);
+	// The room this thread belongs to, by name.
+	let room = $state<Room | null>(null);
+	$effect(() => {
+		const rid = root?.room_id;
+		room = null;
+		if (rid) api<{ room: Room }>(`/v1/rooms/${rid}`).then((d) => (room = d.room)).catch(() => {});
+	});
 	const live = $derived(!!thread?.live);
 	const machineOnline = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.online);
 	// The thread's pull request: the list's copy is re-checked by the machine, the thread's is set the moment one opens.
@@ -203,7 +216,7 @@
 			{:else if thread && root && latest}
 				<div class="flex items-start justify-between gap-4">
 					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight max-md:line-clamp-2 max-md:text-[16px] short:line-clamp-1 short:text-[16px]">{root.task}</h1>
-					{#if live}
+					{#if live && (!theirs || fleet.isOwner)}
 						<Button variant="outline" size="sm" class="h-8 shrink-0 rounded-full border-err/40 text-err-ink hover:bg-err-soft" onclick={stop} disabled={stopping || latest.stop_requested}>
 							<Square class="size-3 fill-current" />{stopping || latest.stop_requested ? 'Stopping…' : 'Stop'}
 						</Button>
@@ -211,6 +224,16 @@
 				</div>
 				<div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground max-md:-mx-4 max-md:flex-nowrap max-md:overflow-x-auto max-md:px-4 max-md:[scrollbar-width:none] max-md:[&>*]:shrink-0">
 					<StatusPill status={latest.status} extra={latest.status === 'running' ? duration(latest.started_at, null, fleet.now) : ''} />
+					{#if fleet.multi && root.created_by}
+						<span class="inline-flex items-center gap-1.5" title={theirs ? `Started by @${ownerLogin ?? 'a teammate'}; it runs on their machine` : 'Your task'}>
+							<Avatar login={ownerLogin} size={16} class="ring-0" /><span class="text-foreground/80">{theirs ? `@${ownerLogin ?? 'teammate'}` : 'You'}</span>
+						</span>
+					{/if}
+					{#if root.room_id}
+						<a href="#/rooms/{root.room_id}" class="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 hover:text-foreground" title="Open the room">
+							<Boxes class="size-3" /><span class="max-w-[12rem] truncate text-foreground/80">{room?.name ?? 'Room'}</span>
+						</a>
+					{/if}
 					{#if thread.machine}
 						<span class="inline-flex items-center gap-1.5"><StatusDot status={machineOnline ? 'online' : 'offline'} /><span class="text-foreground/80">{thread.machine}</span></span>
 					{/if}
@@ -266,8 +289,8 @@
 							onsendnow={sendNow}
 							oncancel={() => cancel(turn.run.id)}
 							onopendiff={openDiff}
-							onrestore={!live && turn.run.isolation === 'worktree' ? () => restore(turn.run.id) : undefined}
-							ondecide={(item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}
+							onrestore={!live && !theirs && turn.run.isolation === 'worktree' ? () => restore(turn.run.id) : undefined}
+							ondecide={theirs ? undefined : (item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}
 						/>
 					{/each}
 					{#if !live && thread.turns.length && thread.branch}
@@ -282,7 +305,7 @@
 									The changes are on branch <span class="font-mono text-foreground/80">{branch}</span> in {repoLabel(root?.repo)} on {thread.machine}.{#if pr?.state === 'closed'} <a href={pr.url} target="_blank" rel="noopener noreferrer" class="underline underline-offset-2">Pull request #{pr.number}</a> was closed.{/if} Open a pull request, or review, merge or push it from there.
 								{/if}
 							</p>
-							{#if pr?.state !== 'merged'}
+							{#if pr?.state !== 'merged' && !theirs}
 								<Button
 									size="sm"
 									variant={pr?.state === 'open' ? 'outline' : 'default'}
@@ -306,7 +329,23 @@
 		<DiffViewer bind:open={diffOpen} scopes={diffScopes} bind:scope={diffScope} focus={diffFocus} />
 	{/if}
 
-	{#if root}
+	{#if root && theirs}
+		<div class="border-t bg-background">
+			<div class="mx-auto flex w-full max-w-3xl items-center gap-3 px-4 pt-3 pb-4 short:pt-2 short:pb-2 max-md:flex-col max-md:items-stretch max-md:px-3 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+				<p class="flex min-w-0 flex-1 items-center gap-2 text-[13px] text-muted-foreground">
+					<Avatar login={ownerLogin} size={22} />
+					<span>This is {ownerLogin ? `@${ownerLogin}'s` : "a teammate's"} task. It runs on their machine, so only they can reply to it.</span>
+				</p>
+				<Button
+					size="sm"
+					class="h-9 shrink-0 rounded-full"
+					disabled={!forkTurn}
+					title={forkTurn ? 'A new thread of yours that knows this conversation, on one of your machines' : 'Once its first message finishes'}
+					onclick={() => (forkOpen = true)}
+				><GitFork class="size-3.5" />Continue on my machine</Button>
+			</div>
+		</div>
+	{:else if root}
 		<div class="border-t bg-background">
 			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4 short:pt-2 short:pb-2 max-md:px-3 max-md:pt-2 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]" onsubmit={send}>
 				<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">

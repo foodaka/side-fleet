@@ -14,8 +14,10 @@ pub mod mcp;
 pub mod notify;
 pub mod oauth;
 pub mod push;
+pub mod rooms;
 pub mod routes;
 pub mod summary;
+pub mod team;
 pub mod tenancy;
 pub mod test_support;
 

@@ -36,7 +36,7 @@ export interface Run {
 	images?: { id: string; media_type: string; bytes: number }[];
 	/** `restore` runs put the thread's worktree back to a snapshot instead of running the agent;
 	 * `pr` runs push the thread's branch and open a pull request. */
-	kind: 'agent' | 'restore' | 'pr';
+	kind: 'agent' | 'restore' | 'pr' | 'integrate';
 	restore_to: string | null;
 	/** For a fork: the message (run) of the thread it continues from. */
 	forked_from: string | null;
@@ -45,6 +45,12 @@ export interface Run {
 	archived_at?: string | null;
 	/** On a thread's first run: the pull request opened from its branch, as last checked. */
 	pr?: PullRequest | null;
+	/** Who sent this message (a user id); null for the developer key and older runs. */
+	created_by?: string | null;
+	/** The room this thread belongs to, if any. */
+	room_id?: string | null;
+	/** For an `integrate` run: the room branch it merges into. */
+	context?: string | null;
 }
 
 export interface PullRequest {
@@ -109,6 +115,88 @@ export interface Worker {
 	outdated: boolean;
 	/** Agents whose usage limit this machine's account hit, with when it resets; it takes none of their tasks until then. */
 	limited_until?: Partial<Record<'claude' | 'codex' | 'opencode', string>>;
+	/** Whose machine it is; null for machines connected with a static token. */
+	owner?: { id: string; login: string } | null;
+	/** It runs your tasks: machines only run their owner's tasks. Absent on older control planes (treat as yours). */
+	mine?: boolean;
+}
+
+/** Someone in an org (`GET /v1/orgs/:org/members`). */
+export interface Member {
+	id: string;
+	login: string;
+	role: 'owner' | 'member';
+}
+
+/** A link that lets someone join an org. */
+export interface Invite {
+	id: string;
+	role: 'owner' | 'member';
+	created_by_login: string | null;
+	expires_at: string;
+	max_uses: number | null;
+	uses: number;
+	revoked_at: string | null;
+}
+
+/** What an invite link says about itself (`GET /v1/invites/:code`, no sign-in needed). */
+export interface InviteInfo {
+	org_name: string;
+	inviter_login: string | null;
+	role: string;
+	valid: boolean;
+	reason?: 'expired' | 'revoked' | 'used_up' | 'not_found' | (string & {});
+}
+
+/** A shared goal split into tasks, each on its owner's machine, merged into one room branch. */
+export interface Room {
+	id: string;
+	name: string;
+	goal: string;
+	repo: string;
+	branch: string;
+	created_by: string | null;
+	created_by_login: string | null;
+	created_at: string;
+	archived_at: string | null;
+	/** First successful integration; new tasks then start from the room branch. */
+	integrated_at: string | null;
+	last_activity_at: string;
+	task_count: number;
+	active_count: number;
+	integrated_count: number;
+}
+
+export interface RoomNote {
+	id: string;
+	author_id: string | null;
+	author_login: string | null;
+	body: string;
+	created_at: string;
+}
+
+export interface TaskCard {
+	/** The thread's root run id. */
+	id: string;
+	title: string;
+	created_by: string | null;
+	created_by_login: string | null;
+	agent: AgentId;
+	model: string;
+	worker_id: string | null;
+	status: RunStatus;
+	last_activity_at: string;
+	files: string[];
+	additions: number;
+	deletions: number;
+	integration: null | { status: RunStatus | (string & {}); at: string; commit?: string; error?: string; conflicts?: string[] };
+	pr: PullRequest | null;
+}
+
+export interface RoomDetail {
+	room: Room;
+	notes: RoomNote[];
+	tasks: TaskCard[];
 }
 
 export interface Setup {

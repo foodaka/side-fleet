@@ -245,13 +245,12 @@ async fn each_person_has_their_own_inbox() {
     let a = alice.create_run("Shared task", json!({})).await;
     m.claim().await;
     m.finish(&a, "succeeded", json!({})).await;
+    // A task waits on whoever started it, not on the whole team.
     assert_eq!(ids(&alice.inbox().await), [a.as_str()]);
-    assert_eq!(ids(&carol.inbox().await), [a.as_str()]);
+    assert!(carol.inbox().await.is_empty());
 
-    // Alice opening it does not clear Carol's.
     alice.dismiss(&a).await;
     assert!(alice.inbox().await.is_empty());
-    assert_eq!(ids(&carol.inbox().await), [a.as_str()]);
 
     // The developer key's inbox is the default org's: none of this.
     assert!(Api::dev(&env).inbox().await.is_empty());

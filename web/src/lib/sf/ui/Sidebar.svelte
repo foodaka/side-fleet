@@ -5,6 +5,8 @@
 	import { Kbd } from '#lib/components/ui/kbd';
 	import MessageSquare from '@lucide/svelte/icons/message-square';
 	import MessagesSquare from '@lucide/svelte/icons/messages-square';
+	import UsersRound from '@lucide/svelte/icons/users-round';
+	import Boxes from '@lucide/svelte/icons/boxes';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, Settings, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
@@ -36,11 +38,13 @@
 		: !fleet.loaded ? 'Connecting…'
 		: `${fleet.online.length} of ${fleet.workers.length} machine${fleet.workers.length === 1 ? '' : 's'} online`
 	);
-	const nav = [
+	const nav = $derived([
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
+		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
 		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') },
+		...(fleet.me?.user ? [{ href: '#/team', label: 'Team', icon: UsersRound, on: (p: string) => p.startsWith('/team') }] : []),
 		{ href: '#/chat', label: 'Chat apps', icon: MessagesSquare, on: (p: string) => p.startsWith('/chat') }
-	];
+	]);
 
 	function onkeydown(e: KeyboardEvent) {
 		// `/` jumps to search, unless you're typing somewhere or this copy of the sidebar is hidden.

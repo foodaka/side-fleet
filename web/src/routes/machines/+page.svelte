@@ -11,7 +11,12 @@
 
 	let hover = $state<string | null>(null);
 
-	const sorted = $derived([...fleet.workers].sort((a, b) => Number(b.online) - Number(a.online) || a.display_name.localeCompare(b.display_name)));
+	// Yours first, then teammates' (which only run their owner's tasks).
+	const sorted = $derived(
+		[...fleet.workers].sort(
+			(a, b) => Number(b.mine !== false) - Number(a.mine !== false) || Number(b.online) - Number(a.online) || a.display_name.localeCompare(b.display_name)
+		)
+	);
 	const busy = $derived(fleet.runs.filter((r) => r.thread_status === 'running').length);
 	const slotsTotal = $derived(fleet.online.reduce((a, w) => a + (w.capabilities.slots?.parallel ?? 0), 0));
 	const outdated = $derived(fleet.workers.filter((w) => w.online && w.outdated && !w.update_requested).length);
@@ -27,6 +32,9 @@
 			<p class="mt-1 text-[13px] text-muted-foreground">
 				{`${fleet.online.length} of ${fleet.workers.length} online, ${busy} of ${slotsTotal} task slots busy.` + (outdated ? ` ${outdated} ${outdated === 1 ? 'runs' : 'run'} an older build than this control plane.` : '')}
 			</p>
+			{#if fleet.multi}
+				<p class="mt-0.5 text-xs text-muted-foreground">Each machine runs only its owner's tasks. Teammates' machines show here so you can see what the team is running.</p>
+			{/if}
 			{#if limits && fleet.org}
 				<p class="mt-0.5 text-xs text-muted-foreground">
 					{fleet.org.name} is on the {fleet.org.plan} plan: {fleet.workers.length} of {limits.machines} machines, up to {limits.parallel_runs} tasks queued or running at once.

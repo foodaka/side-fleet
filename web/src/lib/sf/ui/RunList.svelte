@@ -8,6 +8,7 @@
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
 	import PrIcon from './PrIcon.svelte';
+	import Avatar from './Avatar.svelte';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import Ellipsis from '@lucide/svelte/icons/ellipsis';
 	import GitFork from '@lucide/svelte/icons/git-fork';
@@ -27,10 +28,22 @@
 
 	const live = (r: RunSummary) => r.thread_status === 'running' || r.thread_status === 'queued';
 
+	// With teammates: your own tasks, or everyone's. The choice sticks.
+	const SCOPE = 'sidefleet_runs_scope';
+	let scope = $state<'mine' | 'team'>('mine');
+	try { if (localStorage.getItem(SCOPE) === 'team') scope = 'team'; } catch { /* storage blocked */ }
+	function setScope(s: 'mine' | 'team') {
+		scope = s;
+		try { localStorage.setItem(SCOPE, s); } catch { /* storage blocked */ }
+	}
+	const filtering = $derived(fleet.multi && !!fleet.userId);
+	const runs = $derived(filtering && scope === 'mine' ? fleet.runs.filter((r) => r.created_by === fleet.userId) : fleet.runs);
+	const theirs = $derived(filtering ? fleet.runs.filter((r) => r.created_by !== fleet.userId).length : 0);
+
 	/** The repo most runs are in; rows from any other repo say which one. */
 	const homeRepo = $derived.by(() => {
 		const n = new Map<string, number>();
-		fleet.runs.forEach((r) => n.set(r.repo, (n.get(r.repo) ?? 0) + 1));
+		runs.forEach((r) => n.set(r.repo, (n.get(r.repo) ?? 0) + 1));
 		return [...n.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
 	});
 
@@ -42,10 +55,10 @@
 
 	// Threads waiting on you first, then running, then queued.
 	const rank = (r: RunSummary) => (r.pending_approvals ? 0 : r.thread_status === 'running' ? 1 : 2);
-	const active = $derived(fleet.runs.filter(live).sort((a, b) => rank(a) - rank(b)));
+	const active = $derived(runs.filter(live).sort((a, b) => rank(a) - rank(b)));
 	const groups = $derived.by(() => {
 		const out: { label: string; runs: RunSummary[] }[] = [];
-		for (const r of fleet.runs) {
+		for (const r of runs) {
 			if (live(r)) continue;
 			const label = dayGroup(r.last_activity_at, fleet.now);
 			if (out.at(-1)?.label !== label) out.push({ label, runs: [] });
@@ -86,7 +99,10 @@
 			{/if}
 		</span>
 		<span class="flex min-w-0 flex-1 flex-col">
-			<span class="truncate {unread ? 'font-medium text-foreground' : ''}">{r.task}</span>
+			<span class="flex min-w-0 items-center gap-1.5">
+				{#if filtering && fleet.othersRun(r)}<Avatar login={fleet.login(r.created_by)} size={14} class="ring-0" />{/if}
+				<span class="truncate {unread ? 'font-medium text-foreground' : ''}">{r.task}</span>
+			</span>
 			{#if asking}
 				<span class="truncate text-[11.5px] font-medium text-queue-ink">Waiting on you{#if r.pending_approvals! > 1}&nbsp;· {r.pending_approvals} tool calls{/if}</span>
 			{:else if detail}
@@ -123,7 +139,7 @@
 		</DropdownMenu.Trigger>
 		<DropdownMenu.Content align="start" side="right" class="w-52">
 			<DropdownMenu.Item onclick={() => { fleet.forkThread = r.id; void goto('#/runs/' + r.id); }}>
-				<GitFork class="size-3.5" /><span class="flex flex-col"><span>Fork…</span><span class="text-xs text-muted-foreground">New thread from its latest message, any agent, model or machine</span></span>
+				<GitFork class="size-3.5" /><span class="flex flex-col"><span>{fleet.othersRun(r) ? 'Continue on my machine…' : 'Fork…'}</span><span class="text-xs text-muted-foreground">New thread from its latest message, any agent, model or machine{fleet.othersRun(r) ? ' of yours' : ''}</span></span>
 			</DropdownMenu.Item>
 			{#if r.archived_at}
 				<DropdownMenu.Item onclick={() => fleet.setArchived(r, false)}><ArchiveRestore class="size-3.5" />Unarchive</DropdownMenu.Item>
@@ -160,11 +176,30 @@
 		{#if !matches.length}
 			<p class="px-2.5 py-2 text-xs text-muted-foreground">Nothing in the latest {fleet.runs.length} tasks mentions “{query.trim()}”.</p>
 		{/if}
-	{:else if !fleet.runs.length}
-		<div class="mx-1 mt-4 rounded-lg border border-dashed border-sidebar-border px-3 py-4 text-xs leading-relaxed text-muted-foreground">
-			No tasks yet. Each one you start shows up here, so you can jump between them.
-		</div>
 	{:else}
+		{#if filtering}
+			<div class="mx-1 mt-3 grid grid-cols-2 rounded-md bg-sidebar-accent/60 p-0.5 text-[12px]" role="tablist" aria-label="Whose tasks">
+				{#each [['mine', 'Mine'], ['team', 'Team']] as [id, label] (id)}
+					<button
+						type="button"
+						role="tab"
+						aria-selected={scope === id}
+						class="rounded px-2 py-1 transition-colors {scope === id ? 'bg-background font-medium text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+						onclick={() => setScope(id as 'mine' | 'team')}
+					>{label}{#if id === 'team' && theirs}<span class="tnum ml-1 text-faint">{theirs}</span>{/if}</button>
+				{/each}
+			</div>
+		{/if}
+	{/if}
+	{#if fleet.loaded && !q && !runs.length}
+		<div class="mx-1 mt-4 rounded-lg border border-dashed border-sidebar-border px-3 py-4 text-xs leading-relaxed text-muted-foreground">
+			{#if filtering && scope === 'mine' && fleet.runs.length}
+				You haven't started a task here yet. Switch to Team to see what everyone else is running.
+			{:else}
+				No tasks yet. Each one you start shows up here, so you can jump between them.
+			{/if}
+		</div>
+	{:else if fleet.loaded && !q}
 		{#if active.length}
 			{@render heading('Active', active.length)}
 			{#each active as r (r.id)}{@render row(r, true)}{/each}
@@ -174,7 +209,7 @@
 			{#each g.runs as r (r.id)}{@render row(r, false)}{/each}
 		{/each}
 		{#if fleet.runs.length >= 100}
-			<p class="px-2.5 pt-4 text-[11px] text-faint">Showing the latest {fleet.runs.length} tasks.</p>
+			<p class="px-2.5 pt-4 text-[11px] text-faint">Showing the latest {fleet.runs.length} tasks{filtering ? ' in the team' : ''}.</p>
 		{/if}
 	{/if}
 	{#if fleet.loaded && !q}

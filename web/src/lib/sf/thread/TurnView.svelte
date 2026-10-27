@@ -8,6 +8,7 @@
 	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 	import GitFork from '@lucide/svelte/icons/git-fork';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+	import GitMerge from '@lucide/svelte/icons/git-merge';
 	import { agentModel, agentName, clock, effortName, permName, repoLabel } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
@@ -46,6 +47,10 @@
 	const run = $derived(turn.run);
 	const isRestore = $derived(run.kind === 'restore');
 	const isPr = $derived(run.kind === 'pr');
+	/** Merging the thread's branch into its room's branch. */
+	const isIntegrate = $derived(run.kind === 'integrate');
+	const integrated = $derived(run.result?.integrated as { branch?: string; commit?: string; files?: string[] } | undefined);
+	const conflicts = $derived((run.result?.conflicts as string[] | undefined) ?? []);
 	const finished = $derived(run.status === 'succeeded' || run.status === 'failed' || run.status === 'stopped');
 	let forking = $state(false);
 	let restoring = $state(false);
@@ -97,6 +102,12 @@
 	{#if first && run.images?.length}
 		<ToolImages images={run.images} inset={false} alt="Attached to the task" />
 	{/if}
+	{#if run.room_id && run.kind === 'agent' && !run.forked_from && run.context}
+		<details class="self-end text-[11.5px] text-muted-foreground max-w-[85%]">
+			<summary class="cursor-pointer text-right select-none hover:text-foreground">Room brief sent with this message</summary>
+			<pre class="mt-1 max-h-72 overflow-auto rounded-lg border bg-muted/50 p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{run.context}</pre>
+		</details>
+	{/if}
 	{#if run.moved_from}
 		<p class="flex items-center gap-1.5 text-[13px] text-muted-foreground">
 			<ArrowRightLeft class="size-3.5 shrink-0" />
@@ -104,6 +115,25 @@
 				Moved{turn.movedFrom ? ` from ${turn.movedFrom}` : ''} to {turn.machine ?? 'another machine'}{#if run.resume_from_branch}, continuing from <span class="font-mono text-[12px]">{run.resume_from_branch}</span>{:else}, starting over (no work had been pushed){/if}
 			</span>
 		</p>
+	{:else if isIntegrate}
+		<div class="flex flex-col items-center gap-1 text-xs text-muted-foreground">
+			<p class="flex items-center gap-1.5">
+				<GitMerge class="size-3" />
+				{#if integrated}
+					Added to the room on <span class="font-mono text-foreground/80">{integrated.branch ?? run.context}</span>{#if integrated.commit}&nbsp;at <span class="font-mono">{integrated.commit.slice(0, 7)}</span>{/if}{#if integrated.files?.length}, {integrated.files.length} file{integrated.files.length === 1 ? '' : 's'}{/if}
+				{:else if run.status === 'failed'}
+					<span class="text-err-ink">Couldn't add this to the room{conflicts.length ? ': it conflicts with work already there' : ''}</span>
+				{:else}
+					{run.task || 'Adding to the room'}
+				{/if}
+			</p>
+			{#if conflicts.length}
+				<ul class="flex flex-wrap justify-center gap-1">
+					{#each conflicts as f (f)}<li class="rounded bg-err-soft px-1.5 py-0.5 font-mono text-[11px] text-err-ink">{f}</li>{/each}
+				</ul>
+				<p class="text-center">Ask the agent to merge <span class="font-mono">origin/{run.context ?? 'the room branch'}</span> into this branch and resolve them, then add it to the room again.</p>
+			{/if}
+		</div>
 	{:else if isRestore || isPr}
 		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">{#if isPr}<GitPullRequest class="size-3" />{:else}<RotateCcw class="size-3" />{/if}{run.task}</p>
 	{:else if !first}
@@ -123,7 +153,7 @@
 	{/if}
 
 	<div class="flex flex-col gap-1.5">
-		{#if !waiting && !isRestore && !isPr && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
+		{#if !waiting && !isRestore && !isPr && !isIntegrate && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-left text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
@@ -193,7 +223,7 @@
 			</p>
 		{/if}
 
-		{#if finished && !live && !isPr}
+		{#if finished && !live && !isPr && !isIntegrate}
 			<div class="flex justify-end gap-1">
 				{#if onrestore && turn.snapshot}
 					<button

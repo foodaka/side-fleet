@@ -88,7 +88,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/enrollments/lookup", post(lookup_enrollment))
         .route("/v1/enrollments/{id}/approve", post(approve_enrollment))
         .route("/v1/enrollments/{id}/deny", post(deny_enrollment))
+        .route("/v1/runs/{id}/integrate", post(integrate_run))
+        .route("/v1/rooms/{id}/tasks", post(create_room_task).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .merge(crate::inbox::router())
+        .merge(crate::team::router())
+        .merge(crate::rooms::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()
@@ -127,6 +131,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/me", get(me))
         .route("/v1/enroll", post(enroll))
         .route("/v1/enroll/{id}", get(enroll_poll))
+        .merge(crate::team::public_router())
         .merge(dev)
         .merge(worker)
         .layer(CorsLayer::permissive())
@@ -225,6 +230,35 @@ async fn create_run(
     Extension(caller): Extension<Caller>,
     Json(req): Json<CreateRunRequest>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    start_run(&state, &caller, req, None).await
+}
+
+/// Start a task in a room: the room's repo, a room brief for the agent, and the
+/// room branch to start from once something has been merged into it.
+async fn create_room_task(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    let room = crate::rooms::get(&state.pool, caller.org_id(), id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "room not found".into()))?;
+    if room.archived_at.is_some() {
+        return Err(ApiError(StatusCode::CONFLICT, "this room is archived; bring it back to start tasks in it".into()));
+    }
+    let Some(obj) = req.as_object_mut() else {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "expected a JSON object".into()));
+    };
+    obj.insert("repo".into(), json!(room.repo));
+    let req: CreateRunRequest = serde_json::from_value(req).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?;
+    start_run(&state, &caller, req, Some(room)).await
+}
+
+async fn start_run(
+    state: &AppState,
+    caller: &Caller,
+    req: CreateRunRequest,
+    room: Option<crate::rooms::Room>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
     let task = req.task.trim();
     if task.is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "task must not be empty".into()));
@@ -242,22 +276,40 @@ async fn create_run(
     }
     check_images(&req.images)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
-    check_full_access(&caller, mode)?;
+    check_full_access(caller, mode)?;
     check_ask_agent(mode, agent)?;
     let isolation = match req.isolation.as_deref() {
         None | Some("") => "worktree",
         Some(i) if ISOLATION_MODES.contains(&i) => i,
         Some(_) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("isolation must be one of {}", ISOLATION_MODES.join(", ")))),
     };
-    let worker = match req.worker_id.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(w) if db::worker_exists(&state.pool, caller.org_id(), w).await? => Some(w),
-        Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
+    let worker = own_machine(state, caller, req.worker_id.as_deref()).await?;
+    if room.is_some() && isolation != "worktree" {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "a room's tasks work in their own worktree, so they can be merged into the room branch".into()));
+    }
+    let (brief, from_branch) = match &room {
+        Some(r) => (Some(crate::rooms::brief_for(&state.pool, r, None, true).await?), r.integrated_at.map(|_| r.branch.clone())),
+        None => (None, None),
     };
-    let new = db::NewRun { task, agent, model, effort, repo, permission_mode: mode, isolation, pinned_worker_id: worker, failover: req.failover, images: &req.images };
-    check_run_limit(&state, &caller).await?;
+    let new = db::NewRun {
+        task,
+        agent,
+        model,
+        effort,
+        repo,
+        permission_mode: mode,
+        isolation,
+        pinned_worker_id: worker,
+        failover: req.failover,
+        images: &req.images,
+        created_by: caller.user_id(),
+        room_id: room.as_ref().map(|r| r.id),
+        context: brief.as_deref(),
+        resume_from_branch: from_branch.as_deref(),
+    };
+    check_run_limit(state, caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
-    tag_run(&state, &caller, run.id).await?;
+    tag_run(state, caller, run.id).await?;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -340,6 +392,36 @@ async fn tag_run(state: &AppState, caller: &Caller, run: Uuid) -> Result<(), Api
     Ok(())
 }
 
+/// A machine chosen for a run: it must exist and be the caller's own (machines run only their owner's tasks).
+async fn own_machine<'a>(state: &AppState, caller: &Caller, worker: Option<&'a str>) -> Result<Option<&'a str>, ApiError> {
+    let Some(w) = worker.map(str::trim).filter(|w| !w.is_empty()) else { return Ok(None) };
+    if !db::worker_exists(&state.pool, caller.org_id(), w).await? {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}")));
+    }
+    if db::worker_owner(&state.pool, caller.org_id(), w).await? != caller.user_id() {
+        return Err(forbidden(&format!("{w} is a teammate's machine; tasks only run on their owner's machines")));
+    }
+    Ok(Some(w))
+}
+
+/// The thread `id` belongs to, if the caller may make its agent do things: only its creator
+/// may (their machine runs it). Anyone can still read and fork it.
+async fn own_thread(state: &AppState, caller: &Caller, id: Uuid) -> Result<Run, ApiError> {
+    let run = db::get_run(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
+    let root = match run.parent_id {
+        Some(p) => db::get_run(&state.pool, caller.org_id(), p).await?.ok_or_else(not_found)?,
+        None => run,
+    };
+    match root.created_by {
+        Some(owner) if Some(owner) != caller.user_id() => {
+            let login: Option<String> = sqlx::query_scalar("SELECT login FROM users WHERE id = $1").bind(owner).fetch_optional(&state.pool).await?;
+            let who = login.map_or_else(|| "a teammate".to_string(), |l| format!("@{l}"));
+            Err(forbidden(&format!("this is {who}'s task and it runs on their machine; fork it to continue on yours")))
+        }
+        _ => Ok(root),
+    }
+}
+
 /// Full access runs any command without asking, so an API token needs the `full` scope to
 /// start a run with it, or to continue (reply to, fork) a thread that runs with it.
 fn check_full_access(caller: &Caller, mode: Option<&str>) -> Result<(), ApiError> {
@@ -399,8 +481,17 @@ async fn follow_up(
     if let Some(a) = agent {
         check_ask_agent(mode, a)?;
     }
+    let root = own_thread(&state, &caller, id).await?;
     let Some(run) = db::get_run(&state.pool, caller.org_id(), id).await? else {
         return Err(not_found());
+    };
+    // A room's task hears what its teammates did since.
+    let update = match root.room_id {
+        Some(r) => match crate::rooms::get(&state.pool, caller.org_id(), r).await? {
+            Some(room) => Some(crate::rooms::brief_for(&state.pool, &room, Some(root.id), false).await?),
+            None => None,
+        },
+        None => None,
     };
     // Without a mode the reply keeps the thread's latest one.
     let inherited = match mode {
@@ -409,7 +500,21 @@ async fn follow_up(
     };
     check_full_access(&caller, mode.or(inherited.as_deref()))?;
     check_run_limit(&state, &caller).await?;
-    match db::create_follow_up(&state.pool, caller.org_id(), id, task, agent, req.model.as_deref().map(str::trim), req.effort.as_deref().map(str::trim), mode, &req.images).await? {
+    match db::create_follow_up(
+        &state.pool,
+        caller.org_id(),
+        id,
+        task,
+        agent,
+        req.model.as_deref().map(str::trim),
+        req.effort.as_deref().map(str::trim),
+        mode,
+        &req.images,
+        caller.user_id(),
+        update.as_deref(),
+    )
+    .await?
+    {
         FollowUpOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
@@ -433,11 +538,9 @@ async fn restore_run(
     Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
-    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
-        return Err(not_found());
-    }
+    own_thread(&state, &caller, id).await?;
     check_run_limit(&state, &caller).await?;
-    match db::create_restore(&state.pool, caller.org_id(), id).await? {
+    match db::create_restore(&state.pool, caller.org_id(), id, caller.user_id()).await? {
         RestoreOutcome::Created(run, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, restores = %id, "restore queued");
@@ -456,11 +559,9 @@ async fn open_pr(
     Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
-    if db::get_run(&state.pool, caller.org_id(), id).await?.is_none() {
-        return Err(not_found());
-    }
+    own_thread(&state, &caller, id).await?;
     check_run_limit(&state, &caller).await?;
-    match db::create_pr_run(&state.pool, caller.org_id(), id).await? {
+    match db::create_pr_run(&state.pool, caller.org_id(), id, caller.user_id()).await? {
         PrOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
@@ -470,6 +571,34 @@ async fn open_pr(
         PrOutcome::NotFound => Err(not_found()),
         PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into())),
         PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch of its own to open a pull request from".into())),
+        PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
+    }
+}
+
+/// Merge a room task's branch into the room's branch, on the machine with its worktree.
+async fn integrate_run(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    let root = own_thread(&state, &caller, id).await?;
+    let room = match root.room_id {
+        Some(r) => crate::rooms::get(&state.pool, caller.org_id(), r).await?,
+        None => None,
+    };
+    let Some(room) = room else {
+        return Err(ApiError(StatusCode::CONFLICT, "this task isn't in a room".into()));
+    };
+    check_run_limit(&state, &caller).await?;
+    match db::create_integrate_run(&state.pool, caller.org_id(), id, caller.user_id(), &room.branch).await? {
+        PrOutcome::Created(run, ev) => {
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, thread = %root.id, room = %room.id, "integration queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        PrOutcome::NotFound => Err(not_found()),
+        PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the task is still running; wait for it to finish or stop it".into())),
+        PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch to merge".into())),
         PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
     }
 }
@@ -495,12 +624,8 @@ async fn fork_run(
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     check_ask_agent(mode, agent)?;
     let context_budget = crate::fork::budget(task);
-    let worker = match req.worker_id.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(w) if db::worker_exists(&state.pool, caller.org_id(), w).await? => Some(w),
-        Some(w) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("no machine is registered as {w}"))),
-    };
-    let new = db::NewFork { task, agent, model, effort, permission_mode: mode, worker_id: worker, context_budget };
+    let worker = own_machine(&state, &caller, req.worker_id.as_deref()).await?;
+    let new = db::NewFork { task, agent, model, effort, permission_mode: mode, worker_id: worker, context_budget, created_by: caller.user_id() };
     let Some(target) = db::get_run(&state.pool, caller.org_id(), id).await? else {
         return Err(not_found());
     };
@@ -560,6 +685,10 @@ async fn stop_run(
     Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Run>, ApiError> {
+    // Stopping is always safe, so an org owner may stop anyone's.
+    if !caller.is_owner() {
+        own_thread(&state, &caller, id).await?;
+    }
     let (run, ev) = db::request_stop(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
     if let Some(ev) = ev {
         state.events.publish(ev);
@@ -590,10 +719,14 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
     let workers = db::list_workers(&state.pool, org).await?;
     let mut limits = db::active_limits(&state.pool, org).await?;
     let mut out = Vec::with_capacity(workers.len());
+    let owners = db::worker_owners(&state.pool, org).await?;
     for w in workers {
         let online = db::is_online(w.last_heartbeat_at);
         let mut v = serde_json::to_value(&w).unwrap_or(json!({}));
         v["online"] = json!(online);
+        let owner = owners.get(&w.id).cloned().flatten();
+        v["mine"] = json!(owner.as_ref().map(|(id, _)| *id) == caller.user_id());
+        v["owner"] = owner.map_or(json!(null), |(id, login)| json!({ "id": id, "login": login }));
         // Agents whose usage limit this machine hit: agent -> when it resets.
         v["limited_until"] = json!(limits.remove(&w.id).unwrap_or_default());
         v["update_requested"] = json!(db::update_requested(&state.pool, org, &w.id).await?);
@@ -605,6 +738,7 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
 
 /// Ask a machine to update itself and restart when it is idle.
 async fn request_update(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    own_or_org_owner(&state, &caller, &id).await?;
     if db::set_update_requested(&state.pool, caller.org_id(), &id, true).await? {
         tracing::info!(worker = %id, "update requested");
         Ok(StatusCode::ACCEPTED)
@@ -616,6 +750,7 @@ async fn request_update(State(state): State<AppState>, Extension(caller): Extens
 /// Forget a machine (frees a slot on the plan). It reappears if it heart-beats
 /// again with a valid token; revoke its token to keep it out.
 async fn delete_worker(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    own_or_org_owner(&state, &caller, &id).await?;
     if db::delete_worker(&state.pool, caller.org_id(), &id).await? {
         tracing::info!(worker = %id, "machine removed");
         Ok(StatusCode::NO_CONTENT)
@@ -626,6 +761,17 @@ async fn delete_worker(State(state): State<AppState>, Extension(caller): Extensi
     }
 }
 
+/// Managing a machine (update, remove) is for its owner, or an owner of the org.
+async fn own_or_org_owner(state: &AppState, caller: &Caller, worker: &str) -> Result<(), ApiError> {
+    if caller.is_owner() {
+        return Ok(());
+    }
+    match db::worker_owner(&state.pool, caller.org_id(), worker).await? {
+        o if o == caller.user_id() => Ok(()),
+        _ => Err(forbidden("only the machine's owner (or an owner of the org) can do that")),
+    }
+}
+
 /// Hide a thread from the list (or bring it back). Any run of the thread may be named.
 async fn archive_run(
     State(state): State<AppState>,
@@ -633,6 +779,9 @@ async fn archive_run(
     Path(id): Path<Uuid>,
     Json(req): Json<ArchiveRequest>,
 ) -> Result<Json<Run>, ApiError> {
+    if !caller.is_owner() {
+        own_thread(&state, &caller, id).await?;
+    }
     let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
     state.inbox.signal(caller.org_id()); // archived tasks leave the inbox
@@ -665,6 +814,8 @@ async fn decide_tool(
     body: axum::body::Bytes,
     approve: bool,
 ) -> Result<Json<Approval>, ApiError> {
+    // The tool call runs on the creator's machine, so only they decide it.
+    own_thread(&state, &caller, id).await?;
     let req: DecideApprovalRequest = if body.iter().all(u8::is_ascii_whitespace) {
         DecideApprovalRequest::default()
     } else {
@@ -885,7 +1036,9 @@ async fn register_worker(
             ));
         }
     }
-    let w = db::upsert_worker(&state.pool, auth.org, &req.id, &req.display_name, &auth.token_hash, &req.capabilities).await?;
+    let Some(w) = db::upsert_worker(&state.pool, auth.org, &req.id, &req.display_name, &auth.token_hash, &req.capabilities).await? else {
+        return Err(ApiError(StatusCode::CONFLICT, format!("a teammate's machine is already registered as {}; pick another machine id (--id)", req.id)));
+    };
     tracing::info!(worker = %w.id, org = %auth.org, repos = w.capabilities.repos.len(), "worker registered");
     for ev in db::reconcile_worker_runs(&state.pool, auth.org, &req.id, &req.active_runs).await? {
         tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run lost by worker restart; marked finished");
@@ -982,6 +1135,16 @@ struct WorkerQuery {
     worker_id: String,
 }
 
+/// A worker acting on a run names itself; its token must be the one that machine registered with,
+/// or another member's token could write to, finish or ask approvals in someone else's runs.
+async fn worker_is(state: &AppState, auth: &WorkerAuth, worker_id: &str) -> Result<(), ApiError> {
+    if db::worker_owns_token(&state.pool, auth.org, worker_id, &auth.token_hash).await? {
+        Ok(())
+    } else {
+        Err(ApiError(StatusCode::FORBIDDEN, "this token doesn't belong to that machine".into()))
+    }
+}
+
 async fn post_events(
     State(state): State<AppState>,
     Extension(auth): Extension<WorkerAuth>,
@@ -992,6 +1155,7 @@ async fn post_events(
     if req.events.len() > 1000 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "too many events in one batch".into()));
     }
+    worker_is(&state, &auth, &q.worker_id).await?;
     match db::append_events(&state.pool, auth.org, id, &q.worker_id, &req.events).await? {
         AppendOutcome::Appended(stored, run) => {
             for ev in stored {
@@ -1025,6 +1189,7 @@ async fn post_live_text(
         return Ok(StatusCode::NO_CONTENT);
     }
     let run = db::get_run(&state.pool, auth.org, id).await?.ok_or_else(not_found)?;
+    worker_is(&state, &auth, &q.worker_id).await?;
     if run.worker_id.as_deref() != Some(q.worker_id.as_str()) {
         return Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into()));
     }
@@ -1058,6 +1223,7 @@ async fn request_approval(
     if req.tool_name.trim().is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "tool_name must not be empty".into()));
     }
+    worker_is(&state, &auth, &q.worker_id).await?;
     match crate::approvals::request(&state.pool, auth.org, id, &q.worker_id, &req).await? {
         RequestOutcome::Created(a, ev) => {
             state.events.publish(ev);
@@ -1096,6 +1262,7 @@ async fn finish_run(
     if !req.status.is_terminal() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "finish status must be terminal".into()));
     }
+    worker_is(&state, &auth, &q.worker_id).await?;
     match db::finish_run(&state.pool, auth.org, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
         FinishOutcome::Finished(run, evs) => {
             for ev in evs {
@@ -1329,7 +1496,7 @@ async fn create_token(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let org = owned_org(&state, &caller, &org).await?;
     let name = check_name(&req.name, "token name")?;
-    let (token, value) = tenancy::create_token(&state.pool, org.id, &name).await?;
+    let (token, value) = tenancy::create_token(&state.pool, org.id, &name, caller.user_id()).await?;
     tracing::info!(org = %org.id, token = %token.id, "worker token created");
     let mut v = json!(token);
     v["token"] = json!(value);

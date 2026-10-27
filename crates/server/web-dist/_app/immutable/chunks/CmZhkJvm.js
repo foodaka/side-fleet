@@ -1,0 +1,1 @@
+import{n as e,r as t}from"./BjaXKcus.js";import{n}from"./C3_1jRjv.js";var r=new Set([`$$slots`,`$$events`,`$$legacy`]);function i(i,a){let o=e(a,r),s={name:`git-merge`,size:24,node:[[`circle`,{cx:`18`,cy:`18`,r:`3`}],[`circle`,{cx:`6`,cy:`6`,r:`3`}],[`path`,{d:`M6 21V9a9 9 0 0 0 9 9`}]]};n(i,t(()=>o,{get icon(){return s}}))}export{i as t};

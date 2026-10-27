@@ -25,7 +25,12 @@ use futures::Stream;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    catch_panic::CatchPanicLayer,
+    cors::CorsLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::TraceLayer,
+};
 use uuid::Uuid;
 
 use crate::approvals::{DecideOutcome, RequestOutcome};
@@ -139,7 +144,17 @@ pub fn router(state: AppState) -> Router {
         .layer(CorsLayer::permissive())
         // gzip/brotli for the page, assets and JSON; the default predicate skips SSE.
         .layer(tower_http::compression::CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        .layer(CatchPanicLayer::custom(crate::request_log::panic_response))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::request_log::RequestSpan)
+                .on_request(())
+                .on_response(crate::request_log::LogResponse)
+                .on_failure(crate::request_log::LogFailure),
+        )
+        // Outermost: give every request an id (kept if the client sent one) and echo it back.
+        .layer(PropagateRequestIdLayer::new(crate::request_log::REQUEST_ID))
+        .layer(SetRequestIdLayer::new(crate::request_log::REQUEST_ID, MakeRequestUuid))
         .with_state(state)
 }
 
@@ -191,7 +206,7 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": self.1}))).into_response()
+        crate::request_log::error_response(self.0, self.1)
     }
 }
 

@@ -38,6 +38,8 @@ services:
         value: "8080"
       - key: RUST_LOG
         value: sidefleet=info,sidefleet_server=info,tower_http=warn
+      - key: SIDEFLEET_LOG_FORMAT
+        value: json
       - key: SIDEFLEET_GITHUB_CLIENT_ID
         sync: false
       - key: SIDEFLEET_GITHUB_CLIENT_SECRET

@@ -188,6 +188,27 @@ fn config_dir() -> PathBuf {
 fn worker_env_path() -> PathBuf {
     config_dir().join("worker.env")
 }
+/// Plain text by default (coloured only on a terminal, so service log files stay
+/// clean); one JSON object per line with `SIDEFLEET_LOG_FORMAT=json`, which the
+/// hosted control plane uses so its logs can be searched by field. Panics are
+/// logged too, so they land in the same stream and format.
+fn init_logging() {
+    use std::io::IsTerminal;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "sidefleet=info,sidefleet_server=info,sidefleet_worker=info,tower_http=warn".into());
+    if std::env::var("SIDEFLEET_LOG_FORMAT").is_ok_and(|f| f.eq_ignore_ascii_case("json")) {
+        tracing_subscriber::fmt().with_env_filter(filter).json().flatten_event(true).with_current_span(true).with_span_list(false).init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stdout().is_terminal()).init();
+    }
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::capture();
+        let backtrace = if backtrace.status() == std::backtrace::BacktraceStatus::Captured { backtrace.to_string() } else { String::new() };
+        let location = info.location().map(|l| l.to_string()).unwrap_or_default();
+        let message = info.payload().downcast_ref::<String>().map(String::as_str).or_else(|| info.payload().downcast_ref::<&str>().copied()).unwrap_or("");
+        tracing::error!(%location, message, backtrace, "panic");
+    }));
+}
+
 fn server_env_path() -> PathBuf {
     config_dir().join("server.env")
 }
@@ -274,9 +295,7 @@ async fn main() -> Result<()> {
     if let Cmd::ApprovalMcp { socket } = &cli.cmd {
         return Ok(sidefleet_worker::approval::serve_mcp_stdio(socket)?);
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "sidefleet=info,sidefleet_server=info,sidefleet_worker=info,tower_http=warn".into()))
-        .init();
+    init_logging();
 
     match cli.cmd {
         Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel, install_service } => {

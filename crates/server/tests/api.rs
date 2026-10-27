@@ -1915,3 +1915,17 @@ async fn a_waiting_claim_takes_work_as_soon_as_it_is_queued() {
     assert_eq!(run.id, next);
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn every_response_carries_a_request_id_for_the_logs() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let r = api.dev(reqwest::Method::GET, &format!("/v1/runs/{}", Uuid::new_v4())).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let id = r.headers().get("x-request-id").expect("request id").to_str().unwrap();
+    assert!(Uuid::parse_str(id).is_ok(), "{id}");
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "run not found");
+    // A caller's own id is kept, so a client can tie its logs to ours.
+    let r = api.dev(reqwest::Method::GET, "/v1/workers").header("x-request-id", "abc-123").send().await.unwrap();
+    assert_eq!(r.headers().get("x-request-id").unwrap(), "abc-123");
+}

@@ -142,6 +142,16 @@ Environment:
 | `SIDEFLEET_VAPID_PRIVATE_KEY` | web push ("Notify me"): a P-256 private key, base64url. `sidefleet serve` creates one when unset, but in a container it is lost on redeploy and browsers have to turn push on again; copy the `SIDEFLEET_VAPID_PRIVATE_KEY=` line a local `sidefleet serve` writes to `~/.sidefleet/server.env` into the platform's secrets instead. `SIDEFLEET_VAPID_SUBJECT` (`mailto:` or `https:`) defaults to `SIDEFLEET_PUBLIC_URL` |
 | `SIDEFLEET_PRIVATE_WEBHOOKS` | leave unset when hosted: updates in chat (Hermes, OpenClaw, webhooks) then only go to public addresses, so nobody can point one at the control plane's own network. `1` allows private and local ones (the default when self-hosting) |
 | `RUST_LOG` | log filter; logs never contain tokens, cookies or task text beyond ids |
+| `SIDEFLEET_LOG_FORMAT` | `json` for one JSON object per line (set in the Dockerfile, render.yaml and fly.toml); plain text otherwise |
+
+**Logs.** Besides the lifecycle lines (run queued, claimed, finished; machine registered; sign-in;
+…), every request runs in a span with a request id, method, path (no query string) and, after
+auth, the org and GitHub login. Each response is logged at `error` for a 5xx or a panic (answered
+with a 500), at `warn` for a 4xx (with the error message the caller got), and at `info` when it took
+over two seconds (except a worker's long-polling claim); anything else is `debug`. The id comes back
+in the `x-request-id` response header, so a failing call in the browser's network tab leads straight
+to its log lines; search Render's logs for it, or for an org id or `run_id`. To see every request
+for a while, add `sidefleet_server::request_log=debug` to `RUST_LOG`.
 
 Run **one** instance. Live events reach open pages through an in-process broadcast, so a second
 instance would serve pages that miss live updates from runs it does not own (they still appear on

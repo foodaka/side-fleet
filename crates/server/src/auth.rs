@@ -14,9 +14,7 @@ use axum::{
     http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -61,21 +59,19 @@ fn matches(presented: &str, expected: &str) -> bool {
 }
 
 fn unauthorized(audience: &str) -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
-        format!("missing or invalid {audience} bearer token"),
-    )
-        .into_response()
+    let msg = format!("missing or invalid {audience} bearer token");
+    let mut res = (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], msg.clone()).into_response();
+    res.extensions_mut().insert(crate::request_log::ErrorMessage(msg));
+    res
 }
 
 fn forbidden(msg: &str) -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
+    crate::request_log::error_response(StatusCode::FORBIDDEN, msg)
 }
 
 fn server_error(e: sqlx::Error) -> Response {
     tracing::error!(error = %e, "database error during auth");
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "database error" }))).into_response()
+    crate::request_log::error_response(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
 
 /// Who is calling, before an org is chosen.
@@ -201,6 +197,7 @@ pub async fn require_dev(State(state): State<AppState>, mut req: Request, next: 
             Caller { org, user: Some(user), scope: None, token: None }
         }
     };
+    crate::request_log::record_caller(caller.org_id(), caller.user.as_ref().map(|u| u.login.as_str()));
     req.extensions_mut().insert(caller);
     next.run(req).await
 }
@@ -229,6 +226,7 @@ pub async fn require_worker(State(state): State<AppState>, mut req: Request, nex
             Err(e) => return server_error(e),
         }
     };
+    crate::request_log::record_caller(org, None);
     req.extensions_mut().insert(WorkerAuth { token_hash: hash, org });
     next.run(req).await
 }

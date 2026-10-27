@@ -28,7 +28,8 @@ COPY --from=build /usr/local/bin/sidefleet /usr/local/bin/sidefleet
 USER sidefleet
 WORKDIR /home/sidefleet
 ENV SIDEFLEET_BIND=0.0.0.0:8080 \
-    RUST_LOG=sidefleet=info,sidefleet_server=info,tower_http=warn
+    RUST_LOG=sidefleet=info,sidefleet_server=info,tower_http=warn \
+    SIDEFLEET_LOG_FORMAT=json
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 # --no-worker: the hosted control plane never runs agents itself.

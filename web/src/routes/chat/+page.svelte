@@ -112,7 +112,7 @@
 
 <svelte:head><title>Chat apps · Sidefleet</title></svelte:head>
 
-<section class="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 md:px-8">
+<section class="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 pt-8 pb-[calc(2rem+env(safe-area-inset-bottom))] md:px-8">
 	<header>
 		<h1 class="text-[22px] font-semibold tracking-tight">Chat apps</h1>
 		<p class="mt-1 text-[13px] text-muted-foreground">

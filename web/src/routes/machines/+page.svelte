@@ -20,7 +20,7 @@
 
 <svelte:head><title>Machines · Sidefleet</title></svelte:head>
 
-<section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-8 md:px-8">
+<section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 pt-8 pb-[calc(2rem+env(safe-area-inset-bottom))] md:px-8">
 	<header class="flex flex-wrap items-end justify-between gap-4">
 		<div>
 			<h1 class="text-[22px] font-semibold tracking-tight">Machines</h1>

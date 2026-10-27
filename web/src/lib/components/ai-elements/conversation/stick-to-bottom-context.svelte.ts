@@ -3,39 +3,38 @@ import { setContext, getContext } from "svelte";
 
 const STICK_TO_BOTTOM_CONTEXT_KEY = Symbol("stick-to-bottom-context");
 
+/** Closer than this to the bottom, the jump-to-latest button stays hidden. */
+const NEAR_BOTTOM = 80;
+/** Back within this of the bottom, the view follows new content again. */
+const AT_BOTTOM = 4;
+
+/**
+ * Keeps a scroller pinned to its bottom while content streams in, until the reader moves away.
+ *
+ * Only the reader lets go, by moving up: a wheel or key up, or a finger or the scrollbar dragging
+ * the view. Content re-rendering can move scrollTop too, so a scroll alone doesn't count. A finger
+ * on the screen holds the view still, so streamed text never yanks a phone back down
+ * mid-gesture. Scrolling back to the very bottom, or the jump button, picks up following again.
+ */
 class StickToBottomContext {
 	#element: HTMLElement | null = $state(null);
 	#isAtBottom = $state(true);
+	#stuck = true;
+	/** A finger, or the mouse on the scrollbar, is moving the view. */
+	#holding = false;
+	#lastScrollTop = 0;
+	#frame = 0;
 	#resizeObserver: ResizeObserver | null = null;
 	#mutationObserver: MutationObserver | null = null;
-	#intersectionObserver: IntersectionObserver | null = null;
-	#sentinel: HTMLElement | null = null;
-	#userHasScrolled = $state(false);
-	#lastScrollTop = 0;
 
 	isAtBottom = $derived(this.#isAtBottom);
-
-	// Debug method to help troubleshoot
-	get debugInfo() {
-		if (!this.#element) return null;
-		const { scrollTop, scrollHeight, clientHeight } = this.#element;
-		return {
-			scrollTop,
-			scrollHeight,
-			clientHeight,
-			isAtBottom: this.#isAtBottom,
-			userHasScrolled: this.#userHasScrolled,
-			hasElement: !!this.#element,
-			hasSentinel: !!this.#sentinel,
-		};
-	}
 
 	constructor() {
 		watch(
 			() => this.#element,
 			() => {
 				if (this.#element) {
-					this.#setupObservers();
+					this.#setup(this.#element);
 					return () => this.#cleanup();
 				}
 			}
@@ -47,155 +46,108 @@ class StickToBottomContext {
 	}
 
 	scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
-		if (!this.#element) return;
+		const el = this.#element;
+		if (!el) return;
+		this.#stuck = true;
+		el.scrollTo({ top: el.scrollHeight, behavior });
+	};
 
-		this.#userHasScrolled = false; // Reset user scroll flag when programmatically scrolling
-		this.#element.scrollTo({
-			top: this.#element.scrollHeight,
-			behavior,
+	#measure() {
+		const el = this.#element;
+		if (!el) return 0;
+		const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+		this.#isAtBottom = distance <= NEAR_BOTTOM;
+		return distance;
+	}
+
+	/** Content or size changed: follow it to the bottom once per frame, unless the reader let go. */
+	#schedule = () => {
+		if (this.#frame) return;
+		this.#frame = requestAnimationFrame(() => {
+			this.#frame = 0;
+			const el = this.#element;
+			if (!el) return;
+			if (this.#stuck && !this.#holding) el.scrollTop = el.scrollHeight;
+			this.#measure();
 		});
 	};
 
-	#handleScroll = () => {
-		if (!this.#element) return;
-
-		// Detect if user has scrolled up from bottom
-		const { scrollTop, scrollHeight, clientHeight } = this.#element;
-		const threshold = 200; // Increased threshold for better UX
-		const isAtBottom = scrollTop + clientHeight >= scrollHeight - threshold;
-
-		// Update the isAtBottom state based on scroll position
-		this.#isAtBottom = isAtBottom;
-
-		// Only scrolling up leaves the bottom. Our own jump to the bottom can land after more
-		// content arrived, which reads as "not at bottom" without the user doing anything.
-		const scrolledUp = scrollTop < this.#lastScrollTop;
-		this.#lastScrollTop = scrollTop;
-
-		if (!isAtBottom && scrolledUp) {
-			this.#userHasScrolled = true;
-		} else if (isAtBottom && this.#userHasScrolled) {
-			// User scrolled back to bottom, reset flag
-			this.#userHasScrolled = false;
-		}
+	#onScroll = () => {
+		const el = this.#element;
+		if (!el) return;
+		const distance = this.#measure();
+		if (this.#holding && el.scrollTop < this.#lastScrollTop - 1) this.#stuck = false;
+		else if (distance <= AT_BOTTOM) this.#stuck = true;
+		this.#lastScrollTop = el.scrollTop;
 	};
 
-	#setupObservers() {
-		if (!this.#element) return;
+	// Intent arrives before the scroll it causes; let go at once so a frame of new content
+	// landing in between can't pull the view back down.
+	#onWheel = (e: WheelEvent) => {
+		if (e.deltaY < 0) this.#stuck = false;
+	};
+	#onKey = (e: KeyboardEvent) => {
+		if (["ArrowUp", "PageUp", "Home"].includes(e.key)) this.#stuck = false;
+	};
+	#onTouchStart = () => {
+		this.#holding = true;
+	};
+	#onTouchEnd = (e: TouchEvent) => {
+		if (e.touches.length) return;
+		this.#release();
+	};
+	// A press on the scroller itself, not its content, is on its scrollbar.
+	#onPointerDown = (e: PointerEvent) => {
+		if (e.pointerType !== "mouse" || e.target !== this.#element) return;
+		this.#holding = true;
+		window.addEventListener("pointerup", this.#release, { once: true });
+	};
+	#release = () => {
+		this.#holding = false;
+		this.#schedule();
+	};
 
-		// Create and position sentinel element
-		this.#createSentinel();
+	#setup(el: HTMLElement) {
+		this.#lastScrollTop = el.scrollTop;
+		el.addEventListener("scroll", this.#onScroll, { passive: true });
+		el.addEventListener("wheel", this.#onWheel, { passive: true });
+		el.addEventListener("keydown", this.#onKey);
+		el.addEventListener("touchstart", this.#onTouchStart, { passive: true });
+		el.addEventListener("touchend", this.#onTouchEnd, { passive: true });
+		el.addEventListener("touchcancel", this.#onTouchEnd, { passive: true });
+		el.addEventListener("pointerdown", this.#onPointerDown);
 
-		// Setup intersection observer to detect if we're at bottom
-		this.#intersectionObserver = new IntersectionObserver(
-			(entries) => {
-				const entry = entries[0];
-				// Use intersection observer as a backup, but prioritize scroll-based detection
-				if (entry.isIntersecting) {
-					this.#isAtBottom = true;
-					this.#userHasScrolled = false;
-				}
-			},
-			{
-				threshold: 0,
-				root: this.#element,
-			}
-		);
+		// The scroller resizing (a phone keyboard opening) and the content in it growing without
+		// DOM changes (fonts, highlighting, images).
+		this.#resizeObserver = new ResizeObserver(this.#schedule);
+		this.#resizeObserver.observe(el);
+		for (const child of el.children) this.#resizeObserver.observe(child);
 
-		if (this.#sentinel) {
-			this.#intersectionObserver.observe(this.#sentinel);
-		}
+		this.#mutationObserver = new MutationObserver(this.#schedule);
+		this.#mutationObserver.observe(el, { childList: true, subtree: true, characterData: true });
 
-		// Add scroll event listener to detect user scrolling
-		this.#element.addEventListener("scroll", this.#handleScroll, {
-			passive: true,
-		});
-
-		// Setup resize observer for smooth scrolling on resize
-		this.#resizeObserver = new ResizeObserver(() => {
-			// Follow unless the user scrolled up. Content can grow by more than the threshold in
-			// one step, so being near the bottom after the resize is no test.
-			this.#checkScrollPosition();
-			if (!this.#userHasScrolled) {
-				this.scrollToBottom("auto");
-			}
-		});
-
-		this.#resizeObserver.observe(this.#element);
-		// And the content inside it, which grows without DOM changes (fonts, highlighting, images).
-		for (const child of this.#element.children) this.#resizeObserver.observe(child);
-
-		// Setup mutation observer for smooth scrolling on content changes
-		this.#mutationObserver = new MutationObserver(() => {
-			// Small delay to ensure DOM has updated
-			requestAnimationFrame(() => {
-				// Check if we should auto-scroll BEFORE updating the position
-				// Only auto-scroll if user was at bottom and hasn't manually scrolled
-				const shouldAutoScroll = !this.#userHasScrolled;
-
-				// Now update the scroll position after content changes
-				this.#checkScrollPosition();
-
-				// Auto-scroll if conditions were met
-				// Instantly: a smooth scroll lags behind streamed text, and through a whole thread on load.
-				if (shouldAutoScroll) {
-					this.scrollToBottom("auto");
-				}
-			});
-		});
-
-		this.#mutationObserver.observe(this.#element, {
-			childList: true,
-			subtree: true,
-			characterData: true,
-		});
-
-		// Check initial state
-		this.#checkScrollPosition();
-	}
-
-	#createSentinel() {
-		if (!this.#element) return;
-
-		this.#sentinel = document.createElement("div");
-		this.#sentinel.style.height = "1px";
-		this.#sentinel.style.width = "100%";
-		this.#sentinel.style.pointerEvents = "none";
-		this.#sentinel.style.opacity = "0";
-		this.#sentinel.setAttribute("data-stick-to-bottom-sentinel", "");
-
-		// Append to the end of the scrollable content, not positioned absolutely
-		this.#element.appendChild(this.#sentinel);
-	}
-
-	#checkScrollPosition() {
-		if (!this.#element) return;
-
-		const { scrollTop, scrollHeight, clientHeight } = this.#element;
-		const threshold = 200; // Increased threshold for better UX
-		const isAtBottom = scrollTop + clientHeight >= scrollHeight - threshold;
-
-		this.#isAtBottom = isAtBottom;
+		this.#measure();
 	}
 
 	#cleanup() {
+		const el = this.#element;
 		this.#resizeObserver?.disconnect();
 		this.#mutationObserver?.disconnect();
-		this.#intersectionObserver?.disconnect();
-
-		// Remove scroll event listener
-		if (this.#element) {
-			this.#element.removeEventListener("scroll", this.#handleScroll);
+		cancelAnimationFrame(this.#frame);
+		this.#frame = 0;
+		if (el) {
+			el.removeEventListener("scroll", this.#onScroll);
+			el.removeEventListener("wheel", this.#onWheel);
+			el.removeEventListener("keydown", this.#onKey);
+			el.removeEventListener("touchstart", this.#onTouchStart);
+			el.removeEventListener("touchend", this.#onTouchEnd);
+			el.removeEventListener("touchcancel", this.#onTouchEnd);
+			el.removeEventListener("pointerdown", this.#onPointerDown);
 		}
-
-		if (this.#sentinel && this.#element?.contains(this.#sentinel)) {
-			this.#element.removeChild(this.#sentinel);
-		}
-
+		window.removeEventListener("pointerup", this.#release);
+		this.#holding = false;
 		this.#resizeObserver = null;
 		this.#mutationObserver = null;
-		this.#intersectionObserver = null;
-		this.#sentinel = null;
 	}
 }
 

@@ -311,7 +311,7 @@
 							<a href="#/runs/{r.id}" class="group flex items-center gap-3 rounded-lg px-2 py-2.5 text-[13px] hover:bg-accent/60">
 								<StatusDot status={r.thread_status} />
 								<span class="min-w-0 flex-1 truncate">{r.task}</span>
-								{#if r.follow_ups}<span class="tnum shrink-0 text-xs text-muted-foreground">{r.follow_ups + 1} messages</span>{/if}
+								{#if r.follow_ups}<span class="tnum hidden shrink-0 text-xs text-muted-foreground sm:inline">{r.follow_ups + 1} messages</span>{/if}
 								<span class="hidden shrink-0 font-mono text-[12px] text-muted-foreground sm:inline">{repoLabel(r.repo)}</span>
 								<span class="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">
 									{r.thread_status === 'running' ? duration(r.started_at, null, fleet.now) : rel(r.last_activity_at, fleet.now)}

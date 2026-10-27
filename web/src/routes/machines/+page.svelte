@@ -7,6 +7,7 @@
 	import MachineCard from '#lib/sf/ui/MachineCard.svelte';
 	import FleetMap from '#lib/sf/ui/FleetMap.svelte';
 	import PendingMachines from '#lib/sf/ui/PendingMachines.svelte';
+	import MoveHere from '#lib/sf/ui/MoveHere.svelte';
 	import WorkerTokens from '#lib/sf/ui/WorkerTokens.svelte';
 
 	let hover = $state<string | null>(null);
@@ -48,6 +49,18 @@
 	</header>
 
 	<PendingMachines />
+
+	{#if fleet.elsewhere.length}
+		<section class="flex flex-col gap-3" aria-labelledby="elsewhere-h">
+			<div>
+				<h2 id="elsewhere-h" class="text-[15px] font-semibold tracking-tight">Your machines in other orgs</h2>
+				<p class="mt-0.5 text-[13px] text-muted-foreground">A machine takes tasks from one org at a time. Move one here and it carries on without reconnecting.</p>
+			</div>
+			<div class="flex flex-col gap-2.5 rounded-xl border bg-card p-4">
+				<MoveHere />
+			</div>
+		</section>
+	{/if}
 
 	{#if sorted.length}
 		<FleetMap bind:hover />

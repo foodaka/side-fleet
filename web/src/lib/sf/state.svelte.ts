@@ -1,5 +1,5 @@
 import { api, ApiError, currentKey, currentOrg, keyWorks, setKey, setOrg, Unauthorized } from './api';
-import type { AuthMethods, Enrollment, Me, Member, RunSummary, Setup, Worker } from './types';
+import type { AuthMethods, MyMachine, Enrollment, Me, Member, RunSummary, Setup, Worker } from './types';
 import { telemetry } from './telemetry.svelte';
 import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
@@ -9,6 +9,10 @@ type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 /** Everything the pages share, refreshed from the control plane every 5 seconds. */
 class Fleet {
 	workers = $state<Worker[]>([]);
+	/** Your machines in all your orgs. */
+	myMachines = $state<MyMachine[]>([]);
+	/** Settings' "Your machines" dialog. */
+	machinesOpen = $state(false);
 	runs = $state<RunSummary[]>([]);
 	/** Repos chosen for the composer menu; null until loaded. */
 	added = $state<Set<string> | null>(null);
@@ -50,6 +54,8 @@ class Fleet {
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
 	isOwner = $derived(this.org?.role === 'owner');
+	/** Your machines in your other orgs, which you can move into this one. */
+	elsewhere = $derived(this.myMachines.filter((m) => m.org.id !== this.org?.id));
 
 	#timer: ReturnType<typeof setInterval> | undefined;
 	#asked = false;
@@ -79,15 +85,17 @@ class Fleet {
 		try {
 			// Until signed in, ask once instead of firing every call into a 401.
 			if (this.conn !== 'ok') await api<Me>('/v1/me');
-			const [me, workers, runs, repos, pending] = await Promise.all([
+			const [me, workers, runs, repos, pending, myMachines] = await Promise.all([
 				api<Me>('/v1/me'),
 				api<Worker[]>('/v1/workers'),
 				api<RunSummary[]>('/v1/runs?limit=100'),
 				api<{ added: string[] }>('/v1/repos'),
-				api<Enrollment[]>('/v1/enrollments')
+				api<Enrollment[]>('/v1/enrollments'),
+				api<MyMachine[]>('/v1/me/machines').catch(() => [] as MyMachine[])
 			]);
 			this.me = me;
 			this.workers = workers;
+			this.myMachines = myMachines;
 			this.runs = runs;
 			this.pending = pending;
 			telemetry.ingest(workers, runs);
@@ -161,6 +169,20 @@ class Fleet {
 			toast.error(archived ? 'Could not archive' : 'Could not unarchive', { description: (e as Error).message });
 		}
 		void this.refresh();
+	}
+
+	/** Move one of your machines to another of your orgs (this one unless named); it carries on without reconnecting. */
+	async moveMachine(m: MyMachine, to: string = this.org?.id ?? ''): Promise<boolean> {
+		const name = this.me?.orgs.find((o) => o.id === to)?.name ?? 'this org';
+		try {
+			await api('/v1/me/machines/move', { method: 'POST', body: JSON.stringify({ from: m.org.id, id: m.id }), headers: { 'X-Sidefleet-Org': to } });
+			toast.success(`${m.display_name} moved to ${name}`, { description: `It takes your tasks in ${name} now, not in ${m.org.name}.` });
+			await this.refresh();
+			return true;
+		} catch (e) {
+			toast.error(`Could not move ${m.display_name}`, { description: (e as Error).message });
+			return false;
+		}
 	}
 
 	/** Act in another of the user's orgs: everything on the page is per org. */

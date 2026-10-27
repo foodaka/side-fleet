@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Which org the page acts in, when the signed-in user belongs to more than one.
+	// Which org the page acts in, always shown to signed-in users so they know where their tasks go.
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
 	import { fleet } from '../state.svelte';
@@ -7,7 +7,7 @@
 	const orgs = $derived(fleet.me?.orgs ?? []);
 </script>
 
-{#if orgs.length > 1 && fleet.org}
+{#if fleet.me?.user && fleet.org}
 	<DropdownMenu.Root>
 		<DropdownMenu.Trigger
 			class="flex w-full min-w-0 items-center gap-2 rounded-md border border-sidebar-border bg-background/60 px-2 py-1.5 text-left text-[13px] hover:bg-sidebar-accent"
@@ -28,6 +28,7 @@
 				{/each}
 			</DropdownMenu.RadioGroup>
 			<DropdownMenu.Separator />
+			<DropdownMenu.Item onclick={() => (fleet.machinesOpen = true)}>Your machines…</DropdownMenu.Item>
 			<DropdownMenu.Item onclick={() => (fleet.newOrgOpen = true)}>New org…</DropdownMenu.Item>
 		</DropdownMenu.Content>
 	</DropdownMenu.Root>

@@ -42,12 +42,12 @@ export function setOrg(id: string) {
 	memoryOrg = id;
 }
 
-/** Headers every API call carries: the developer key if there is one, else the chosen org. */
+/** Headers every API call carries: the developer key if there is one, else the chosen org (unless the call names one). */
 export function authHeaders(h: Headers = new Headers()): Headers {
 	const k = currentKey();
 	if (k) h.set('Authorization', 'Bearer ' + k);
 	const o = currentOrg();
-	if (o && !k) h.set('X-Sidefleet-Org', o);
+	if (o && !k && !h.has('X-Sidefleet-Org')) h.set('X-Sidefleet-Org', o);
 	return h;
 }
 

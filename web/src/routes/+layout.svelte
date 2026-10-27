@@ -15,6 +15,7 @@
 	import Sidebar from '#lib/sf/ui/Sidebar.svelte';
 	import SignIn from '#lib/sf/ui/SignIn.svelte';
 	import NewOrgDialog from '#lib/sf/ui/NewOrgDialog.svelte';
+	import MyMachinesDialog from '#lib/sf/ui/MyMachinesDialog.svelte';
 	import RepoPicker from '#lib/sf/ui/RepoPicker.svelte';
 	import FeedbackDialog from '#lib/sf/ui/FeedbackDialog.svelte';
 	import InboxBell from '#lib/sf/ui/InboxBell.svelte';
@@ -206,4 +207,5 @@
 {#if fleet.needsSignIn && !joining}<SignIn />{/if}
 <RepoPicker />
 <NewOrgDialog />
+<MyMachinesDialog />
 <FeedbackDialog />

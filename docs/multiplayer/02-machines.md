@@ -130,13 +130,21 @@ from where it was, on their own machine.
 People will connect a machine to their personal org, then join a team. They should be able to
 move it without reconnecting.
 
-**Move to Acme…**, owner only, and only when nothing is running on the machine:
-1. Reassign the machine's worker token to the target org (`worker_tokens.org_id`). The owner must
-   be a member of the target.
-2. Create a new `workers` row in the target org at the next `register` or heartbeat. The old row
-   stays, offline, in the old org, because past runs reference `(org_id, worker_id)`.
+Built (`crates/server/src/machines.rs`). From the org you want the machine in, the page lists your
+machines in your other orgs (`GET /v1/me/machines`) and moves one with a click
+(`POST /v1/me/machines/move`, `{from, id}`). Rooms offer it when none of your machines here has the
+room's repo; so do the home page and Machines.
+- Owner only, between orgs the owner belongs to, within the target org's machine limit, and only
+  when nothing is running on the machine.
+- The machine's worker token is pointed at the target org and its `workers` row is carried over, so
+  the next heartbeat lands there with nothing to reconnect. Past runs in the old org keep their
+  history without a machine, as when a machine is removed.
+- Machines connected with the control plane's static token, or sharing a token with other machines,
+  can't move; they reconnect from the target org instead.
 
-Phase 2. Until then the docs say: "To use a machine in a team, connect it from the team."
+Approving a machine by its code also lets you pick which of your orgs it joins.
+Settings > Your machines lists every machine of yours with the org it is in, and moves one to any
+other of your orgs. The org switcher always shows which org you're working in.
 
 ## 7. Later: sharing machines (deferred)
 

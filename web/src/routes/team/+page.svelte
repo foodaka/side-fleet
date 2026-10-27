@@ -3,6 +3,7 @@
 	// machines only ever run their owner's.
 	import { Button } from '#lib/components/ui/button';
 	import * as Select from '#lib/components/ui/select';
+	import { untrack } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import UserPlus from '@lucide/svelte/icons/user-plus';
 	import Link from '@lucide/svelte/icons/link';
@@ -33,12 +34,21 @@
 			invites = [];
 		}
 	}
+	// Keyed on the org id alone: a background refresh hands back a new org object and
+	// must not wipe a freshly made invite link.
+	const orgId = $derived(org?.id ?? null);
 	$effect(() => {
-		const o = org;
-		invites = null;
-		fresh = null;
-		if (o && fleet.isOwner) void loadInvites(o.id);
-		if (o) void fleet.reloadMembers();
+		const id = orgId;
+		untrack(() => {
+			invites = null;
+			fresh = null;
+			if (id) void fleet.reloadMembers();
+		});
+	});
+	// Ownership can settle after the org loads; that only loads the list, never clears the link.
+	$effect(() => {
+		const id = orgId;
+		if (id && fleet.isOwner) untrack(() => void loadInvites(id));
 	});
 
 	async function createInvite() {

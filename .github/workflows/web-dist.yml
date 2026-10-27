@@ -3,6 +3,11 @@
 # Pushes with the default token: works while main accepts direct pushes from Actions (a
 # ruleset on main would need "GitHub Actions" on its bypass list). Pushes made with this
 # token don't start other workflows, so this never loops.
+#
+# That push also starts no checks, and Render deploys main only once checks pass, so the
+# rebuilt app would wait for the next server change. After pushing, this asks Render to
+# deploy through the service's deploy hook (repo secret RENDER_DEPLOY_HOOK; Render: the
+# service's Settings > Deploy Hook). Without the secret it says so and skips the deploy.
 name: web-dist
 on:
   push:
@@ -33,6 +38,7 @@ jobs:
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web build
       - name: Commit the rebuilt app if it changed
+        id: commit
         run: |
           git add -A crates/server/web-dist
           if git diff --cached --quiet; then echo "web-dist is up to date"; exit 0; fi
@@ -40,7 +46,19 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Rebuild the embedded web app" -m "From $(git rev-parse --short HEAD) by the web-dist workflow."
           for i in 1 2 3; do
-            git push origin HEAD:main && exit 0
+            if git push origin HEAD:main; then echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0; fi
             git pull --rebase origin main
           done
           exit 1
+      - name: Deploy the rebuilt app
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK isn't set, so the rebuilt app goes live with the next server deploy"
+            exit 0
+          fi
+          # The hook deploys the latest commit on main: the one just pushed (or a newer one).
+          curl -fsS -X POST --retry 3 -o /dev/null "$RENDER_DEPLOY_HOOK"
+          echo "Asked Render to deploy main"

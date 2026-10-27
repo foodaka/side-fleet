@@ -108,6 +108,12 @@ Pushes to `main` that touch the binary deploy once CI passes. Render keeps the o
 serving until the new one is healthy, so two run side by side for a moment and live updates
 pause briefly during a deploy (see the one-instance note below).
 
+The rebuilt web app reaches `main` in a separate commit pushed by the `web-dist` workflow, which
+starts no checks, so Render wouldn't deploy it on its own. The workflow calls the service's
+deploy hook after pushing: copy the hook URL from the service's **Settings > Deploy Hook** in
+Render into the repository secret `RENDER_DEPLOY_HOOK`. Without it, a web-only change goes live
+with the next server deploy.
+
 **Fly.io.** [fly.toml](fly.toml) runs it with managed Postgres and Fly's TLS:
 
 ```bash

@@ -1,6 +1,9 @@
 <script lang="ts">
 	// First run: the steps from signing in to the first task, ticked off as the fleet reports them.
 	import Check from '@lucide/svelte/icons/check';
+	import { toast } from 'svelte-sonner';
+	import { Button } from '#lib/components/ui/button';
+	import { Input } from '#lib/components/ui/input';
 	import { fleet } from '../state.svelte';
 	import AddMachine from './AddMachine.svelte';
 	import PendingMachines from './PendingMachines.svelte';
@@ -12,12 +15,50 @@
 	const approval = $derived(!fleet.setup?.worker_token);
 	const login = $derived(fleet.me?.user?.login);
 	const asked = $derived(fleet.pending.length > 0);
+
+	// Your first org is named after your GitHub login; offer to name it, once per org.
+	const org = $derived(fleet.org);
+	const KEPT = 'sidefleet_org_named_';
+	let kept = $state(false);
+	$effect(() => {
+		kept = !!org && localStorage.getItem(KEPT + org.id) === '1';
+	});
+	const naming = $derived(!!login && !!org && fleet.isOwner && org.name === login && !kept);
+	const offerName = $derived(!!login && !!org && fleet.isOwner);
+	let orgName = $state('');
+	let saving = $state(false);
+	async function saveName(e: SubmitEvent) {
+		e.preventDefault();
+		saving = true;
+		try {
+			await fleet.renameOrg(orgName.trim());
+			toast.success(`Your workspace is ${orgName.trim()}`);
+		} catch (err) {
+			toast.error('Could not rename the workspace', { description: (err as Error).message });
+		} finally {
+			saving = false;
+		}
+	}
+	function keep() {
+		if (org) localStorage.setItem(KEPT + org.id, '1');
+		kept = true;
+	}
+
 	const steps = $derived<Step[]>([
 		{
 			title: login ? 'Signed in with GitHub' : 'Signed in',
 			detail: login ? `As @${login}. Sidefleet only reads your name and email, not your repos.` : 'This page is your fleet.',
 			state: 'done'
 		},
+		...(offerName
+			? [{
+				title: 'Name your workspace',
+				detail: naming
+					? `It's called ${org!.name} after your GitHub login. Teammates you invite see this name. You can change it later in Settings.`
+					: `${org!.name}. You can change it in Settings.`,
+				state: naming ? 'current' : 'done'
+			} satisfies Step]
+			: []),
 		{
 			title: 'Connect a machine',
 			detail: 'A laptop, a Mac mini or a VPS with Claude Code, Codex or opencode set up. It connects out to this page; nothing connects in.',
@@ -57,7 +98,13 @@
 					</h2>
 					<p class="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">{s.detail}</p>
 				</div>
-				{#if s.title === 'Connect a machine' && !asked}
+				{#if s.title === 'Name your workspace' && naming}
+					<form class="flex flex-wrap items-center gap-2" onsubmit={saveName}>
+						<Input bind:value={orgName} placeholder="Acme" maxlength={80} class="h-9 w-56" aria-label="Workspace name" />
+						<Button type="submit" class="h-9 rounded-full" disabled={saving || !orgName.trim() || orgName.trim() === org?.name}>{saving ? 'Saving…' : 'Save'}</Button>
+						<button type="button" class="px-2 text-[13px] text-muted-foreground hover:text-foreground" onclick={keep}>Keep {org?.name}</button>
+					</form>
+				{:else if s.title === 'Connect a machine' && !asked}
 					<div class="rounded-2xl border bg-card p-5 shadow-[0_1px_2px_rgb(0_0_0/0.03)]">
 						<AddMachine />
 					</div>

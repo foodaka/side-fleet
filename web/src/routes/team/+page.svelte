@@ -7,6 +7,7 @@
 	import { toast } from 'svelte-sonner';
 	import UserPlus from '@lucide/svelte/icons/user-plus';
 	import Link from '@lucide/svelte/icons/link';
+	import Pencil from '@lucide/svelte/icons/pencil';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { until } from '#lib/sf/format';
@@ -108,7 +109,14 @@
 
 <section class="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-8 md:px-8">
 	<header class="flex flex-col gap-1.5">
-		<h1 class="text-[22px] font-semibold tracking-tight">{org?.name ?? 'Team'}</h1>
+		<h1 class="flex items-center gap-2 text-[22px] font-semibold tracking-tight">
+			{org?.name ?? 'Team'}
+			{#if me && fleet.isOwner}
+				<button type="button" aria-label="Rename org" title="Rename org" class="grid size-7 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground" onclick={() => (fleet.renameOrgOpen = true)}>
+					<Pencil class="size-3.5" />
+				</button>
+			{/if}
+		</h1>
 		<p class="text-[13px] leading-relaxed text-muted-foreground">
 			Everyone here sees the team's tasks, rooms and changes. Machines only ever run their owner's tasks, so to pick up someone's work you continue it on your own machine.
 		</p>

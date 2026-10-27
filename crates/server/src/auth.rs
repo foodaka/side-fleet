@@ -262,6 +262,7 @@ mod tests {
             (Method::GET, "/v1/api-tokens"),
             (Method::POST, "/v1/api-tokens"),
             (Method::POST, "/v1/orgs/x/tokens"),
+            (Method::PATCH, "/v1/orgs/x"),
             (Method::GET, "/v1/enrollments"),
             (Method::DELETE, "/v1/workers/mac"),
             (Method::POST, "/v1/workers/mac/update"),

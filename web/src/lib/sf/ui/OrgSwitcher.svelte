@@ -29,6 +29,7 @@
 			</DropdownMenu.RadioGroup>
 			<DropdownMenu.Separator />
 			<DropdownMenu.Item onclick={() => (fleet.machinesOpen = true)}>Your machines…</DropdownMenu.Item>
+			{#if fleet.isOwner}<DropdownMenu.Item onclick={() => (fleet.renameOrgOpen = true)}>Rename {fleet.org.name}…</DropdownMenu.Item>{/if}
 			<DropdownMenu.Item onclick={() => (fleet.newOrgOpen = true)}>New org…</DropdownMenu.Item>
 		</DropdownMenu.Content>
 	</DropdownMenu.Root>

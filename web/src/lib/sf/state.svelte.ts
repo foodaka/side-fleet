@@ -28,6 +28,7 @@ class Fleet {
 	/** A thread whose page should open the fork dialog for its latest message (asked from the sidebar). */
 	forkThread = $state<string | null>(null);
 	newOrgOpen = $state(false);
+	renameOrgOpen = $state(false);
 	feedbackOpen = $state(false);
 	/** How this control plane lets people in; null until loaded. */
 	methods = $state<AuthMethods | null>(null);
@@ -183,6 +184,15 @@ class Fleet {
 			toast.error(`Could not move ${m.display_name}`, { description: (e as Error).message });
 			return false;
 		}
+	}
+
+	/** Rename the org the page acts in (owners). */
+	async renameOrg(name: string) {
+		const org = this.org;
+		if (!org || !this.me) return;
+		const r = await api<{ name: string }>(`/v1/orgs/${org.id}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+		this.me = { ...this.me, orgs: this.me.orgs.map((o) => (o.id === org.id ? { ...o, name: r.name } : o)) };
+		void this.refresh();
 	}
 
 	/** Act in another of the user's orgs: everything on the page is per org. */

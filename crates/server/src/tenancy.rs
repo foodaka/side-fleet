@@ -141,6 +141,11 @@ pub async fn create_org(pool: &PgPool, name: &str, owner: Uuid) -> sqlx::Result<
     Ok(id)
 }
 
+pub async fn rename_org(pool: &PgPool, org: Uuid, name: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE orgs SET name = $2 WHERE id = $1").bind(org).bind(name).execute(pool).await?;
+    Ok(())
+}
+
 /// The caller's orgs: those they own first, then by age.
 pub async fn memberships(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<OrgMembership>> {
     let rows = sqlx::query(

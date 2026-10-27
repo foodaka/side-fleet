@@ -428,3 +428,24 @@ async fn you_can_move_your_own_machines_between_your_orgs_but_not_anyone_elses()
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn owners_rename_their_org_and_members_cannot() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, _, _) = team(&env).await;
+    let org = alice.org.clone().unwrap();
+
+    let (s, v) = alice.call(Method::PATCH, &format!("/v1/orgs/{org}"), Some(json!({"name": "  Acme Labs "}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let names: Vec<String> = bob.me().await["orgs"].as_array().unwrap().iter().map(|o| o["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.contains(&"Acme Labs".to_string()), "{names:?}");
+    assert_eq!(alice.call(Method::PATCH, &format!("/v1/orgs/{org}"), Some(json!({"name": " "}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(bob.call(Method::PATCH, &format!("/v1/orgs/{org}"), Some(json!({"name": "Bob's now"}))).await.0, StatusCode::FORBIDDEN);
+
+    // Bob renames his own personal org, which was named after his GitHub login.
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != org.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(bob.call(Method::PATCH, &format!("/v1/orgs/{personal}"), Some(json!({"name": "Bob's shop"}))).await.0, StatusCode::OK);
+    assert_eq!(alice.call(Method::PATCH, &format!("/v1/orgs/{personal}"), Some(json!({"name": "mine"}))).await.0, StatusCode::NOT_FOUND);
+
+    env.teardown().await;
+}

@@ -62,6 +62,10 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   task's title and the reason, never agent output. Browsers only allow push on HTTPS pages or
   `localhost` (on iPhone, add the page to the Home Screen first). `serve` creates the VAPID key for
   it in `~/.sidefleet/server.env`; elsewhere set `SIDEFLEET_VAPID_PRIVATE_KEY`.
+- **Build with your team** (hosted mode): invite people to your org with a link, and everyone sees
+  the team's threads, diffs and PRs. Machines are not shared: each runs only its owner's tasks,
+  under its owner's agent sign-in. To pick up a teammate's work, "Continue on my machine" forks it
+  onto yours. See [Teams and rooms](#teams-and-rooms).
 - **Chat with your fleet**: connect the AI assistant you already chat with (Hermes, OpenClaw,
   Claude Code or any MCP client) on the Chat apps page, and run and check tasks from Telegram,
   WhatsApp or Discord: "fix the failing test in my web repo", "how did it go?", "open a PR". You
@@ -150,6 +154,34 @@ approves it under Pending machines on the Machines page (the request expires aft
 `SIDEFLEET_GITHUB_CLIENT_SECRET` and `SIDEFLEET_PUBLIC_URL` turns on GitHub sign-in, orgs, per-org
 worker tokens and plan limits. What it stores and how to deploy or try it locally:
 [HOSTED.md](HOSTED.md).
+
+## Teams and rooms
+
+On a hosted control plane, an org is a team workspace:
+
+- **Invites.** On the Team page, owners make an invite link for one person or many, valid for 1 to
+  30 days. Whoever opens it signs in with GitHub and joins. Removing someone revokes their machines'
+  tokens and stops their queued tasks.
+- **Whose work is whose.** Every task records who started it, with their avatar in the sidebar;
+  switch between Mine and Team to see your tasks or everyone's. Only a thread's creator can reply,
+  restore, approve its commands or open its PR. The bell and push notifications are only for your
+  own tasks.
+- **Your machines stay yours.** A machine runs only the tasks of the person who connected it. If
+  you connected one to your personal org before joining a team, "Move it to <org>" brings it over
+  without reconnecting.
+- **Rooms** are for working toward one goal together. A room has a goal in one repo, the team's
+  notes, and tasks that each run on their owner's machine, in their own worktree. When a task is
+  done, its owner presses Add to room to merge its branch into the room branch
+  (`sidefleet/room-<id>`, never force-pushed), and new tasks then start from it. Every task's agent
+  gets a brief with the goal, the notes and what the other tasks are doing, so it doesn't redo or
+  undo a teammate's work. A merge conflict shows its files on the task card, with Ask my agent to
+  fix. When the work is finished, Compare on GitHub opens the room branch for one PR.
+
+![A room: four people's tasks toward one goal, two merged, one conflicting, with the team's notes](docs/screenshots/room.png)
+![A teammate's running task: watch it, or continue it on your own machine](docs/screenshots/run-teammate.png)
+![The Team page: invite links and members](docs/screenshots/team.png)
+
+How it's designed, and what comes next, is in [docs/multiplayer/](docs/multiplayer/README.md).
 
 ## Agents
 

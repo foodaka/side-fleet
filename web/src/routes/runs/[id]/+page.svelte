@@ -293,7 +293,7 @@
 							ondecide={theirs ? undefined : (item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}
 						/>
 					{/each}
-					{#if !live && thread.turns.length && thread.branch}
+					{#if !live && thread.turns.length && thread.branch && (thread.changes?.file_count || pr)}
 						{@const branch = thread.branch}
 						<div class="flex items-center gap-3 rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground max-sm:flex-col max-sm:items-stretch">
 							<p class="flex-1">

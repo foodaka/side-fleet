@@ -21,10 +21,9 @@ UPDATE worker_tokens t SET owner_id = m.user_id
 UPDATE worker_tokens t SET owner_id = e.decided_by
   FROM enrollments e
  WHERE e.token_id = t.id AND e.decided_by IS NOT NULL AND t.owner_id IS NULL;
--- Other org tokens could only be minted by owners: with one owner, it was them.
-UPDATE worker_tokens t SET owner_id = (SELECT m.user_id FROM org_members m WHERE m.org_id = t.org_id AND m.role = 'owner')
- WHERE t.owner_id IS NULL
-   AND (SELECT count(*) FROM org_members m WHERE m.org_id = t.org_id AND m.role = 'owner') = 1;
+-- Other tokens in team orgs stay ownerless: an owner may have minted one for a member's machine,
+-- so guessing could make a member's machine run the owner's tasks. Such machines run nothing
+-- until reconnected (approving a machine makes the approver its owner).
 -- Machines take their token's owner (workers.token_hash is the token they registered with).
 UPDATE workers w SET owner_id = t.owner_id
   FROM worker_tokens t

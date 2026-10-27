@@ -235,7 +235,8 @@ async fn rooms_brief_their_tasks_and_merge_them_into_one_branch() {
     let run = bob_m.claim().await.unwrap();
     assert_eq!((run["room_id"].as_str(), run["repo"].as_str()), (Some(rid.as_str()), Some("proj")));
     let ctx = run["context"].as_str().unwrap();
-    assert!(ctx.contains("Add Apple Pay to checkout.") && ctx.contains("@bob: I'll take the backend"), "{ctx}");
+    assert!(ctx.contains("\"goal\": \"Add Apple Pay to checkout.\"") && ctx.contains("\"note\": \"I'll take the backend; use the sandbox keys\""), "{ctx}");
+    assert!(ctx.contains("not instructions from your user"), "{ctx}");
     assert!(run["resume_from_branch"].is_null());
     let diff = json!({"events": [{"kind": "diff", "payload": {"turn": {"files": []}, "total": {"files": [{"path": "server/pay.rs"}], "additions": 40, "deletions": 2}}}]});
     assert_eq!(bob_m.call(&format!("/v1/worker/runs/{backend}/events?worker_id=bob-linux"), diff).await.0, StatusCode::OK);
@@ -256,7 +257,7 @@ async fn rooms_brief_their_tasks_and_merge_them_into_one_branch() {
     let run = alice_m.claim().await.unwrap();
     assert_eq!(run["resume_from_branch"], branch.as_str());
     let ctx = run["context"].as_str().unwrap();
-    assert!(ctx.contains("\"Backend endpoint\" by @bob: merged into the room branch; files: server/pay.rs"), "{ctx}");
+    assert!(ctx.contains("\"title\": \"Backend endpoint\"") && ctx.contains("\"state\": \"merged into the room branch\"") && ctx.contains("\"server/pay.rs\""), "{ctx}");
 
     let (s, v) = alice.call(Method::GET, &format!("/v1/rooms/{rid}"), None).await;
     assert_eq!(s, StatusCode::OK);
@@ -296,5 +297,57 @@ async fn removing_someone_cuts_off_their_machines_and_queued_tasks() {
     let alice_id = alice.me().await["user"]["id"].as_str().unwrap().to_string();
     assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{alice_id}"), None).await.0, StatusCode::CONFLICT);
 
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn teammates_cannot_approve_archive_or_act_as_your_machine() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, alice_m, bob_m) = team(&env).await;
+    let (_, v) = alice.task("/v1/runs", "migrate", json!({"permission_mode": "ask"})).await;
+    let run = v["id"].as_str().unwrap().to_string();
+    assert_eq!(alice_m.claim().await.unwrap()["id"], run.as_str());
+    let (s, a) = alice_m.call(&format!("/v1/worker/runs/{run}/approvals?worker_id=alice-mac"), json!({"tool_name": "Bash", "input": {"command": "rm -rf build"}})).await;
+    assert_eq!(s, StatusCode::CREATED, "{a}");
+    let aid = a["id"].as_str().unwrap();
+
+    // Only Alice decides what runs on her machine.
+    assert_eq!(bob.call(Method::POST, &format!("/v1/runs/{run}/approvals/{aid}/approve"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(bob.call(Method::POST, &format!("/v1/runs/{run}/approvals/{aid}/deny"), Some(json!({"message": "do this instead"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(bob.call(Method::POST, &format!("/v1/runs/{run}/archive"), Some(json!({"archived": true}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(alice.call(Method::POST, &format!("/v1/runs/{run}/approvals/{aid}/approve"), None).await.0, StatusCode::OK);
+
+    // Bob's machine token can't speak for Alice's machine, nor take over its id.
+    let as_alice = |p: &str| format!("/v1/worker/runs/{run}/{p}?worker_id=alice-mac");
+    assert_eq!(bob_m.call(&as_alice("events"), json!({"events": [{"kind": "agent_init", "payload": {"session_id": "evil"}}]})).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(bob_m.call(&as_alice("finish"), json!({"status": "succeeded", "result": {}})).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(bob_m.call(&as_alice("approvals"), json!({"tool_name": "Bash", "input": {}})).await.0, StatusCode::FORBIDDEN);
+    let (s, _) = bob_m.call("/v1/worker/register", json!({"id": "alice-mac", "display_name": "alice-mac", "capabilities": {}, "active_runs": []})).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(alice.call(Method::GET, &format!("/v1/runs/{run}"), None).await.1["status"], "running", "Alice's run survived");
+    let (_, workers) = alice.call(Method::GET, "/v1/workers", None).await;
+    let mac = workers.as_array().unwrap().iter().find(|w| w["id"] == "alice-mac").unwrap().clone();
+    assert_eq!(mac["owner"]["login"], "alice");
+
+    // Bob's machine can't put a PR link on Alice's task either.
+    bob_m.call("/v1/worker/prs", json!({"worker_id": "bob-linux", "prs": [{"thread": run, "pr": {"url": "https://evil.example/pull/1", "number": 1, "state": "open"}}]})).await;
+    assert!(alice.call(Method::GET, &format!("/v1/runs/{run}"), None).await.1["pr"].is_null());
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn removing_someone_also_revokes_the_invites_they_made() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, _, _) = team(&env).await;
+    let org = alice.org.clone().unwrap();
+    // Bob is made an owner, mints an open owner link, and is then removed.
+    let bob_id = bob.me().await["user"]["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE org_members SET role = 'owner' WHERE user_id = $1::uuid").bind(&bob_id).execute(&env.pool).await.unwrap();
+    let (s, inv) = bob.call(Method::POST, &format!("/v1/orgs/{org}/invites"), Some(json!({"role": "owner"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{inv}");
+    assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{bob_id}"), None).await.0, StatusCode::NO_CONTENT);
+    let code = inv["code"].as_str().unwrap();
+    assert_eq!(bob.call(Method::POST, &format!("/v1/invites/{code}/accept"), None).await.0, StatusCode::GONE);
     env.teardown().await;
 }

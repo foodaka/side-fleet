@@ -245,7 +245,10 @@ async fn create_room_task(
     if room.archived_at.is_some() {
         return Err(ApiError(StatusCode::CONFLICT, "this room is archived; bring it back to start tasks in it".into()));
     }
-    req["repo"] = json!(room.repo);
+    let Some(obj) = req.as_object_mut() else {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "expected a JSON object".into()));
+    };
+    obj.insert("repo".into(), json!(room.repo));
     let req: CreateRunRequest = serde_json::from_value(req).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?;
     start_run(&state, &caller, req, Some(room)).await
 }
@@ -776,6 +779,9 @@ async fn archive_run(
     Path(id): Path<Uuid>,
     Json(req): Json<ArchiveRequest>,
 ) -> Result<Json<Run>, ApiError> {
+    if !caller.is_owner() {
+        own_thread(&state, &caller, id).await?;
+    }
     let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
     state.inbox.signal(caller.org_id()); // archived tasks leave the inbox
@@ -808,6 +814,8 @@ async fn decide_tool(
     body: axum::body::Bytes,
     approve: bool,
 ) -> Result<Json<Approval>, ApiError> {
+    // The tool call runs on the creator's machine, so only they decide it.
+    own_thread(&state, &caller, id).await?;
     let req: DecideApprovalRequest = if body.iter().all(u8::is_ascii_whitespace) {
         DecideApprovalRequest::default()
     } else {
@@ -1028,7 +1036,9 @@ async fn register_worker(
             ));
         }
     }
-    let w = db::upsert_worker(&state.pool, auth.org, &req.id, &req.display_name, &auth.token_hash, &req.capabilities).await?;
+    let Some(w) = db::upsert_worker(&state.pool, auth.org, &req.id, &req.display_name, &auth.token_hash, &req.capabilities).await? else {
+        return Err(ApiError(StatusCode::CONFLICT, format!("a teammate's machine is already registered as {}; pick another machine id (--id)", req.id)));
+    };
     tracing::info!(worker = %w.id, org = %auth.org, repos = w.capabilities.repos.len(), "worker registered");
     for ev in db::reconcile_worker_runs(&state.pool, auth.org, &req.id, &req.active_runs).await? {
         tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run lost by worker restart; marked finished");
@@ -1125,6 +1135,16 @@ struct WorkerQuery {
     worker_id: String,
 }
 
+/// A worker acting on a run names itself; its token must be the one that machine registered with,
+/// or another member's token could write to, finish or ask approvals in someone else's runs.
+async fn worker_is(state: &AppState, auth: &WorkerAuth, worker_id: &str) -> Result<(), ApiError> {
+    if db::worker_owns_token(&state.pool, auth.org, worker_id, &auth.token_hash).await? {
+        Ok(())
+    } else {
+        Err(ApiError(StatusCode::FORBIDDEN, "this token doesn't belong to that machine".into()))
+    }
+}
+
 async fn post_events(
     State(state): State<AppState>,
     Extension(auth): Extension<WorkerAuth>,
@@ -1135,6 +1155,7 @@ async fn post_events(
     if req.events.len() > 1000 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "too many events in one batch".into()));
     }
+    worker_is(&state, &auth, &q.worker_id).await?;
     match db::append_events(&state.pool, auth.org, id, &q.worker_id, &req.events).await? {
         AppendOutcome::Appended(stored, run) => {
             for ev in stored {
@@ -1168,6 +1189,7 @@ async fn post_live_text(
         return Ok(StatusCode::NO_CONTENT);
     }
     let run = db::get_run(&state.pool, auth.org, id).await?.ok_or_else(not_found)?;
+    worker_is(&state, &auth, &q.worker_id).await?;
     if run.worker_id.as_deref() != Some(q.worker_id.as_str()) {
         return Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into()));
     }
@@ -1201,6 +1223,7 @@ async fn request_approval(
     if req.tool_name.trim().is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "tool_name must not be empty".into()));
     }
+    worker_is(&state, &auth, &q.worker_id).await?;
     match crate::approvals::request(&state.pool, auth.org, id, &q.worker_id, &req).await? {
         RequestOutcome::Created(a, ev) => {
             state.events.publish(ev);
@@ -1239,6 +1262,7 @@ async fn finish_run(
     if !req.status.is_terminal() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "finish status must be terminal".into()));
     }
+    worker_is(&state, &auth, &q.worker_id).await?;
     match db::finish_run(&state.pool, auth.org, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
         FinishOutcome::Finished(run, evs) => {
             for ev in evs {

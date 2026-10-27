@@ -4,6 +4,7 @@
 //! the task's own; a conflict aborts it and leaves the room branch as it was, and
 //! nothing is ever force-pushed.
 
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -44,11 +45,12 @@ pub async fn integrate(worktree: &Path, task_branch: &str, room_branch: &str, ti
     if !is_task_branch(task_branch) {
         return Err(anyhow::anyhow!("{task_branch} is not a sidefleet task branch").into());
     }
-    if !is_task_branch(room_branch) {
+    if !is_room_branch(room_branch) {
         return Err(anyhow::anyhow!("{room_branch} is not a sidefleet room branch; not pushing to it").into());
     }
     commit_leftovers(worktree, task_branch).await?;
-    let message = format!("Room: {}", title.lines().next().unwrap_or("").trim());
+    let first = title.lines().next().unwrap_or("").trim();
+    let message = format!("Room: {}", first.strip_prefix("Add to the room: ").unwrap_or(first));
     for attempt in 1..=ATTEMPTS {
         match try_once(worktree, task_branch, room_branch, &message).await {
             Ok(Attempt::Done(i)) => return Ok(i),
@@ -76,7 +78,7 @@ async fn try_once(worktree: &Path, task_branch: &str, room_branch: &str, message
     let start_ref = if room_exists { fetch_branch(worktree, room_branch).await? } else { default_branch(worktree).await? };
     let start = git(worktree, &["rev-parse", &format!("{start_ref}^{{commit}}")], None).await?;
 
-    let tmp = TempWorktree::add(worktree, &start).await?;
+    let tmp = TempWorktree::add(worktree, worktree, &start).await?;
     let result = merge_and_push(&tmp.path, task_branch, room_branch, message, &start).await;
     tmp.remove().await;
     result
@@ -84,7 +86,9 @@ async fn try_once(worktree: &Path, task_branch: &str, room_branch: &str, message
 
 async fn merge_and_push(dir: &Path, task_branch: &str, room_branch: &str, message: &str, start: &str) -> Result<Attempt, Failure> {
     let mut args = identity(dir).await;
-    args.extend(["merge", "--no-ff", "--no-edit", "--quiet", "-m", message, task_branch]);
+    // Hooks off: the room branch carries teammates' commits, and a repo whose hooks live in tracked
+    // files (a relative core.hooksPath) would otherwise run their scripts here with nobody asking.
+    args.extend(["-c", NO_HOOKS, "merge", "--no-ff", "--no-edit", "--no-verify", "--quiet", "-m", message, task_branch]);
     if let Err(e) = git(dir, &args, None).await {
         let conflicts: Vec<String> = git(dir, &["diff", "--name-only", "--diff-filter=U"], None)
             .await
@@ -125,7 +129,7 @@ async fn commit_leftovers(worktree: &Path, task_branch: &str) -> Result<()> {
     if !git(worktree, &["status", "--porcelain"], None).await?.is_empty() {
         git(worktree, &["add", "-A"], None).await?;
         let mut args = identity(worktree).await;
-        args.extend(["commit", "--no-verify", "--quiet", "-m", "sidefleet: changes for the room"]);
+        args.extend(["-c", NO_HOOKS, "commit", "--no-verify", "--quiet", "-m", "sidefleet: changes for the room"]);
         git(worktree, &args, None).await?;
     }
     Ok(())
@@ -157,6 +161,15 @@ async fn default_branch(dir: &Path) -> Result<String> {
     anyhow::bail!("can't tell origin's default branch; run `git remote set-head origin --auto` in the repo")
 }
 
+/// Room branches are named by the control plane after the room: `sidefleet/room-<8 hex>`. Anything
+/// else (another task's branch, a hand-made `sidefleet/...` one) is never merged into or pushed.
+pub fn is_room_branch(name: &str) -> bool {
+    name.strip_prefix("sidefleet/room-").is_some_and(|id| id.len() == 8 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// Points git's hooks at nothing, so no hook script runs during the merge.
+const NO_HOOKS: &str = "core.hooksPath=/dev/null";
+
 /// A detached worktree for the merge, removed afterwards whatever happened.
 struct TempWorktree {
     repo: PathBuf,
@@ -164,10 +177,14 @@ struct TempWorktree {
 }
 
 impl TempWorktree {
-    async fn add(repo: &Path, start: &str) -> Result<TempWorktree> {
-        let path = std::env::temp_dir().join(format!("sidefleet-integrate-{}", uuid::Uuid::new_v4().simple()));
+    /// Next to the task's worktree, in a directory only this user can read (not the shared temp dir).
+    async fn add(repo: &Path, beside: &Path, start: &str) -> Result<TempWorktree> {
+        let dir = beside.parent().unwrap_or(beside).join(".sidefleet-integrate");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).context("creating the merge directory")?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).context("restricting the merge directory")?;
+        let path = dir.join(uuid::Uuid::new_v4().simple().to_string());
         let p = path.to_str().context("temporary path is not UTF-8")?;
-        git(repo, &["worktree", "add", "--quiet", "--detach", p, start], None).await.context("creating a worktree to merge in")?;
+        git(repo, &["-c", NO_HOOKS, "worktree", "add", "--quiet", "--detach", p, start], None).await.context("creating a worktree to merge in")?;
         Ok(TempWorktree { repo: repo.to_path_buf(), path })
     }
 
@@ -184,6 +201,14 @@ impl TempWorktree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_room_branches_are_merged_into() {
+        assert!(is_room_branch("sidefleet/room-1a2b3c4d"));
+        for bad in ["sidefleet/1a2b3c4d", "sidefleet/room-1A2B3C4D", "sidefleet/room-1a2b3c4", "sidefleet/room-1a2b3c4d5", "sidefleet/room-1a2b3c4d/x", "sidefleet/release", "main"] {
+            assert!(!is_room_branch(bad), "{bad}");
+        }
+    }
 
     struct Fixture {
         _tmp: tempfile::TempDir,
@@ -223,7 +248,7 @@ mod tests {
 
     fn leftover_merge_worktrees(repo: &Path) -> usize {
         let out = std::process::Command::new("git").arg("-C").arg(repo).args(["worktree", "list"]).output().unwrap();
-        String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains("sidefleet-integrate-")).count()
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains("sidefleet-integrate")).count()
     }
 
     #[tokio::test]
@@ -274,6 +299,37 @@ mod tests {
         // The task's own worktree is untouched by the failed merge.
         assert!(g(&b, &["status", "--porcelain"]).await.is_empty());
         assert_eq!(std::fs::read_to_string(b.join("shared.txt")).unwrap(), "from b\n");
+    }
+
+    #[tokio::test]
+    async fn hook_scripts_committed_to_the_repo_do_not_run_during_the_merge() {
+        // A repo whose hooks live in tracked files (husky v4-v8 style): anyone who can push to the
+        // room branch controls them, so the worker must not run them while it merges.
+        let f = fixture().await;
+        let marker = f.root.join("hook-ran");
+        std::fs::create_dir_all(f.repo.join(".hooks")).unwrap();
+        for hook in ["post-checkout", "post-merge", "pre-merge-commit", "prepare-commit-msg", "commit-msg"] {
+            let path = f.repo.join(".hooks").join(hook);
+            std::fs::write(&path, format!("#!/bin/sh\necho {hook} >> '{}'\n", marker.display())).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        g(&f.repo, &["add", "-A"]).await;
+        g(&f.repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--no-verify", "-m", "hooks"]).await;
+        g(&f.repo, &["push", "--quiet", "origin", "main"]).await;
+        g(&f.repo, &["config", "core.hooksPath", ".hooks"]).await;
+        let wt = task(&f, "sidefleet/aaaa1111", "a.txt", "a\n").await;
+        let _ = std::fs::remove_file(&marker); // the task's own checkout above may run them; that isn't the merge
+        integrate(&wt, "sidefleet/aaaa1111", "sidefleet/room-12345678", "Add a").await.unwrap();
+        assert!(!marker.exists(), "a hook ran: {}", std::fs::read_to_string(&marker).unwrap_or_default());
+    }
+
+    #[tokio::test]
+    async fn merge_worktrees_are_private_to_the_user() {
+        let f = fixture().await;
+        let wt = task(&f, "sidefleet/aaaa1111", "a.txt", "a\n").await;
+        integrate(&wt, "sidefleet/aaaa1111", "sidefleet/room-12345678", "Add a").await.unwrap();
+        let dir = wt.parent().unwrap().join(".sidefleet-integrate");
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[tokio::test]

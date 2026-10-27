@@ -197,6 +197,8 @@ pub async fn remove_member(pool: &PgPool, org: Uuid, user: Uuid) -> sqlx::Result
     sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
     sqlx::query("UPDATE worker_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND owner_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
     sqlx::query("UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND user_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
+    // Invite links they made would otherwise let them (or whoever has one) back in.
+    sqlx::query("UPDATE org_invites SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND created_by = $2").bind(org).bind(user).execute(&mut *tx).await?;
     sqlx::query(
         "UPDATE runs SET status = 'stopped', finished_at = now(), result = '{\"error\": \"its owner left the org\"}'::jsonb
          WHERE org_id = $1 AND created_by = $2 AND status = 'queued'",

@@ -437,7 +437,12 @@ pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: O
 /// Queue an `integrate` run on the machine with the thread's worktree: it merges
 /// the thread's branch into `room_branch` and pushes that.
 pub async fn create_integrate_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, room_branch: &str) -> sqlx::Result<PrOutcome> {
-    thread_branch_run(pool, org, run_id, "integrate", created_by, |_| ("Add to the room".to_string(), room_branch.to_string())).await
+    // The task text names the merge commit on the room branch ("Room: <first line>").
+    thread_branch_run(pool, org, run_id, "integrate", created_by, |root| {
+        let first: String = root.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("a task").trim().chars().take(72).collect();
+        (format!("Add to the room: {first}"), room_branch.to_string())
+    })
+    .await
 }
 
 /// A run that works on a finished thread's branch on the machine that has it
@@ -502,7 +507,11 @@ async fn thread_branch_run(
 /// its org; the worker that reports a pull request is the one that checks it later.
 pub async fn record_prs(pool: &PgPool, org: Uuid, worker_id: &str, prs: &[PrReport]) -> sqlx::Result<()> {
     for r in prs {
-        sqlx::query("UPDATE runs SET pr = $3, pr_worker = $4, pr_checked_at = now() WHERE id = $1 AND org_id = $2 AND parent_id IS NULL")
+        // Only threads this machine ran: another member's machine can't set the PR link on someone else's task.
+        sqlx::query(
+            "UPDATE runs SET pr = $3, pr_worker = $4, pr_checked_at = now() WHERE id = $1 AND org_id = $2 AND parent_id IS NULL
+               AND EXISTS (SELECT 1 FROM runs t WHERE (t.id = $1 OR t.parent_id = $1) AND t.org_id = $2 AND t.worker_id = $4)",
+        )
             .bind(r.thread)
             .bind(org)
             .bind(json!(r.pr))
@@ -1466,7 +1475,7 @@ pub async fn upsert_worker(
     display_name: &str,
     token_hash: &str,
     caps: &Capabilities,
-) -> sqlx::Result<Worker> {
+) -> sqlx::Result<Option<Worker>> {
     let row = sqlx::query(
         "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active, org_id, owner_id)
          VALUES ($1, $2, $3, $4, now(), $5, $6, $7, (SELECT t.owner_id FROM worker_tokens t WHERE t.token_hash = $3 AND t.org_id = $7))
@@ -1474,6 +1483,8 @@ pub async fn upsert_worker(
             token_hash = EXCLUDED.token_hash, capabilities = EXCLUDED.capabilities,
             last_heartbeat_at = now(), update_requested = false,
             slots_parallel = EXCLUDED.slots_parallel, slots_active = EXCLUDED.slots_active
+         -- A machine id registered by one person can't be taken over with another person's token.
+         WHERE workers.owner_id IS NOT DISTINCT FROM EXCLUDED.owner_id
          RETURNING id, display_name, capabilities, last_heartbeat_at",
     )
     .bind(id)
@@ -1483,9 +1494,9 @@ pub async fn upsert_worker(
     .bind(caps.slots.as_ref().map(|s| s.parallel as i32))
     .bind(caps.slots.as_ref().map(|s| s.active as i32))
     .bind(org)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(row_to_worker(&row))
+    Ok(row.as_ref().map(row_to_worker))
 }
 
 /// Returns false when the worker is unknown or registered with a different token.

@@ -102,6 +102,12 @@
 	{#if first && run.images?.length}
 		<ToolImages images={run.images} inset={false} alt="Attached to the task" />
 	{/if}
+	{#if run.room_id && run.kind === 'agent' && !run.forked_from && run.context}
+		<details class="self-end text-[11.5px] text-muted-foreground max-w-[85%]">
+			<summary class="cursor-pointer text-right select-none hover:text-foreground">Room brief sent with this message</summary>
+			<pre class="mt-1 max-h-72 overflow-auto rounded-lg border bg-muted/50 p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{run.context}</pre>
+		</details>
+	{/if}
 	{#if run.moved_from}
 		<p class="flex items-center gap-1.5 text-[13px] text-muted-foreground">
 			<ArrowRightLeft class="size-3.5 shrink-0" />

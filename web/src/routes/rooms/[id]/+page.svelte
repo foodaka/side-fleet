@@ -127,7 +127,8 @@
 	let agent = $state<AgentId>(AGENTS.some((a) => a.id === stored('sidefleet_agent')) ? (stored('sidefleet_agent') as AgentId) : 'claude');
 	let model = $state('');
 	let effort = $state('');
-	let perm = $state('bypassPermissions');
+	// Not full access by default: room tasks read teammates' notes, so commands wait for a yes unless you choose otherwise.
+	let perm = $state('acceptEdits');
 	let machine = $state('');
 	let task = $state('');
 	let starting = $state(false);
@@ -379,7 +380,7 @@
 								size="sm"
 								unavailable={(a) => (withRepo.some((w) => hasAgent(w, a)) ? '' : `Not on a machine of yours with ${repoLabel(room?.repo)}`)}
 							/>
-							<ComposerOptions {agent} perm={perm} onperm={(v) => (perm = v)} defaultPerm="bypassPermissions" {machines} machine={pinned?.id ?? ''} onmachine={(v) => (machine = v)} size="sm" />
+							<ComposerOptions {agent} perm={perm} onperm={(v) => (perm = v)} defaultPerm="acceptEdits" {machines} machine={pinned?.id ?? ''} onmachine={(v) => (machine = v)} size="sm" />
 							<button type="submit" aria-label="Start task" disabled={!canStart} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 								<ArrowUp class="size-4" strokeWidth={2.2} />
 							</button>

@@ -146,6 +146,7 @@
 					<DropdownMenu.Separator />
 					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Signed in as {fleet.me.user.login}{fleet.org ? `, working in ${fleet.org.name}` : ''}</DropdownMenu.Label>
 					<DropdownMenu.Item onclick={() => (fleet.machinesOpen = true)}>Your machines…</DropdownMenu.Item>
+					{#if fleet.isOwner && fleet.org}<DropdownMenu.Item onclick={() => (fleet.renameOrgOpen = true)}>Rename {fleet.org.name}…</DropdownMenu.Item>{/if}
 					<DropdownMenu.Item onclick={() => (fleet.newOrgOpen = true)}>New org…</DropdownMenu.Item>
 					<DropdownMenu.Item onclick={() => fleet.signOut()}>Sign out</DropdownMenu.Item>
 				{:else}

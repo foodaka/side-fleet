@@ -81,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/api-tokens/{id}/updates", axum::routing::put(set_chat_updates).delete(clear_chat_updates))
         .route("/v1/api-tokens/{id}/updates/test", post(test_chat_updates))
         .route("/v1/orgs", post(create_org))
+        .route("/v1/orgs/{org}", axum::routing::patch(rename_org))
         .route("/v1/orgs/{org}/tokens", get(list_tokens).post(create_token))
         .route("/v1/orgs/{org}/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/v1/orgs/{org}/members", get(list_members).post(add_member))
@@ -1366,6 +1367,15 @@ async fn create_org(State(state): State<AppState>, Extension(caller): Extension<
     let id = tenancy::create_org(&state.pool, &name, user.id).await?;
     let org = tenancy::memberships(&state.pool, user.id).await?.into_iter().find(|m| m.id == id);
     Ok((StatusCode::CREATED, Json(json!(org))))
+}
+
+/// Rename an org (owners). Its slug stays, so links and saved org choices keep working.
+async fn rename_org(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>, Json(req): Json<NameReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = owned_org(&state, &caller, &org).await?;
+    let name = check_name(&req.name, "org name")?;
+    tenancy::rename_org(&state.pool, org.id, &name).await?;
+    tracing::info!(org = %org.id, "org renamed");
+    Ok(Json(json!({ "id": org.id, "name": name })))
 }
 
 async fn list_members(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(org): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {

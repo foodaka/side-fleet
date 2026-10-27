@@ -1,4 +1,4 @@
-//! Your machines in your other orgs, and moving one into the org the page acts in.
+//! Your machines in all your orgs, and moving one into the org the page acts in.
 //!
 //! A machine belongs to the org of the token it connected with. Moving it points
 //! that token at the new org and carries the machine's row over, so its next
@@ -38,12 +38,12 @@ impl From<sqlx::Error> for ApiError {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/v1/me/machines", get(elsewhere)).route("/v1/me/machines/move", post(move_here))
+    Router::new().route("/v1/me/machines", get(my_machines)).route("/v1/me/machines/move", post(move_here))
 }
 
-/// One of your machines in another of your orgs.
+/// One of your machines, and the org it is in.
 #[derive(Debug, Serialize)]
-pub struct Elsewhere {
+pub struct MyMachine {
     pub id: String,
     pub display_name: String,
     pub org: OrgRef,
@@ -61,16 +61,15 @@ pub struct OrgRef {
     pub name: String,
 }
 
-/// The caller's machines in every org they belong to except `here`.
-pub async fn list_elsewhere(pool: &PgPool, user: Uuid, here: Uuid) -> sqlx::Result<Vec<Elsewhere>> {
+/// The caller's machines in every org they belong to.
+pub async fn list_mine(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<MyMachine>> {
     let rows = sqlx::query(
         "SELECT w.id, w.display_name, w.capabilities, w.last_heartbeat_at, o.id AS org_id, o.name AS org_name
          FROM workers w JOIN orgs o ON o.id = w.org_id JOIN org_members m ON m.org_id = w.org_id AND m.user_id = $1
-         WHERE w.owner_id = $1 AND w.org_id <> $2
-         ORDER BY w.last_heartbeat_at DESC",
+         WHERE w.owner_id = $1
+         ORDER BY o.name, w.display_name",
     )
     .bind(user)
-    .bind(here)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -81,7 +80,7 @@ pub async fn list_elsewhere(pool: &PgPool, user: Uuid, here: Uuid) -> sqlx::Resu
             repos.sort();
             repos.dedup();
             let last: DateTime<Utc> = r.get("last_heartbeat_at");
-            Elsewhere {
+            MyMachine {
                 id: r.get("id"),
                 display_name: r.get("display_name"),
                 org: OrgRef { id: r.get("org_id"), name: r.get("org_name") },
@@ -176,9 +175,9 @@ pub async fn move_machine(pool: &PgPool, user: Uuid, from: Uuid, to: Uuid, id: &
     Ok(Move::Moved { display_name: w.get("display_name") })
 }
 
-async fn elsewhere(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<Vec<Elsewhere>>, ApiError> {
+async fn my_machines(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<Vec<MyMachine>>, ApiError> {
     let Some(user) = caller.user_id() else { return Ok(Json(vec![])) };
-    Ok(Json(list_elsewhere(&state.pool, user, caller.org_id()).await?))
+    Ok(Json(list_mine(&state.pool, user).await?))
 }
 
 #[derive(Deserialize)]

@@ -144,7 +144,8 @@
 				<DropdownMenu.Item onclick={() => (fleet.pickerOpen = true)}>Choose repos…</DropdownMenu.Item>
 				{#if fleet.me?.user}
 					<DropdownMenu.Separator />
-					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Signed in as {fleet.me.user.login}</DropdownMenu.Label>
+					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Signed in as {fleet.me.user.login}{fleet.org ? `, working in ${fleet.org.name}` : ''}</DropdownMenu.Label>
+					<DropdownMenu.Item onclick={() => (fleet.machinesOpen = true)}>Your machines…</DropdownMenu.Item>
 					<DropdownMenu.Item onclick={() => (fleet.newOrgOpen = true)}>New org…</DropdownMenu.Item>
 					<DropdownMenu.Item onclick={() => fleet.signOut()}>Sign out</DropdownMenu.Item>
 				{:else}

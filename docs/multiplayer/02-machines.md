@@ -143,6 +143,8 @@ room's repo; so do the home page and Machines.
   can't move; they reconnect from the target org instead.
 
 Approving a machine by its code also lets you pick which of your orgs it joins.
+Settings > Your machines lists every machine of yours with the org it is in, and moves one to any
+other of your orgs. The org switcher always shows which org you're working in.
 
 ## 7. Later: sharing machines (deferred)
 

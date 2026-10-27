@@ -121,8 +121,8 @@ export interface Worker {
 	mine?: boolean;
 }
 
-/** One of your machines in another of your orgs (`GET /v1/me/machines`); it can be moved into this one. */
-export interface ElsewhereMachine {
+/** One of your machines and the org it is in (`GET /v1/me/machines`); you can move it to another of your orgs. */
+export interface MyMachine {
 	id: string;
 	display_name: string;
 	org: { id: string; name: string };

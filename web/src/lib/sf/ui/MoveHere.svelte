@@ -4,7 +4,7 @@
 	import { Button } from '#lib/components/ui/button';
 	import { fleet } from '../state.svelte';
 	import { rel } from '../format';
-	import type { ElsewhereMachine } from '../types';
+	import type { MyMachine } from '../types';
 
 	/** Only machines with this repo (a repo key), e.g. a room's. */
 	let { repo, class: cls = '' }: { repo?: string; class?: string } = $props();
@@ -14,9 +14,9 @@
 	);
 	let busy = $state<string | null>(null);
 
-	async function move(m: ElsewhereMachine) {
+	async function move(m: MyMachine) {
 		busy = m.id;
-		await fleet.moveHere(m);
+		await fleet.moveMachine(m);
 		busy = null;
 	}
 </script>

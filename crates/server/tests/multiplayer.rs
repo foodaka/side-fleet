@@ -386,14 +386,18 @@ async fn you_can_move_your_own_machines_between_your_orgs_but_not_anyone_elses()
     let (_, tok) = bob_home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "laptop"}))).await;
     let laptop = Machine::start(&env, tok["token"].as_str().unwrap(), "bob-laptop").await;
 
-    // From Acme, Bob spots it in his other org; Alice sees none of his.
+    // Bob sees each of his machines and the org it is in; Alice sees only hers.
+    let where_ = |v: &Value| -> Vec<(String, String)> {
+        v.as_array().unwrap().iter().map(|m| (m["id"].as_str().unwrap().to_string(), m["org"]["id"].as_str().unwrap().to_string())).collect()
+    };
     let (s, mine) = bob.call(Method::GET, "/v1/me/machines", None).await;
     assert_eq!(s, StatusCode::OK, "{mine}");
-    assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
-    assert_eq!((mine[0]["id"].as_str(), mine[0]["org"]["id"].as_str(), mine[0]["online"].as_bool()), (Some("bob-laptop"), Some(personal.as_str()), Some(true)));
-    assert_eq!(mine[0]["repos"], json!(["github.com/acme/proj"]));
-    assert_eq!(mine[0]["agents"], json!(["claude"]));
-    assert_eq!(alice.call(Method::GET, "/v1/me/machines", None).await.1, json!([]));
+    let mut found = where_(&mine);
+    found.sort();
+    assert_eq!(found, [("bob-laptop".to_string(), personal.clone()), ("bob-linux".to_string(), acme.clone())]);
+    let laptop_row = mine.as_array().unwrap().iter().find(|m| m["id"] == "bob-laptop").unwrap();
+    assert_eq!((laptop_row["online"].as_bool(), &laptop_row["repos"], &laptop_row["agents"]), (Some(true), &json!(["github.com/acme/proj"]), &json!(["claude"])));
+    assert_eq!(where_(&alice.call(Method::GET, "/v1/me/machines", None).await.1), [("alice-mac".to_string(), acme.clone())]);
 
     // Alice can't pull Bob's laptop into Acme, and Bob can't take Alice's machine home.
     let (s, _) = alice.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
@@ -414,7 +418,7 @@ async fn you_can_move_your_own_machines_between_your_orgs_but_not_anyone_elses()
     assert!(workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-laptop" && w["mine"] == true), "{workers}");
     let (_, home) = bob_home.call(Method::GET, "/v1/workers", None).await;
     assert_eq!(home, json!([]));
-    assert_eq!(bob.call(Method::GET, "/v1/me/machines", None).await.1, json!([]));
+    assert_eq!(where_(&bob.call(Method::GET, "/v1/me/machines", None).await.1), [("bob-laptop".to_string(), acme.clone())]);
     let (_, run) = bob.task("/v1/runs", "on the laptop", json!({"worker_id": "bob-laptop"})).await;
     assert_eq!(laptop.claim().await.expect("bob's task")["id"], run["id"]);
 

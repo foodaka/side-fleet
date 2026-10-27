@@ -37,16 +37,18 @@
 	// Keyed on the org id alone: a background refresh hands back a new org object and
 	// must not wipe a freshly made invite link.
 	const orgId = $derived(org?.id ?? null);
-	const owner = $derived(fleet.isOwner);
 	$effect(() => {
 		const id = orgId;
-		const isOwner = owner;
 		untrack(() => {
 			invites = null;
 			fresh = null;
-			if (id && isOwner) void loadInvites(id);
 			if (id) void fleet.reloadMembers();
 		});
+	});
+	// Ownership can settle after the org loads; that only loads the list, never clears the link.
+	$effect(() => {
+		const id = orgId;
+		if (id && fleet.isOwner) untrack(() => void loadInvites(id));
 	});
 
 	async function createInvite() {

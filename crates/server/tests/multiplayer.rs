@@ -268,6 +268,27 @@ async fn rooms_brief_their_tasks_and_merge_them_into_one_branch() {
     assert_eq!(card["files"], json!(["server/pay.rs"]));
     assert_eq!((card["integration"]["status"].as_str(), card["integration"]["commit"].as_str()), (Some("succeeded"), Some("abc123")));
     assert_eq!(v["notes"][0]["author_login"], "bob");
+
+    // Only a note's author edits it.
+    let bob_note = v["notes"][0]["id"].as_str().unwrap().to_string();
+    let edit = json!({"body": "I'll take the backend; use the live keys"});
+    assert_eq!(alice.call(Method::PATCH, &format!("/v1/rooms/{rid}/notes/{bob_note}"), Some(edit.clone())).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(bob.call(Method::PATCH, &format!("/v1/rooms/{rid}/notes/{bob_note}"), Some(json!({"body": "  "}))).await.0, StatusCode::BAD_REQUEST);
+    let (s, n) = bob.call(Method::PATCH, &format!("/v1/rooms/{rid}/notes/{bob_note}"), Some(edit)).await;
+    assert_eq!(s, StatusCode::OK, "{n}");
+    assert!(n["edited_at"].is_string());
+    let (_, v) = alice.call(Method::GET, &format!("/v1/rooms/{rid}"), None).await;
+    assert_eq!(v["notes"][0]["body"], "I'll take the backend; use the live keys");
+
+    // A note can be deleted by its author or the room's creator, not by anyone else; later briefs lose it.
+    let (_, n) = alice.call(Method::POST, &format!("/v1/rooms/{rid}/notes"), Some(json!({"body": "scratch that"}))).await;
+    let alice_note = n["id"].as_str().unwrap().to_string();
+    assert_eq!(bob.call(Method::DELETE, &format!("/v1/rooms/{rid}/notes/{alice_note}"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(alice.call(Method::DELETE, &format!("/v1/rooms/{rid}/notes/{alice_note}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(alice.call(Method::DELETE, &format!("/v1/rooms/{rid}/notes/{alice_note}"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(alice.call(Method::DELETE, &format!("/v1/rooms/{rid}/notes/{bob_note}"), None).await.0, StatusCode::NO_CONTENT);
+    let (_, v) = alice.call(Method::GET, &format!("/v1/rooms/{rid}"), None).await;
+    assert_eq!(v["notes"], json!([]));
     let (_, rooms) = bob.call(Method::GET, "/v1/rooms", None).await;
     assert_eq!(rooms.as_array().unwrap().len(), 1);
 

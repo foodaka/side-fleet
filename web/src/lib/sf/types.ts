@@ -173,6 +173,7 @@ export interface RoomNote {
 	author_login: string | null;
 	body: string;
 	created_at: string;
+	edited_at: string | null;
 }
 
 export interface TaskCard {

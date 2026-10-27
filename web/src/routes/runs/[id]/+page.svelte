@@ -194,15 +194,15 @@
 	ondrop={(e) => canReply ? attachments.drop(e) : e.preventDefault()}
 />
 
-<div class="flex h-dvh flex-col max-md:h-[calc(100dvh-3.25rem)]">
+<div class="flex h-dvh flex-col max-md:h-[calc(100dvh-var(--sf-top))]">
 	<header class="border-b bg-background/80 backdrop-blur">
-		<div class="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 pt-5 pb-4 max-md:gap-2 max-md:pt-3 max-md:pb-3">
+		<div class="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 pt-5 pb-4 max-md:gap-2 max-md:pt-3 max-md:pb-3 short:gap-1.5 short:pt-2 short:pb-2">
 			{#if thread?.error}
 				<h1 class="text-xl font-medium">This run doesn't exist</h1>
 				<p class="text-[13px] text-muted-foreground">{thread.error}</p>
 			{:else if thread && root && latest}
 				<div class="flex items-start justify-between gap-4">
-					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight max-md:line-clamp-2 max-md:text-[16px]">{root.task}</h1>
+					<h1 class="line-clamp-3 text-[19px] leading-snug font-medium tracking-tight max-md:line-clamp-2 max-md:text-[16px] short:line-clamp-1 short:text-[16px]">{root.task}</h1>
 					{#if live}
 						<Button variant="outline" size="sm" class="h-8 shrink-0 rounded-full border-err/40 text-err-ink hover:bg-err-soft" onclick={stop} disabled={stopping || latest.stop_requested}>
 							<Square class="size-3 fill-current" />{stopping || latest.stop_requested ? 'Stopping…' : 'Stop'}
@@ -253,7 +253,7 @@
 	{#if forkTurn}<ForkDialog bind:open={forkOpen} run={forkTurn.run} hasFiles={!!forkTurn.snapshot} />{/if}
 
 	<Conversation class="min-h-0 flex-1">
-		<div class="min-h-0 flex-1 overflow-y-auto" data-scroller>
+		<div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain" data-scroller>
 			<ConversationContent class="mx-auto w-full max-w-3xl gap-10 px-4 py-6">
 				{#if thread}
 					{#each thread.turns as turn, i (turn.run.id)}
@@ -308,7 +308,7 @@
 
 	{#if root}
 		<div class="border-t bg-background">
-			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4 max-md:px-3 max-md:pt-2 max-md:pb-3" onsubmit={send}>
+			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4 short:pt-2 short:pb-2 max-md:px-3 max-md:pt-2 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]" onsubmit={send}>
 				<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
 					{#if attachments.dragging}
 						<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images to attach them</div>
@@ -326,7 +326,7 @@
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
 					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
-					<div class="flex flex-wrap items-center gap-0.5 px-2 pb-2 max-sm:flex-nowrap">
+					<div class="flex flex-wrap items-center gap-0.5 px-2 pb-2 min-[22rem]:max-sm:flex-nowrap">
 						<AgentModelPicker
 							bind:agent
 							bind:model

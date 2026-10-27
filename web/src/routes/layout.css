@@ -7,6 +7,8 @@
 @source "../../node_modules/streamdown-svelte/dist";
 
 @custom-variant dark (&:is(.dark *));
+/* A phone on its side: little height to spare. */
+@custom-variant short (@media (max-height: 30rem));
 
 /*
  * Sidefleet tokens. Light follows the original design: a warm grey ground,
@@ -184,6 +186,16 @@
 	body { @apply bg-background text-foreground antialiased; font-feature-settings: 'cv11', 'ss01'; }
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	::selection { background: color-mix(in oklab, var(--run) 25%, transparent); }
+}
+
+/* The phone header's height, below the status bar of a home-screen app. */
+:root { --sf-top: calc(3.25rem + env(safe-area-inset-top)); }
+html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+/* iOS zooms the page into any field under 16px when it's tapped, and stays zoomed. Unlayered,
+   so it beats the size utilities on each field. */
+@media (pointer: coarse) {
+	input:not([type='checkbox'], [type='radio'], [type='range']), textarea, select { font-size: 16px; }
 }
 
 @utility tnum { font-variant-numeric: tabular-nums; }

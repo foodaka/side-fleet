@@ -33,7 +33,7 @@
 
 <svelte:head><title>Overview · Sidefleet</title></svelte:head>
 
-<section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-8 md:px-8">
+<section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 pt-8 pb-[calc(2rem+env(safe-area-inset-bottom))] md:px-8">
 	<header class="flex flex-wrap items-end justify-between gap-4">
 		<div>
 			<h1 class="text-[22px] font-semibold tracking-tight">Overview</h1>
@@ -88,8 +88,9 @@
 					<span class="block truncate text-[13.5px] font-medium">{r.task}</span>
 					<span class="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
 						<span class="truncate font-mono text-[11.5px]">{repoLabel(r.repo)}</span>
-						<span class="shrink-0">{agentModel(r.agent, r.model)}</span>
-						{#if r.follow_ups}<span class="tnum shrink-0">{r.follow_ups + 1} messages</span>{/if}
+						<span class="shrink-0 max-sm:hidden">{agentModel(r.agent, r.model)}</span>
+						{#if r.follow_ups}<span class="tnum shrink-0 max-sm:hidden">{r.follow_ups + 1} messages</span>{/if}
+						<span class="tnum shrink-0 md:hidden">{rel(r.last_activity_at, fleet.now)}</span>
 					</span>
 				</span>
 				<span class="hidden items-center gap-2 text-[13px] md:flex">

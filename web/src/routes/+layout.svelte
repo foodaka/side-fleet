@@ -105,7 +105,7 @@
 <Toaster position="bottom-right" />
 
 <Tooltip.Provider delayDuration={300}>
-	<div class="flex min-h-dvh flex-col md:flex-row">
+	<div class="flex min-h-dvh flex-col pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] md:flex-row">
 		<!-- Desktop -->
 		{#if collapsed}
 			<aside class="sticky top-0 hidden h-dvh w-13 shrink-0 flex-col items-center gap-1 border-r border-sidebar-border bg-sidebar py-3 md:flex">
@@ -160,7 +160,7 @@
 		{/if}
 
 		<!-- Phones -->
-		<header class="sticky top-0 z-30 flex h-13 shrink-0 items-center gap-1 border-b border-sidebar-border bg-sidebar/90 px-2 backdrop-blur md:hidden">
+		<header class="sticky top-0 z-30 flex h-(--sf-top) shrink-0 items-center gap-1 border-b border-sidebar-border bg-sidebar/90 px-2 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
 			<button type="button" class="relative grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground" aria-label="Open menu" onclick={() => (drawer = true)}>
 				<Menu class="size-5" />
 				{#if running}<StatusDot status="running" class="absolute top-2 right-1.5" />{/if}
@@ -172,7 +172,7 @@
 		<DialogPrimitive.Root bind:open={drawer}>
 			<DialogPrimitive.Portal>
 				<DialogPrimitive.Overlay class="fixed inset-0 z-50 bg-black/25 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 md:hidden" />
-				<DialogPrimitive.Content class="fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r border-sidebar-border bg-sidebar shadow-xl outline-none duration-200 data-open:animate-in data-open:slide-in-from-left data-closed:animate-out data-closed:slide-out-to-left md:hidden">
+				<DialogPrimitive.Content class="fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] border-r border-sidebar-border bg-sidebar shadow-xl outline-none duration-200 data-open:animate-in data-open:slide-in-from-left data-closed:animate-out data-closed:slide-out-to-left md:hidden">
 					<DialogPrimitive.Title class="sr-only">Navigation</DialogPrimitive.Title>
 					<Sidebar {path} onClose={() => (drawer = false)} drawer />
 				</DialogPrimitive.Content>

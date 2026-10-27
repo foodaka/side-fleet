@@ -5,6 +5,7 @@
 	import { onMount } from 'svelte';
 	import { Button } from '#lib/components/ui/button';
 	import { Input } from '#lib/components/ui/input';
+	import * as Select from '#lib/components/ui/select';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 	import { toast } from 'svelte-sonner';
@@ -22,6 +23,11 @@
 	let busy = $state<string | null>(null);
 	const hosted = $derived(fleet.setup?.hosted ?? fleet.methods?.hosted ?? false);
 	const items = $derived([...found, ...fleet.pending.filter((p) => !found.some((f) => f.id === p.id))]);
+	/** A request found by code joins no org yet: you pick which of yours it joins (this one unless you change it). */
+	const orgs = $derived(fleet.me?.orgs ?? []);
+	let into = $state<Record<string, string>>({});
+	const target = (e: Enrollment) => into[e.id] ?? fleet.org?.id ?? '';
+	const orgName = (id: string) => orgs.find((o) => o.id === id)?.name ?? 'this org';
 
 	async function lookup(c: string, quiet = false) {
 		if (!c.trim()) return;
@@ -40,11 +46,18 @@
 
 	async function decide(e: Enrollment, approve: boolean) {
 		busy = e.id;
+		const org = target(e);
+		const elsewhere = !!org && org !== fleet.org?.id;
 		try {
-			await api(`/v1/enrollments/${e.id}/${approve ? 'approve' : 'deny'}`, { method: 'POST', body: JSON.stringify({ code: e.code }) });
+			await api(`/v1/enrollments/${e.id}/${approve ? 'approve' : 'deny'}`, {
+				method: 'POST',
+				body: JSON.stringify({ code: e.code }),
+				headers: elsewhere ? { 'X-Sidefleet-Org': org } : undefined
+			});
 			found = found.filter((f) => f.id !== e.id);
 			fleet.pending = fleet.pending.filter((p) => p.id !== e.id);
-			if (approve) toast.success(`${e.machine_name} approved`, { description: 'It shows up here as soon as its first heartbeat lands.' });
+			if (approve && elsewhere) toast.success(`${e.machine_name} approved into ${orgName(org)}`, { description: `Switch to ${orgName(org)} to see it and give it tasks.` });
+			else if (approve) toast.success(`${e.machine_name} approved`, { description: 'It shows up here as soon as its first heartbeat lands.' });
 			else toast(`${e.machine_name} denied`);
 			void fleet.refresh();
 		} catch (err) {
@@ -107,7 +120,17 @@
 					<span class="text-[11px] text-muted-foreground">Code on that machine</span>
 					<span class="font-mono text-[15px] font-semibold tracking-wider">{e.code}</span>
 				</div>
-				<div class="flex gap-2">
+				<div class="flex flex-wrap items-center gap-2">
+					{#if orgs.length > 1 && found.some((f) => f.id === e.id)}
+						<Select.Root type="single" value={target(e)} onValueChange={(v) => (into[e.id] = v)}>
+							<Select.Trigger size="sm" class="h-8 max-w-[14rem] rounded-full text-[13px]" aria-label="Org it joins">
+								<span class="truncate"><span class="text-muted-foreground">Into</span> {orgName(target(e))}</span>
+							</Select.Trigger>
+							<Select.Content>
+								{#each orgs as o (o.id)}<Select.Item value={o.id} label={o.name}>{o.name}</Select.Item>{/each}
+							</Select.Content>
+						</Select.Root>
+					{/if}
 					<Button variant="outline" class="h-8 rounded-full text-[13px]" disabled={busy === e.id} onclick={() => decide(e, false)}>Deny</Button>
 					<Button class="h-8 rounded-full text-[13px]" disabled={busy === e.id} onclick={() => decide(e, true)}>Approve</Button>
 				</div>

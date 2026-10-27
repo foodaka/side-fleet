@@ -372,3 +372,55 @@ async fn removing_someone_also_revokes_the_invites_they_made() {
     assert_eq!(bob.call(Method::POST, &format!("/v1/invites/{code}/accept"), None).await.0, StatusCode::GONE);
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn you_can_move_your_own_machines_between_your_orgs_but_not_anyone_elses() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, _alice_m, _) = team(&env).await;
+    let acme = alice.org.clone().unwrap();
+
+    // Bob's laptop joined his personal org, not Acme.
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let mut bob_home = Api::user(&env, "bob").await;
+    bob_home.org = Some(personal.clone());
+    let (_, tok) = bob_home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "laptop"}))).await;
+    let laptop = Machine::start(&env, tok["token"].as_str().unwrap(), "bob-laptop").await;
+
+    // From Acme, Bob spots it in his other org; Alice sees none of his.
+    let (s, mine) = bob.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(s, StatusCode::OK, "{mine}");
+    assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
+    assert_eq!((mine[0]["id"].as_str(), mine[0]["org"]["id"].as_str(), mine[0]["online"].as_bool()), (Some("bob-laptop"), Some(personal.as_str()), Some(true)));
+    assert_eq!(mine[0]["repos"], json!(["github.com/acme/proj"]));
+    assert_eq!(mine[0]["agents"], json!(["claude"]));
+    assert_eq!(alice.call(Method::GET, "/v1/me/machines", None).await.1, json!([]));
+
+    // Alice can't pull Bob's laptop into Acme, and Bob can't take Alice's machine home.
+    let (s, _) = alice.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = bob_home.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": acme, "id": "alice-mac"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Acme's free plan is full (Alice's and Bob's machines); once Bob frees his slot, the laptop moves
+    // into Acme, keeps heart-beating with the same token and takes his Acme tasks.
+    let (s, v) = bob.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
+    assert_eq!(s, StatusCode::PAYMENT_REQUIRED, "{v}");
+    assert_eq!(bob.call(Method::DELETE, "/v1/workers/bob-linux", None).await.0, StatusCode::NO_CONTENT);
+    let (s, v) = bob.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = laptop.call("/v1/worker/heartbeat", json!({"id": "bob-laptop", "capabilities": {}, "active_runs": []})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, workers) = bob.call(Method::GET, "/v1/workers", None).await;
+    assert!(workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-laptop" && w["mine"] == true), "{workers}");
+    let (_, home) = bob_home.call(Method::GET, "/v1/workers", None).await;
+    assert_eq!(home, json!([]));
+    assert_eq!(bob.call(Method::GET, "/v1/me/machines", None).await.1, json!([]));
+    let (_, run) = bob.task("/v1/runs", "on the laptop", json!({"worker_id": "bob-laptop"})).await;
+    assert_eq!(laptop.claim().await.expect("bob's task")["id"], run["id"]);
+
+    // With a task running there it stays put.
+    let (s, v) = bob_home.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": acme, "id": "bob-laptop"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
+    env.teardown().await;
+}

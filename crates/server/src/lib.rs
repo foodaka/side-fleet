@@ -10,6 +10,7 @@ pub mod db;
 pub mod events;
 pub mod fork;
 pub mod inbox;
+pub mod machines;
 pub mod mcp;
 pub mod notify;
 pub mod oauth;

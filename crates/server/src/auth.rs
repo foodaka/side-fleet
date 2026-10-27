@@ -266,6 +266,7 @@ mod tests {
             (Method::DELETE, "/v1/workers/mac"),
             (Method::POST, "/v1/workers/mac/update"),
             (Method::PUT, "/v1/repos"),
+            (Method::POST, "/v1/me/machines/move"),
         ] {
             assert!(!ok(Scope::Full, m.clone(), p), "{m} {p}");
         }

@@ -121,6 +121,18 @@ export interface Worker {
 	mine?: boolean;
 }
 
+/** One of your machines in another of your orgs (`GET /v1/me/machines`); it can be moved into this one. */
+export interface ElsewhereMachine {
+	id: string;
+	display_name: string;
+	org: { id: string; name: string };
+	online: boolean;
+	last_heartbeat_at: string;
+	/** Repo keys, as tasks match them. */
+	repos: string[];
+	agents: AgentId[];
+}
+
 /** Someone in an org (`GET /v1/orgs/:org/members`). */
 export interface Member {
 	id: string;

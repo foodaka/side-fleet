@@ -1,5 +1,5 @@
 import { api, ApiError, currentKey, currentOrg, keyWorks, setKey, setOrg, Unauthorized } from './api';
-import type { AuthMethods, Enrollment, Me, Member, RunSummary, Setup, Worker } from './types';
+import type { AuthMethods, ElsewhereMachine, Enrollment, Me, Member, RunSummary, Setup, Worker } from './types';
 import { telemetry } from './telemetry.svelte';
 import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
@@ -9,6 +9,8 @@ type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 /** Everything the pages share, refreshed from the control plane every 5 seconds. */
 class Fleet {
 	workers = $state<Worker[]>([]);
+	/** Your machines in your other orgs, which you can move into this one. */
+	elsewhere = $state<ElsewhereMachine[]>([]);
 	runs = $state<RunSummary[]>([]);
 	/** Repos chosen for the composer menu; null until loaded. */
 	added = $state<Set<string> | null>(null);
@@ -79,15 +81,17 @@ class Fleet {
 		try {
 			// Until signed in, ask once instead of firing every call into a 401.
 			if (this.conn !== 'ok') await api<Me>('/v1/me');
-			const [me, workers, runs, repos, pending] = await Promise.all([
+			const [me, workers, runs, repos, pending, elsewhere] = await Promise.all([
 				api<Me>('/v1/me'),
 				api<Worker[]>('/v1/workers'),
 				api<RunSummary[]>('/v1/runs?limit=100'),
 				api<{ added: string[] }>('/v1/repos'),
-				api<Enrollment[]>('/v1/enrollments')
+				api<Enrollment[]>('/v1/enrollments'),
+				api<ElsewhereMachine[]>('/v1/me/machines').catch(() => [])
 			]);
 			this.me = me;
 			this.workers = workers;
+			this.elsewhere = elsewhere;
 			this.runs = runs;
 			this.pending = pending;
 			telemetry.ingest(workers, runs);
@@ -163,11 +167,25 @@ class Fleet {
 		void this.refresh();
 	}
 
+	/** Bring one of your machines from another of your orgs into this one; it carries on without reconnecting. */
+	async moveHere(m: ElsewhereMachine): Promise<boolean> {
+		try {
+			await api('/v1/me/machines/move', { method: 'POST', body: JSON.stringify({ from: m.org.id, id: m.id }) });
+			toast.success(`${m.display_name} moved to ${this.org?.name ?? 'this org'}`, { description: `It takes your tasks here now, not in ${m.org.name}.` });
+			await this.refresh();
+			return true;
+		} catch (e) {
+			toast.error(`Could not move ${m.display_name}`, { description: (e as Error).message });
+			return false;
+		}
+	}
+
 	/** Act in another of the user's orgs: everything on the page is per org. */
 	switchOrg(id: string) {
 		setOrg(id);
 		this.orgId = id;
 		this.workers = [];
+		this.elsewhere = [];
 		this.runs = [];
 		this.archived = null;
 		this.pending = [];

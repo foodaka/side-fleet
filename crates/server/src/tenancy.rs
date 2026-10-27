@@ -180,16 +180,17 @@ pub async fn add_member(pool: &PgPool, org: Uuid, login: &str, role: &str) -> sq
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Member {
+    pub id: Uuid,
     pub login: String,
     pub role: String,
 }
 
 pub async fn list_members(pool: &PgPool, org: Uuid) -> sqlx::Result<Vec<Member>> {
-    let rows = sqlx::query("SELECT u.login, m.role FROM org_members m JOIN users u ON u.id = m.user_id WHERE m.org_id = $1 ORDER BY m.created_at")
+    let rows = sqlx::query("SELECT u.id, u.login, m.role FROM org_members m JOIN users u ON u.id = m.user_id WHERE m.org_id = $1 ORDER BY m.created_at")
         .bind(org)
         .fetch_all(pool)
         .await?;
-    Ok(rows.iter().map(|r| Member { login: r.get("login"), role: r.get("role") }).collect())
+    Ok(rows.iter().map(|r| Member { id: r.get("id"), login: r.get("login"), role: r.get("role") }).collect())
 }
 
 // ---- sessions ----
@@ -251,13 +252,15 @@ fn row_to_token(r: &PgRow) -> WorkerToken {
 const TOKEN_COLS: &str = "id, name, created_at, revoked_at, last_used_at";
 
 /// Mint a worker token for `org`. Returns its record and the value, which is not stored.
-pub async fn create_token<'e, E: sqlx::PgExecutor<'e>>(ex: E, org: Uuid, name: &str) -> sqlx::Result<(WorkerToken, String)> {
+/// Machines that connect with it belong to `owner` and run only their tasks.
+pub async fn create_token<'e, E: sqlx::PgExecutor<'e>>(ex: E, org: Uuid, name: &str, owner: Option<Uuid>) -> sqlx::Result<(WorkerToken, String)> {
     let value = format!("sfw_{}", random_hex(24));
-    let row = sqlx::query(&format!("INSERT INTO worker_tokens (id, org_id, name, token_hash) VALUES ($1, $2, $3, $4) RETURNING {TOKEN_COLS}"))
+    let row = sqlx::query(&format!("INSERT INTO worker_tokens (id, org_id, name, token_hash, owner_id) VALUES ($1, $2, $3, $4, $5) RETURNING {TOKEN_COLS}"))
         .bind(Uuid::new_v4())
         .bind(org)
         .bind(name)
         .bind(sha256_hex(&value))
+        .bind(owner)
         .fetch_one(ex)
         .await?;
     let mut t = row_to_token(&row);
@@ -705,7 +708,9 @@ pub async fn poll_enrollment(pool: &PgPool, id: Uuid, secret: &str) -> sqlx::Res
         "approved" if e.expires_at + Duration::minutes(COLLECT_GRACE_MINUTES) <= now => Poll::Expired,
         "approved" => {
             let org = e.org_id.expect("approved enrollments have an org");
-            let (token, value) = create_token(&mut *tx, org, &e.machine_name).await?;
+            // The machine belongs to whoever approved it.
+            let owner: Option<Uuid> = sqlx::query("SELECT decided_by FROM enrollments WHERE id = $1").bind(id).fetch_one(&mut *tx).await?.get("decided_by");
+            let (token, value) = create_token(&mut *tx, org, &e.machine_name, owner).await?;
             sqlx::query("UPDATE enrollments SET status = 'collected', token_id = $2 WHERE id = $1").bind(id).bind(token.id).execute(&mut *tx).await?;
             let o = sqlx::query("SELECT id, name, slug, plan, 'member' AS role FROM orgs WHERE id = $1").bind(org).fetch_one(&mut *tx).await?;
             Poll::Approved { token: value, org: row_to_membership(&o) }

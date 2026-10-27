@@ -99,8 +99,10 @@ pub struct Run {
     #[serde(default)]
     pub images: Vec<ImageRef>,
     /// `agent` (the coding agent works on the task), `restore` (the worker puts
-    /// the thread's worktree back to the snapshot in `restore_to`) or `pr` (the
-    /// worker commits and pushes the thread's branch and opens a pull request).
+    /// the thread's worktree back to the snapshot in `restore_to`), `pr` (the
+    /// worker commits and pushes the thread's branch and opens a pull request) or
+    /// `integrate` (the worker merges the thread's branch into its room's branch,
+    /// named in `context`, and pushes that).
     #[serde(default = "default_kind")]
     pub kind: String,
     /// For a restore run: the snapshot commit to restore.
@@ -114,6 +116,8 @@ pub struct Run {
     pub fork_commit: Option<String>,
     /// For a fork: the earlier conversation, given to the agent ahead of the task.
     /// For a `pr` run: the pull request's title, then a blank line and its body.
+    /// For an `integrate` run: the room branch to merge into.
+    /// For a room's task: the room brief or update, ahead of the message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// On a root run: when its thread was archived (hidden from the list).
@@ -122,6 +126,13 @@ pub struct Run {
     /// On a root run: the pull request opened from its branch, as last checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PullRequest>,
+    /// The user who started this run (a task, a reply, a fork…): only machines they own run it.
+    /// None for the developer key, whose runs go to machines connected with a static token.
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    /// The room this thread works on (set on every run of the thread).
+    #[serde(default)]
+    pub room_id: Option<Uuid>,
 }
 
 /// A GitHub pull request for a thread's branch.

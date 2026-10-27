@@ -565,6 +565,23 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         return;
     }
 
+    if run.kind == "integrate" {
+        let (status, result) = match run_integrate(client, &run, &cwd, branch.as_deref()).await {
+            Ok(i) => (RunStatus::Succeeded, json!({"integrated": {"branch": i.branch, "commit": i.commit, "files": i.files}})),
+            Err(f) => {
+                let msg = sidefleet_core::redact::redact(&f.message);
+                let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+                let mut result = json!({"error": msg});
+                if !f.conflicts.is_empty() {
+                    result["conflicts"] = json!(f.conflicts);
+                }
+                (RunStatus::Failed, result)
+            }
+        };
+        report_finish(client, run_id, status, result, None).await;
+        return;
+    }
+
     // The tree before the agent starts, and the one the thread started from, to diff against afterwards.
     let setup_at = std::time::Instant::now();
     let before = match diff::point(&cwd).await {
@@ -867,6 +884,19 @@ async fn run_pr(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Path, br
     client.report_prs(vec![PrReport { thread: root_id, pr: pr.clone() }]).await?;
     client.post_events(run.id, vec![NewEvent { kind: "pull_request".into(), payload: json!({"url": pr.url, "number": pr.number, "state": pr.state, "opened": opened, "branch": branch})}]).await?;
     Ok(pr)
+}
+
+/// An integrate run (rooms): merge the thread's branch into the room branch named
+/// in `context`, on `origin`, and say what changed there.
+async fn run_integrate(client: &ControlClient, run: &Run, cwd: &Path, branch: Option<&str>) -> Result<crate::integrate::Integrated, crate::integrate::Failure> {
+    let branch = branch.context("this task has no branch of its own to add to the room")?;
+    let room = run.context.as_deref().map(str::trim).filter(|r| !r.is_empty()).context("integrate run without a room branch")?;
+    let i = crate::integrate::integrate(cwd, branch, room, &run.task).await?;
+    let payload = json!({"branch": i.branch, "commit": i.commit, "files": i.files, "from": branch});
+    if let Err(e) = client.post_events(run.id, vec![NewEvent { kind: "integrated".into(), payload }]).await {
+        tracing::warn!(error = %e, "posting the integrated event failed");
+    }
+    Ok(i)
 }
 
 /// Look at open pull requests again and report the ones that changed state.

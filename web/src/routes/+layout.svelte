@@ -21,6 +21,10 @@
 	import { inbox } from '#lib/sf/inbox.svelte';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { seen } from '#lib/sf/seen.svelte';
+	import { pendingJoin } from '#lib/sf/join';
+	import { goto } from '$app/navigation';
+	import UsersRound from '@lucide/svelte/icons/users-round';
+	import Boxes from '@lucide/svelte/icons/boxes';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -47,6 +51,13 @@
 	});
 
 	const path = $derived(page.url.hash.replace(/^#/, '') || '/');
+	const joining = $derived(path.startsWith('/join/'));
+	// Back from GitHub sign-in with an invite opened before it: go on to join.
+	$effect(() => {
+		if (!fleet.me?.user || joining) return;
+		const code = pendingJoin();
+		if (code) untrack(() => void goto('#/join/' + encodeURIComponent(code), { replaceState: true }));
+	});
 	const running = $derived(fleet.runs.filter((r) => r.thread_status === 'running').length);
 
 	// Opening a run marks it seen, and keeps it seen as new replies land while it's open.
@@ -79,10 +90,12 @@
 		collapsed = !collapsed;
 		try { localStorage.setItem(SIDEBAR, collapsed ? 'collapsed' : 'open'); } catch { /* storage blocked */ }
 	}
-	const rail = [
+	const rail = $derived([
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
-		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
-	];
+		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
+		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') },
+		...(fleet.me?.user ? [{ href: '#/team', label: 'Team', icon: UsersRound, on: (p: string) => p.startsWith('/team') }] : [])
+	]);
 	const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 	const toggleKeys = isMac ? '⌘B' : 'Ctrl B';
 	function onkeydown(e: KeyboardEvent) {
@@ -190,7 +203,7 @@
 	</div>
 </Tooltip.Provider>
 
-{#if fleet.needsSignIn}<SignIn />{/if}
+{#if fleet.needsSignIn && !joining}<SignIn />{/if}
 <RepoPicker />
 <NewOrgDialog />
 <FeedbackDialog />

@@ -72,6 +72,9 @@ pub struct InboxItem {
     pub detail: Option<String>,
     /// When it started waiting.
     pub since: DateTime<Utc>,
+    /// Who started it: a task waits on them, not on the whole team (None: anyone in the org).
+    #[serde(skip)]
+    pub owner: Option<Uuid>,
 }
 
 /// Live state: per-org change signals and what was pushed.
@@ -174,7 +177,7 @@ pub async fn pending_approvals(pool: &PgPool, org: Uuid) -> sqlx::Result<HashMap
 /// an approval first, then newest first.
 async fn waiting(pool: &PgPool, org: Uuid, root: Option<Uuid>) -> sqlx::Result<Vec<InboxItem>> {
     let rows = sqlx::query(
-        "SELECT root.id AS root_id, root.task AS title, root.repo, l.id AS run_id, l.agent, l.status, l.kind,
+        "SELECT root.id AS root_id, root.task AS title, root.repo, root.created_by, l.id AS run_id, l.agent, l.status, l.kind,
                 (l.moved_from IS NOT NULL) AS moved,
                 se.payload->>'reason' AS status_reason, coalesce(se.at, l.created_at) AS status_at,
                 ul.payload->>'until' AS limit_until
@@ -228,6 +231,7 @@ async fn waiting(pool: &PgPool, org: Uuid, root: Option<Uuid>) -> sqlx::Result<V
                 label: reason.label(),
                 detail,
                 since,
+                owner: r.get("created_by"),
             });
         }
     }
@@ -269,6 +273,7 @@ pub async fn list(pool: &PgPool, org: Uuid, viewer: Uuid) -> sqlx::Result<Vec<In
         .map(|r| r.get("cleared_at"));
     Ok(all
         .into_iter()
+        .filter(|i| i.owner.is_none_or(|o| o == viewer))
         .filter(|i| {
             let a = Attention { reason: i.reason, since: i.since, detail: None };
             attention::unseen(&a, seen.get(&i.id).copied().max(cleared))

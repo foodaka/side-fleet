@@ -79,12 +79,16 @@
 		{/if}
 		{#if note}<p class="mt-1.5 text-[12.5px] text-muted-foreground">{note}</p>{/if}
 		<div class="mt-3 flex flex-wrap items-center gap-2">
+			{#if !ondecide}
+				<span class="text-[12.5px] text-muted-foreground">Only the task's owner can answer: it runs on their machine.</span>
+			{:else}
 			<Button size="sm" class="h-9 min-w-24 rounded-full px-4 max-sm:flex-1" disabled={!!busy || !ondecide} onclick={() => decide(true)}>
 				<Check class="size-4" />{busy === 'approve' ? 'Approving…' : 'Approve'}
 			</Button>
 			<Button size="sm" variant="outline" class="h-9 min-w-24 rounded-full px-4 max-sm:flex-1" disabled={!!busy || !ondecide} onclick={() => decide(false)}>
 				<X class="size-4" />{busy === 'deny' ? 'Denying…' : 'Deny'}
 			</Button>
+			{/if}
 			<span class="tnum ml-auto inline-flex items-center gap-1 text-[11.5px] text-muted-foreground max-sm:w-full max-sm:justify-center" title="Denied automatically when the time runs out">
 				<Clock class="size-3" />{leftText}
 			</span>

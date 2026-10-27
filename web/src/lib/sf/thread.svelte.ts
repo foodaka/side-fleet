@@ -163,6 +163,11 @@ export class Thread {
 		await this.#action(`/v1/runs/${runId}/restore`);
 	}
 
+	/** Merge the thread's branch into its room's branch. */
+	async integrate() {
+		await this.#action(`/v1/runs/${this.root!.id}/integrate`);
+	}
+
 	/** Push the branch and open a pull request for it (or update the open one). */
 	async openPr() {
 		await this.#action(`/v1/runs/${this.root!.id}/pr`);
@@ -276,10 +281,13 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
 				t.machine = run.worker_id;
-				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : 'Starting ' + agentName(run.agent);
+				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : run.kind === 'integrate' ? 'Adding the changes to the room' : 'Starting ' + agentName(run.agent);
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
+				// What an integration did (commit, files or conflicts) is in its result, not its events.
+				if (run.kind === 'integrate' && !run.result)
+					void api<Run>(`/v1/runs/${run.id}`).then((r) => { run.result = r.result; }).catch(() => {});
 				t.liveText = '';
 				// Nobody can answer the agent any more.
 				for (const it of t.items) if (it.kind === 'approval' && it.status === 'pending') it.status = 'cancelled';

@@ -139,7 +139,9 @@ pub async fn recipients(pool: &PgPool, org: Uuid, root: Uuid, since: chrono::Dat
         "SELECT p.endpoint, p.p256dh, p.auth FROM push_subscriptions p
          WHERE (p.viewer_id IN (SELECT user_id FROM org_members WHERE org_id = $1) OR (p.viewer_id = $4 AND $1 = $5))
            AND NOT EXISTS (SELECT 1 FROM inbox_seen s WHERE s.viewer_id = p.viewer_id AND s.root_id = $2 AND s.seen_at >= $3)
-           AND NOT EXISTS (SELECT 1 FROM inbox_cleared c WHERE c.viewer_id = p.viewer_id AND c.org_id = $1 AND c.cleared_at >= $3)",
+           AND NOT EXISTS (SELECT 1 FROM inbox_cleared c WHERE c.viewer_id = p.viewer_id AND c.org_id = $1 AND c.cleared_at >= $3)
+           -- A task waits on whoever started it, not on the whole team.
+           AND COALESCE((SELECT r.created_by FROM runs r WHERE r.id = $2), p.viewer_id) = p.viewer_id",
     )
     .bind(org)
     .bind(root)

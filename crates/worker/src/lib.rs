@@ -8,6 +8,7 @@ pub mod checkpoint;
 pub mod client;
 pub mod detect;
 pub mod diff;
+pub mod integrate;
 pub mod pr;
 pub mod snapshot;
 pub mod updater;

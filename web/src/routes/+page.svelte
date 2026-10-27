@@ -56,7 +56,8 @@
 	function save(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
 
 	const repos = $derived(fleet.composerRepos);
-	const online = $derived(fleet.onlineRepos);
+	// Machines only run their owner's tasks, so the composer offers your own.
+	const online = $derived(new Set(fleet.myOnline.flatMap((w) => (w.capabilities.repos ?? []).map(repoKey))));
 	// Keep the selection valid as machines come and go.
 	$effect(() => {
 		if (repo && repos.includes(repo) && online.has(repo)) return;
@@ -67,7 +68,7 @@
 		if (first) repo = first;
 	});
 	/** Online machines that have the repo. */
-	const withRepo = $derived(repo ? fleet.online.filter((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo)) : []);
+	const withRepo = $derived(repo ? fleet.myOnline.filter((w) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo)) : []);
 	/** ...and the agent; the machine menu only shows when there is a choice. */
 	const machines = $derived(withRepo.filter((w) => hasAgent(w, agent)));
 	// The remembered machine applies only where it has the repo and agent; otherwise any machine.
@@ -151,7 +152,7 @@
 
 	const recent = $derived(fleet.runs.slice(0, 6));
 	const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
-	const noMachines = $derived(fleet.loaded && fleet.online.length === 0);
+	const noMachines = $derived(fleet.loaded && fleet.myOnline.length === 0);
 	const examples = [
 		'Find why the login test is flaky and fix it',
 		'Summarise what changed on main this week',
@@ -167,7 +168,7 @@
 		<div class="h-8 w-56 animate-pulse rounded-md bg-muted"></div>
 		<div class="mt-6 h-40 animate-pulse rounded-2xl bg-muted"></div>
 	</div>
-{:else if noMachines && !fleet.workers.length}
+{:else if noMachines && !fleet.mine.length}
 	<section class="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 pt-[10vh] pb-16">
 		<header class="flex flex-col gap-3">
 			<h1 class="text-[28px] leading-tight font-medium tracking-tight">Put your first machine to work</h1>
@@ -175,6 +176,11 @@
 				Sidefleet runs tasks with the coding agents already set up on your own machines and streams what they do back here.
 				It takes a couple of minutes.
 			</p>
+			{#if fleet.multi}
+				<p class="max-w-xl text-[13px] leading-relaxed text-muted-foreground">
+					Your teammates' machines only run their own tasks, so connect one of yours to take on work. Meanwhile you can follow along in <a href="#/rooms" class="text-foreground underline underline-offset-2">Rooms</a>.
+				</p>
+			{/if}
 		</header>
 		<Onboarding />
 	</section>
@@ -183,7 +189,7 @@
 		<header class="flex flex-col gap-3">
 			<h1 class="text-[28px] leading-tight font-medium tracking-tight">Your machines are offline</h1>
 			<p class="max-w-xl text-[15px] leading-relaxed text-muted-foreground">
-				{fleet.workers.map((w) => w.display_name).join(', ')} {fleet.workers.length === 1 ? 'has' : 'have'} stopped checking in.
+				{fleet.mine.map((w) => w.display_name).join(', ')} {fleet.mine.length === 1 ? 'has' : 'have'} stopped checking in.
 				Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or connect another machine below.
 			</p>
 		</header>
@@ -201,7 +207,7 @@
 				<ol class="mb-4 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground" aria-label="Getting started">
 					<li class="inline-flex items-center gap-1.5"><span class="grid size-4 place-items-center rounded-full bg-ok text-white"><Check class="size-2.5" strokeWidth={3.5} /></span>Signed in</li>
 					<li aria-hidden="true" class="h-px w-5 bg-ok/50"></li>
-					<li class="inline-flex items-center gap-1.5"><span class="grid size-4 place-items-center rounded-full bg-ok text-white"><Check class="size-2.5" strokeWidth={3.5} /></span>{fleet.online[0]?.display_name ?? 'Machine'} connected</li>
+					<li class="inline-flex items-center gap-1.5"><span class="grid size-4 place-items-center rounded-full bg-ok text-white"><Check class="size-2.5" strokeWidth={3.5} /></span>{fleet.myOnline[0]?.display_name ?? 'Machine'} connected</li>
 					<li aria-hidden="true" class="h-px w-5 bg-border"></li>
 					<li class="inline-flex items-center gap-1.5 font-medium text-foreground" aria-current="step"><span class="tnum grid size-4 place-items-center rounded-full bg-foreground text-[10px] text-background">{fleet.setup?.worker_token ? 3 : 4}</span>Run your first task</li>
 				</ol>

@@ -163,7 +163,7 @@ impl ControlClient {
                 busy_repos: busy_repos.to_vec(),
                 agents: agents.to_vec(),
                 slots: Some(slots.clone()),
-                kinds: vec!["agent".into(), "restore".into(), "fork".into(), "pr".into()],
+                kinds: vec!["agent".into(), "restore".into(), "fork".into(), "pr".into(), "integrate".into()],
                 wait_secs: (!wait.is_zero()).then_some(wait.as_secs()),
             })
             .send()

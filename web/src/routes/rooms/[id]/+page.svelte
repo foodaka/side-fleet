@@ -15,6 +15,7 @@
 	import Pencil from '@lucide/svelte/icons/pencil';
 	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 	import Check from '@lucide/svelte/icons/check';
+	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { api, ApiError } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { AGENTS, agentModel, agentName, defaultModel, hasAgent, machineModels, modelValid, rel, repoKey, repoLabel } from '#lib/sf/format';
@@ -26,6 +27,8 @@
 	import PrIcon from '#lib/sf/ui/PrIcon.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
+	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
+	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 
 	const id = $derived(page.params.id ?? '');
@@ -47,7 +50,7 @@
 	$effect(() => {
 		const rid = id;
 		if (!rid || !fleet.loaded) return;
-		untrack(() => { data = null; missing = ''; });
+		untrack(() => { data = null; missing = ''; attachments.clear(); });
 		void load(rid);
 		const t = setInterval(() => { if (document.visibilityState === 'visible') void load(rid); }, 3000);
 		return () => clearInterval(t);
@@ -133,6 +136,10 @@
 	let task = $state('');
 	let starting = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
+	let picker: HTMLInputElement | undefined = $state();
+	// Images for the new task: dropped anywhere on the page, pasted into the box, or picked with the paperclip.
+	const attachments = new Attachments();
+	const canAttach = $derived(!!room && !room.archived_at);
 	$effect(() => {
 		const a = agent;
 		untrack(() => {
@@ -161,9 +168,10 @@
 		try {
 			const r = await api<{ id: string }>(`/v1/rooms/${room.id}/tasks`, {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: perm, worker_id: pinned?.id })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: perm, worker_id: pinned?.id, images: await attachments.payload() })
 			});
 			task = '';
+			attachments.clear();
 			void fleet.refresh();
 			await load();
 			toast('Task started', { description: 'It runs on your machine with the room brief.', action: { label: 'Open', onClick: () => void goto('#/runs/' + r.id) } });
@@ -209,6 +217,12 @@
 </script>
 
 <svelte:head><title>{room?.name ?? 'Room'} · Sidefleet</title></svelte:head>
+<svelte:window
+	ondragenter={(e) => canAttach && attachments.dragenter(e)}
+	ondragleave={(e) => canAttach && attachments.dragleave(e)}
+	ondragover={(e) => canAttach ? attachments.dragover(e) : e.preventDefault()}
+	ondrop={(e) => canAttach ? attachments.drop(e) : e.preventDefault()}
+/>
 
 {#snippet taskCard(t: TaskCard)}
 	{@const mine = isMine(t)}
@@ -359,7 +373,10 @@
 			<!-- Tasks -->
 			<div class="flex min-w-0 flex-col gap-4">
 				<form class="flex flex-col gap-1.5" onsubmit={startTask}>
-					<div class="rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
+					<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
+						{#if attachments.dragging}
+							<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images to attach them</div>
+						{/if}
 						<label for="room-task" class="sr-only">New task in this room</label>
 						<textarea
 							id="room-task"
@@ -368,8 +385,10 @@
 							rows="2"
 							placeholder="Take a piece of the goal: what should your agent do?"
 							onkeydown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) startTask(e); }}
+							onpaste={attachments.paste}
 							class="block max-h-[240px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 						></textarea>
+						<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
 						<div class="flex flex-wrap items-center gap-0.5 px-2 pb-2">
 							<AgentModelPicker
 								bind:agent
@@ -381,7 +400,11 @@
 								unavailable={(a) => (withRepo.some((w) => hasAgent(w, a)) ? '' : `Not on a machine of yours with ${repoLabel(room?.repo)}`)}
 							/>
 							<ComposerOptions {agent} perm={perm} onperm={(v) => (perm = v)} defaultPerm="acceptEdits" {machines} machine={pinned?.id ?? ''} onmachine={(v) => (machine = v)} size="sm" />
-							<button type="submit" aria-label="Start task" disabled={!canStart} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
+							<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canAttach} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
+								<Paperclip class="size-4" />
+							</button>
+							<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
+							<button type="submit" aria-label="Start task" disabled={!canStart} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 								<ArrowUp class="size-4" strokeWidth={2.2} />
 							</button>
 						</div>

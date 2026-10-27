@@ -1,1 +1,0 @@
-export{i as default,a as renderToString}from"./BpryBFGK.js";

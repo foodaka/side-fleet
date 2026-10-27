@@ -19,7 +19,7 @@
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { api, ApiError } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, agentModel, agentName, defaultModel, hasAgent, machineModels, modelValid, rel, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, agentModel, agentName, defaultModel, hasAgent, machineModels, modelValid, rel, repoCloneCommand, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId, RoomDetail, RoomNote, TaskCard } from '#lib/sf/types';
 	import { compareUrl, fixConflictsPrompt } from '#lib/sf/rooms';
 	import Avatar from '#lib/sf/ui/Avatar.svelte';
@@ -394,7 +394,14 @@
 
 			<div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
 				{#if room.created_by_login}<span class="inline-flex items-center gap-1.5"><Avatar login={room.created_by_login} size={16} class="ring-0" />Started by @{room.created_by_login}</span>{/if}
-				<span class="font-mono text-[11.5px]">{repoLabel(room.repo)}</span>
+				{#if repoCloneCommand(room.repo)}
+					<span class="inline-flex min-w-0 items-center gap-1 rounded-md bg-muted py-0.5 pr-0.5 pl-1.5" title="Copy a git clone command for this repo">
+						<span class="truncate font-mono text-[11.5px] text-foreground/80">{repoLabel(room.repo)}</span>
+						<CopyButton text={() => repoCloneCommand(room?.repo)} label="" class="h-5 bg-transparent px-1 text-muted-foreground hover:bg-accent hover:text-foreground" />
+					</span>
+				{:else}
+					<span class="font-mono text-[11.5px]">{repoLabel(room.repo)}</span>
+				{/if}
 				<span class="inline-flex min-w-0 items-center gap-1 rounded-md bg-muted py-0.5 pr-0.5 pl-1.5">
 					<GitBranch class="size-3 shrink-0" /><span class="truncate font-mono text-[11.5px] text-foreground/80">{room.branch}</span>
 					<CopyButton text={() => room?.branch ?? ''} label="" class="h-5 bg-transparent px-1 text-muted-foreground hover:bg-accent hover:text-foreground" />

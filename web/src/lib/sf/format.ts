@@ -192,3 +192,10 @@ export function repoLabel(key: string | null | undefined): string {
 	const [first, ...rest] = key.split('/');
 	return rest.length >= 2 && first.includes('.') ? rest.join('/') : key;
 }
+
+/** A command that clones the repo, or '' when only its folder name is known. */
+export function repoCloneCommand(key: string | null | undefined): string {
+	if (!key) return '';
+	const [first, ...rest] = key.split('/');
+	return rest.length >= 2 && first.includes('.') ? `git clone https://${key}.git` : '';
+}

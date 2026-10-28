@@ -681,13 +681,7 @@ async fn get_image(State(state): State<AppState>, Extension(caller): Extension<C
 
 /// An image attached to a message, for the worker that runs it.
 async fn worker_get_image(State(state): State<AppState>, Extension(auth): Extension<WorkerAuth>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
-    // An image of a run in any org the machine serves.
-    for org in &auth.orgs {
-        if db::get_image(&state.pool, *org, id).await?.is_some() {
-            return image_response(&state, *org, id).await;
-        }
-    }
-    Err(ApiError(StatusCode::NOT_FOUND, "image not found".into()))
+    image_response(&state, auth.org, id).await
 }
 
 /// An image of `org`'s runs; other orgs' images read as missing.
@@ -749,14 +743,13 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
         let online = db::is_online(w.last_heartbeat_at);
         let mut v = serde_json::to_value(&w).unwrap_or(json!({}));
         v["online"] = json!(online);
+        v["guest"] = json!(guests.contains(&w.id));
         let owner = owners.get(&w.id).cloned().flatten();
         v["mine"] = json!(owner.as_ref().map(|(id, _)| *id) == caller.user_id());
         v["owner"] = owner.map_or(json!(null), |(id, login)| json!({ "id": id, "login": login }));
         // Agents whose usage limit this machine hit: agent -> when it resets.
         v["limited_until"] = json!(limits.remove(&w.id).unwrap_or_default());
-        // Connected to another org of its owner's; doesn't count against this org's plan.
-        v["guest"] = json!(guests.contains(&w.id));
-        v["update_requested"] = json!(db::update_requested(&state.pool, &[org], &w.id).await?);
+        v["update_requested"] = json!(db::update_requested(&state.pool, org, &w.id).await?);
         v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
         out.push(v);
     }
@@ -778,24 +771,12 @@ async fn request_update(State(state): State<AppState>, Extension(caller): Extens
 /// again with a valid token; revoke its token to keep it out.
 async fn delete_worker(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     own_or_org_owner(&state, &caller, &id).await?;
-    let yours = caller.user_id().is_some() && db::worker_owner(&state.pool, caller.org_id(), &id).await? == caller.user_id();
-    let token = sqlx::query_scalar::<_, String>("SELECT token_hash FROM workers WHERE org_id = $1 AND id = $2")
-        .bind(caller.org_id())
-        .bind(&id)
-        .fetch_optional(&state.pool)
-        .await?;
-    if db::delete_worker(&state.pool, caller.org_id(), &id).await? {
-        // Your own machine goes from each of your orgs it served (a live one comes back when it connects again).
-        if let (true, Some(token)) = (yours, token) {
-            sqlx::query(
-                "DELETE FROM workers w WHERE w.id = $1 AND w.token_hash = $2
-                   AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.org_id = w.org_id AND r.worker_id = w.id)",
-            )
-            .bind(&id)
-            .bind(&token)
-            .execute(&state.pool)
-            .await?;
-        }
+    let owner = db::worker_owner(&state.pool, caller.org_id(), &id).await?;
+    let removed = match caller.user_id().filter(|u| Some(*u) == owner) {
+        Some(user) => db::delete_personal_machine(&state.pool, caller.org_id(), &id, user).await?,
+        None => db::delete_worker(&state.pool, caller.org_id(), &id).await?,
+    };
+    if removed {
         tracing::info!(worker = %id, "machine removed");
         Ok(StatusCode::NO_CONTENT)
     } else if db::worker_exists(&state.pool, caller.org_id(), &id).await? {
@@ -898,16 +879,9 @@ async fn update_ack(
     Extension(w): Extension<WorkerAuth>,
     Json(req): Json<UpdateAck>,
 ) -> Result<StatusCode, ApiError> {
-    if !db::worker_owns_token(&state.pool, w.org, &req.id, &w.token_hash).await? {
-        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    for org in crate::machines::worker_orgs(&state.pool, &w.token_hash, &req.id).await? {
+        db::set_update_requested(&state.pool, org, &req.id, false).await?;
     }
-    // It may have been asked from any of the orgs it serves.
-    sqlx::query("UPDATE workers SET update_requested = false WHERE id = $1 AND token_hash = $2 AND org_id = ANY($3)")
-        .bind(&req.id)
-        .bind(&w.token_hash)
-        .bind(&w.orgs)
-        .execute(&state.pool)
-        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1078,7 +1052,14 @@ async fn register_worker(
     if req.id.trim().is_empty() || req.id.len() > 128 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "worker id must be 1-128 chars".into()));
     }
-    if let Some(l) = tenancy::org_limits(&state.pool, auth.org).await? {
+    let personal: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM personal_machines WHERE token_hash = $1 AND worker_id = $2)")
+        .bind(&auth.token_hash).bind(&req.id).fetch_one(&state.pool).await?;
+    if !personal {
+        let departed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM worker_tokens t WHERE t.token_hash = $1 AND t.owner_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = t.org_id AND m.user_id = t.owner_id))")
+            .bind(&auth.token_hash).fetch_one(&state.pool).await?;
+        if departed { return Err(ApiError(StatusCode::FORBIDDEN, "enable an existing machine in one of your organizations, or connect with a new token".into())); }
+    }
+    if let Some(l) = tenancy::org_limits(&state.pool, auth.org).await?.filter(|_| !personal) {
         if !db::worker_exists(&state.pool, auth.org, &req.id).await? && db::count_workers(&state.pool, auth.org).await? >= l.machines {
             return Err(ApiError(
                 StatusCode::PAYMENT_REQUIRED,
@@ -1089,11 +1070,9 @@ async fn register_worker(
     let Some(w) = db::upsert_worker(&state.pool, auth.org, &req.id, &req.display_name, &auth.token_hash, &req.capabilities).await? else {
         return Err(ApiError(StatusCode::CONFLICT, format!("a teammate's machine is already registered as {}; pick another machine id (--id)", req.id)));
     };
-    let serves = db::sync_worker(&state.pool, auth.org, &auth.orgs, &req.id, &auth.token_hash, true).await?;
-    tracing::info!(worker = %w.id, org = %auth.org, also_in = serves, repos = w.capabilities.repos.len(), "worker registered");
-    for org in &auth.orgs {
-        for ev in db::reconcile_worker_runs(&state.pool, *org, &req.id, &req.active_runs).await? {
-            tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run lost by worker restart; marked finished");
+    tracing::info!(worker = %w.id, org = %auth.org, repos = w.capabilities.repos.len(), "worker registered");
+    for org in crate::machines::worker_orgs(&state.pool, &auth.token_hash, &req.id).await? {
+        for ev in db::reconcile_worker_runs(&state.pool, org, &req.id, &req.active_runs).await? {
             state.events.publish(ev);
         }
     }
@@ -1106,25 +1085,17 @@ async fn heartbeat(
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
     if db::heartbeat(&state.pool, auth.org, &req.id, &auth.token_hash, &req.capabilities).await? {
-        // Its owner's other orgs see it too (and pick it up in an org they've just joined).
-        db::sync_worker(&state.pool, auth.org, &auth.orgs, &req.id, &auth.token_hash, false).await?;
-        for org in &auth.orgs {
-            for ev in db::reconcile_worker_runs(&state.pool, *org, &req.id, &req.active_runs).await? {
-                tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run no longer executing on its worker; marked finished");
-                state.events.publish(ev);
+        let mut update_requested = false;
+        let mut check_prs = Vec::new();
+        let enabled = crate::machines::active_worker_orgs(&state.pool, &auth.token_hash, &req.id).await?;
+        for org in crate::machines::worker_orgs(&state.pool, &auth.token_hash, &req.id).await? {
+            for ev in db::reconcile_worker_runs(&state.pool, org, &req.id, &req.active_runs).await? { state.events.publish(ev); }
+            if enabled.contains(&org) {
+                update_requested |= db::update_requested(&state.pool, org, &req.id).await?;
+                check_prs.extend(db::prs_to_check(&state.pool, org, &req.id).await?);
             }
         }
-        Ok(Json(HeartbeatResponse {
-            server_version: state.config.build.clone(),
-            update_requested: db::update_requested(&state.pool, &auth.orgs, &req.id).await?,
-            check_prs: {
-                let mut prs = Vec::new();
-                for org in &auth.orgs {
-                    prs.extend(db::prs_to_check(&state.pool, *org, &req.id).await?);
-                }
-                prs
-            },
-        }))
+        Ok(Json(HeartbeatResponse { server_version: state.config.build.clone(), update_requested, check_prs }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
         Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()))
@@ -1136,8 +1107,12 @@ async fn claim_run(
     Extension(auth): Extension<WorkerAuth>,
     Json(req): Json<ClaimRequest>,
 ) -> Result<Response, ApiError> {
-    if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
-        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    let orgs = crate::machines::worker_orgs(&state.pool, &auth.token_hash, &req.worker_id).await?;
+    if orgs.is_empty() {
+        let known: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM personal_machines WHERE token_hash = $1 AND worker_id = $2)")
+            .bind(&auth.token_hash).bind(&req.worker_id).fetch_one(&state.pool).await?;
+        if !known { return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into())); }
+        return Ok(StatusCode::NO_CONTENT.into_response());
     }
     if req.repos.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1149,10 +1124,10 @@ async fn claim_run(
     // A long poll: subscribe before the first look, so a run queued in between still wakes us.
     let wait = Duration::from_secs(req.wait_secs.unwrap_or(0).min(MAX_CLAIM_WAIT_SECS));
     let deadline = tokio::time::Instant::now() + wait;
-    // It serves its owner's tasks in each of their orgs: wake on any of them.
-    let mut wakes: Vec<_> = auth.orgs.iter().map(|o| state.claims.subscribe(*o)).collect();
     loop {
-        for org in &auth.orgs {
+        let orgs = crate::machines::active_worker_orgs(&state.pool, &auth.token_hash, &req.worker_id).await?;
+        let mut wakes: Vec<_> = orgs.iter().map(|o| state.claims.subscribe(*o)).collect();
+        for org in &orgs {
             let max_running = tenancy::org_limits(&state.pool, *org).await?.map(|l| l.parallel_runs);
             let claimed =
                 db::claim_run(&state.pool, *org, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds, max_running)
@@ -1163,7 +1138,7 @@ async fn claim_run(
             }
             if let Some((run, ev)) = claimed.run {
                 state.events.publish(ev);
-                tracing::info!(run_id = %run.id, worker = %req.worker_id, org = %org, "run claimed");
+                tracing::info!(run_id = %run.id, worker = %req.worker_id, "run claimed");
                 return Ok(Json(run).into_response());
             }
         }
@@ -1175,10 +1150,12 @@ async fn claim_run(
         // (the least-busy grace, a failover exclusion or a usage limit running out).
         let recheck = tokio::time::sleep_until(deadline.min(now + CLAIM_RECHECK));
         tokio::pin!(recheck);
-        let woken = futures::future::select_all(wakes.iter_mut().map(|w| Box::pin(w.changed())));
-        tokio::select! {
-            (r, _, _) = woken => if r.is_err() { (&mut recheck).await },
-            _ = &mut recheck => {}
+        if wakes.is_empty() { recheck.await; } else {
+            let woken = futures::future::select_all(wakes.iter_mut().map(|w| Box::pin(w.changed())));
+            tokio::select! {
+                (r, _, _) = woken => if r.is_err() { (&mut recheck).await },
+                _ = &mut recheck => {}
+            }
         }
     }
 }
@@ -1188,14 +1165,11 @@ async fn report_prs(
     Extension(auth): Extension<WorkerAuth>,
     Json(req): Json<sidefleet_core::PrReports>,
 ) -> Result<StatusCode, ApiError> {
-    if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
-        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
-    }
     if req.prs.len() > 100 || req.prs.iter().any(|r| !matches!(r.pr.state.as_str(), "open" | "merged" | "closed") || !r.pr.url.starts_with("https://")) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad pull request report".into()));
     }
-    for org in &auth.orgs {
-        db::record_prs(&state.pool, *org, &req.worker_id, &req.prs).await?;
+    for org in crate::machines::active_worker_orgs(&state.pool, &auth.token_hash, &req.worker_id).await? {
+        db::record_prs(&state.pool, org, &req.worker_id, &req.prs).await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1203,16 +1177,6 @@ async fn report_prs(
 #[derive(Deserialize)]
 struct WorkerQuery {
     worker_id: String,
-}
-
-/// The org of run `id`, if it is in one the machine serves; other runs read as missing.
-async fn run_org(state: &AppState, auth: &WorkerAuth, id: Uuid) -> Result<Uuid, ApiError> {
-    sqlx::query_scalar::<_, Uuid>("SELECT org_id FROM runs WHERE id = $1 AND org_id = ANY($2)")
-        .bind(id)
-        .bind(&auth.orgs)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(not_found)
 }
 
 /// A worker acting on a run names itself; its token must be the one that machine registered with,
@@ -1236,8 +1200,7 @@ async fn post_events(
         return Err(ApiError(StatusCode::BAD_REQUEST, "too many events in one batch".into()));
     }
     worker_is(&state, &auth, &q.worker_id).await?;
-    let org = run_org(&state, &auth, id).await?;
-    match db::append_events(&state.pool, org, id, &q.worker_id, &req.events).await? {
+    match db::append_events(&state.pool, auth.org, id, &q.worker_id, &req.events).await? {
         AppendOutcome::Appended(stored, run) => {
             for ev in stored {
                 state.events.publish(ev);
@@ -1269,7 +1232,7 @@ async fn post_live_text(
     if !state.events.watched(id) {
         return Ok(StatusCode::NO_CONTENT);
     }
-    let run = db::get_run(&state.pool, run_org(&state, &auth, id).await?, id).await?.ok_or_else(not_found)?;
+    let run = db::get_run(&state.pool, auth.org, id).await?.ok_or_else(not_found)?;
     worker_is(&state, &auth, &q.worker_id).await?;
     if run.worker_id.as_deref() != Some(q.worker_id.as_str()) {
         return Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into()));
@@ -1285,7 +1248,7 @@ async fn run_control(
     Extension(auth): Extension<WorkerAuth>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RunControl>, ApiError> {
-    let run = db::get_run(&state.pool, run_org(&state, &auth, id).await?, id).await?.ok_or_else(not_found)?;
+    let run = db::get_run(&state.pool, auth.org, id).await?.ok_or_else(not_found)?;
     Ok(Json(RunControl {
         status: run.status,
         stop_requested: run.stop_requested || run.status.is_terminal(),
@@ -1305,12 +1268,11 @@ async fn request_approval(
         return Err(ApiError(StatusCode::BAD_REQUEST, "tool_name must not be empty".into()));
     }
     worker_is(&state, &auth, &q.worker_id).await?;
-    let org = run_org(&state, &auth, id).await?;
-    match crate::approvals::request(&state.pool, org, id, &q.worker_id, &req).await? {
+    match crate::approvals::request(&state.pool, auth.org, id, &q.worker_id, &req).await? {
         RequestOutcome::Created(a, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %id, approval = %a.id, tool = %a.tool_name, "tool call waiting for approval");
-            crate::chat_updates::approval_requested(&state, org, &a);
+            crate::chat_updates::approval_requested(&state, auth.org, &a);
             Ok((StatusCode::CREATED, Json(*a)))
         }
         RequestOutcome::NotFound => Err(not_found()),
@@ -1325,7 +1287,7 @@ async fn poll_approval(
     Extension(auth): Extension<WorkerAuth>,
     Path((id, approval)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Approval>, ApiError> {
-    let (a, ev) = crate::approvals::poll(&state.pool, run_org(&state, &auth, id).await?, id, approval, chrono::Utc::now())
+    let (a, ev) = crate::approvals::poll(&state.pool, auth.org, id, approval, chrono::Utc::now())
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "approval not found".into()))?;
     if let Some(ev) = ev {
@@ -1345,8 +1307,7 @@ async fn finish_run(
         return Err(ApiError(StatusCode::BAD_REQUEST, "finish status must be terminal".into()));
     }
     worker_is(&state, &auth, &q.worker_id).await?;
-    let org = run_org(&state, &auth, id).await?;
-    match db::finish_run(&state.pool, org, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
+    match db::finish_run(&state.pool, auth.org, id, &q.worker_id, req.status, req.result, req.usage_limit.as_ref()).await? {
         FinishOutcome::Finished(run, evs) => {
             for ev in evs {
                 state.events.publish(ev);
@@ -1355,7 +1316,7 @@ async fn finish_run(
                 tracing::warn!(run_id = %id, worker = %q.worker_id, agent = %run.agent, "usage limit hit; no other machine can take the run now");
             }
             tracing::info!(run_id = %id, status = run.status.as_str(), "run finished");
-            crate::chat_updates::run_finished(&state, org, &run);
+            crate::chat_updates::run_finished(&state, auth.org, &run);
             Ok(Json(run))
         }
         FinishOutcome::Requeued(run, evs) => {
@@ -1399,6 +1360,11 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Respons
         Identity::ApiToken(t) => (t.user, vec![t.org], Some(json!({ "id": t.id, "name": t.name, "scope": t.scope }))),
     };
     let mut v = json!({ "user": user, "orgs": orgs });
+    if let Some(entries) = v["orgs"].as_array_mut() {
+        for (entry, org) in entries.iter_mut().zip(&orgs) {
+            entry["machine_count"] = json!(db::count_workers(&state.pool, org.id).await?);
+        }
+    }
     if let Some(t) = token {
         v["token"] = t;
     }
@@ -1597,6 +1563,11 @@ async fn create_token(
 
 async fn revoke_token(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path((org, id)): Path<(String, Uuid)>) -> Result<Json<serde_json::Value>, ApiError> {
     let org = owned_org(&state, &caller, &org).await?;
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM worker_tokens WHERE id = $1 AND org_id = $2")
+        .bind(id).bind(org.id).fetch_optional(&state.pool).await?.flatten();
+    if owner.is_some() && owner != caller.user_id() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "only the token's owner can revoke a personal machine token; remove its organization assignment instead".into()));
+    }
     let t = tenancy::revoke_token(&state.pool, org.id, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
     tracing::info!(org = %org.id, token = %id, "worker token revoked");
     Ok(Json(json!(t)))

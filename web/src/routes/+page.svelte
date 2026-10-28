@@ -16,6 +16,7 @@
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
+	import EnableHere from '#lib/sf/ui/EnableHere.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
@@ -174,10 +175,14 @@
 {:else if noMachines && !fleet.mine.length}
 	<section class="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 pt-[10vh] pb-16">
 		<header class="flex flex-col gap-3">
-			<h1 class="text-[28px] leading-tight font-medium tracking-tight">Put your first machine to work</h1>
+			<h1 class="text-[28px] leading-tight font-medium tracking-tight">{fleet.elsewhere.length ? 'Enable one of your machines' : 'Put your first machine to work'}</h1>
 			<p class="max-w-xl text-[15px] leading-relaxed text-muted-foreground">
-				Sidefleet runs tasks with the coding agents already set up on your own machines and streams what they do back here.
-				It takes a couple of minutes.
+				{#if fleet.elsewhere.length}
+					Your machines are already connected. Enable one here to run this organization's tasks.
+				{:else}
+					Sidefleet runs tasks with the coding agents already set up on your own machines and streams what they do back here.
+					It takes a couple of minutes.
+				{/if}
 			</p>
 			{#if fleet.multi}
 				<p class="max-w-xl text-[13px] leading-relaxed text-muted-foreground">
@@ -185,7 +190,11 @@
 				</p>
 			{/if}
 		</header>
-		<Onboarding />
+		{#if fleet.elsewhere.length}
+			<div class="flex flex-col gap-3 rounded-xl border p-4"><EnableHere /></div>
+		{:else}
+			<Onboarding />
+		{/if}
 	</section>
 {:else if noMachines}
 	<section class="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 pt-[10vh] pb-16">
@@ -193,9 +202,10 @@
 			<h1 class="text-[28px] leading-tight font-medium tracking-tight">Your machines are offline</h1>
 			<p class="max-w-xl text-[15px] leading-relaxed text-muted-foreground">
 				{fleet.mine.map((w) => w.display_name).join(', ')} {fleet.mine.length === 1 ? 'has' : 'have'} stopped checking in.
-				Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or connect another machine below.
+				Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or enable another machine below.
 			</p>
 		</header>
+		<EnableHere />
 		<div class="rounded-2xl border bg-card p-5 shadow-[0_1px_2px_rgb(0_0_0/0.03)]">
 			<AddMachine />
 		</div>

@@ -109,17 +109,17 @@ email as verified, which is what `users.email` stores today.
 - `DELETE /v1/orgs/:org/members/:user` removes someone (admin+), and `DELETE …/members/me` leaves.
 
 Removing a member, in one transaction:
-1. Their machines in this org: the worker tokens they own are revoked, so the next heartbeat gets 401
-   (the existing behaviour). Their `workers` rows stay for history, marked `removed`.
+1. Their machine assignments in this org are disabled. Their personal connections and assignments
+   in other orgs stay active. Their `workers` rows stay for history.
 2. Their **queued** runs in this org: stopped, with reason `member removed`.
-3. Their **running** runs: stop requested. Their machines stop anyway (step 1).
+3. Their **running** runs in this org: stop requested.
 4. Their API tokens for this org: revoked.
 5. Their threads stay visible to the team, and anyone can carry one on with **Continue on my
    machine** ([03](03-shared-threads.md) §5). Their private threads stay private. Owners see that
    they exist (03 §2) and can delete them, but can't read them.
 6. Audit event `member.removed` with the counts above.
 
-The page confirms with these numbers before it acts: "Remove Sam? Their 2 machines disconnect and
+The page confirms with these numbers before it acts: "Remove Sam? Their 2 machine assignments are disabled and
 1 running task stops."
 
 ## 5. First run in a team

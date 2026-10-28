@@ -60,11 +60,6 @@ impl Machine {
         assert_eq!(s, StatusCode::OK, "{v}");
         m
     }
-    /// Register without asserting it worked.
-    async fn try_start(env: &TestEnv, token: &str, id: &str) -> (StatusCode, Value) {
-        let m = Machine { c: Client::new(), base: env.base_url.clone(), token: token.into(), id: id.into() };
-        m.call("/v1/worker/register", json!({"id": id, "display_name": id, "capabilities": {}, "active_runs": []})).await
-    }
     async fn call(&self, path: &str, body: Value) -> (StatusCode, Value) {
         let r = self.c.post(format!("{}{}", self.base, path)).bearer_auth(&self.token).json(&body).send().await.unwrap();
         let s = r.status();
@@ -306,25 +301,34 @@ async fn rooms_brief_their_tasks_and_merge_them_into_one_branch() {
 }
 
 #[tokio::test]
-async fn removing_someone_takes_their_machines_out_of_the_org_and_stops_their_queued_tasks() {
+async fn removing_someone_disables_assignments_but_preserves_machine_credentials() {
     let env = TestEnv::start_hosted().await;
     let (alice, bob, _, bob_m) = team(&env).await;
     let org = alice.org.clone().unwrap();
     let (_, v) = bob.task("/v1/runs", "queued work", json!({})).await;
     let queued = v["id"].as_str().unwrap().to_string();
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != org.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let mut home = Api::user(&env, "bob").await;
+    home.org = Some(personal);
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    let mid = machines[0]["machine_id"].clone();
+    assert_eq!(home.call(Method::POST, "/v1/me/machines/assign", Some(json!({"machine_id": mid, "enabled": true}))).await.0, StatusCode::OK);
+    let (_, personal_task) = home.task("/v1/runs", "keep working", json!({"worker_id": "bob-linux"})).await;
     let bob_id = bob.me().await["user"]["id"].as_str().unwrap().to_string();
 
     assert_eq!(bob.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{}", alice.me().await["user"]["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{bob_id}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(alice.call(Method::GET, &format!("/v1/runs/{queued}"), None).await.1["status"], "stopped");
-    // Bob's machine, connected to Acme, moves home to his personal org (where it was already
-    // listed) and keeps working for him there, but Acme no longer lists it or hands it work.
-    let (s, v) = bob_m.call("/v1/worker/heartbeat", json!({"id": "bob-linux", "capabilities": {}, "active_runs": []})).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    let (_, acme_workers) = alice.call(Method::GET, "/v1/workers", None).await;
-    assert!(!acme_workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-linux"), "{acme_workers}");
-    let (_, home) = Api::user(&env, "bob").await.call(Method::GET, "/v1/workers", None).await;
-    assert!(home.as_array().unwrap().iter().any(|w| w["id"] == "bob-linux"), "{home}");
+    let (s, _) = bob_m.call("/v1/worker/heartbeat", json!({"id": "bob-linux", "capabilities": {}, "active_runs": []})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(bob_m.claim().await.unwrap()["id"], personal_task["id"]);
+    bob_m.finish(personal_task["id"].as_str().unwrap(), json!({})).await;
+    assert!(bob_m.claim().await.is_none());
+    // Restarting keeps the personal identity and does not re-enable the departed org.
+    let _ = Machine::start(&env, &bob_m.token, "bob-linux").await;
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(machines[0]["machine_id"], mid);
+    assert_eq!(machines[0]["orgs"].as_array().unwrap().len(), 1);
     // The last owner can't leave.
     let alice_id = alice.me().await["user"]["id"].as_str().unwrap().to_string();
     assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{alice_id}"), None).await.0, StatusCode::CONFLICT);
@@ -385,54 +389,75 @@ async fn removing_someone_also_revokes_the_invites_they_made() {
 }
 
 #[tokio::test]
-async fn your_machine_serves_you_in_every_org_you_belong_to() {
+async fn personal_machines_serve_multiple_orgs_with_shared_capacity_and_owner_only_assignments() {
     let env = TestEnv::start_hosted().await;
-    let (alice, bob, alice_m, _bob_linux) = team(&env).await;
+    let (alice, bob, _, _) = team(&env).await;
     let acme = alice.org.clone().unwrap();
-
-    // Bob connects his laptop to his personal org only.
     let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
-    let mut bob_home = Api::user(&env, "bob").await;
-    bob_home.org = Some(personal.clone());
-    let (_, tok) = bob_home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "laptop"}))).await;
+    let mut home = Api::user(&env, "bob").await;
+    home.org = Some(personal.clone());
+    let (_, tok) = home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "laptop"}))).await;
     let laptop = Machine::start(&env, tok["token"].as_str().unwrap(), "bob-laptop").await;
-
-    // It shows in Acme as Bob's, without counting against Acme's plan (full with Alice's and Bob's Linux box).
-    let (_, workers) = bob.call(Method::GET, "/v1/workers", None).await;
-    let row = workers.as_array().unwrap().iter().find(|w| w["id"] == "bob-laptop").cloned().unwrap_or(Value::Null);
-    assert_eq!((row["mine"].as_bool(), row["online"].as_bool(), row["guest"].as_bool()), (Some(true), Some(true), Some(true)), "{workers}");
-    assert!(workers.as_array().unwrap().iter().any(|w| w["id"] == "alice-mac" && w["guest"] == false), "{workers}");
-    let (_, theirs) = alice.call(Method::GET, "/v1/workers", None).await;
-    assert!(theirs.as_array().unwrap().iter().any(|w| w["id"] == "bob-laptop" && w["owner"]["login"] == "bob"), "{theirs}");
-    let (s, v) = alice.call(Method::POST, &format!("/v1/orgs/{acme}/tokens"), Some(json!({"name": "alice-2"}))).await;
-    assert_eq!(s, StatusCode::CREATED, "{v}");
-    let (s, v) = Machine::try_start(&env, v["token"].as_str().unwrap(), "alice-2").await;
-    assert_eq!(s, StatusCode::PAYMENT_REQUIRED, "Acme is at 2 machines without Bob's laptop: {v}");
-
-    // The laptop runs Bob's tasks from Acme and from his personal org, and never Alice's.
-    let (_, alice_run) = alice.task("/v1/runs", "Alice's task", json!({})).await;
-    let (s, acme_run) = bob.task("/v1/runs", "Bob's Acme task", json!({"worker_id": "bob-laptop"})).await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{acme_run}");
-    let got = laptop.claim().await.expect("bob's Acme task");
-    assert_eq!(got["id"], acme_run["id"]);
-    laptop.finish(got["id"].as_str().unwrap(), json!({"text": "done in Acme"})).await;
-    assert_eq!(bob.call(Method::GET, &format!("/v1/runs/{}", acme_run["id"].as_str().unwrap()), None).await.1["status"], "succeeded");
-    let (_, home_run) = bob_home.task("/v1/runs", "Bob's own task", json!({})).await;
-    assert_eq!(laptop.claim().await.expect("bob's personal task")["id"], home_run["id"]);
-    assert!(laptop.claim().await.is_none(), "Alice's task stays for her machine");
-    assert_eq!(alice_m.claim().await.expect("alice's task")["id"], alice_run["id"]);
-
-    // "Your machines" lists each machine once, with the org it connected to.
     let (_, mine) = bob.call(Method::GET, "/v1/me/machines", None).await;
-    let mut listed: Vec<(String, String)> = mine.as_array().unwrap().iter().map(|m| (m["id"].as_str().unwrap().into(), m["org"]["id"].as_str().unwrap().into())).collect();
-    listed.sort();
-    assert_eq!(listed, [("bob-laptop".to_string(), personal.clone()), ("bob-linux".to_string(), acme.clone())]);
-
-    // Removing your machine in one org removes it from the others it served.
-    assert_eq!(bob.call(Method::DELETE, "/v1/workers/bob-linux", None).await.0, StatusCode::NO_CONTENT);
-    let (_, home_workers) = bob_home.call(Method::GET, "/v1/workers", None).await;
-    assert!(!home_workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-linux"), "{home_workers}");
-
+    let row = mine.as_array().unwrap().iter().find(|m| m["id"] == "bob-laptop").unwrap();
+    let mid = row["machine_id"].clone();
+    let enable = json!({"machine_id": mid, "enabled": true});
+    let disable = json!({"machine_id": mid, "enabled": false});
+    assert_eq!(alice.call(Method::POST, "/v1/me/machines/assign", Some(enable.clone())).await.0, StatusCode::NOT_FOUND);
+    // Acme is full, but a guest assignment consumes no machine slots there.
+    assert_eq!(bob.call(Method::POST, "/v1/me/machines/assign", Some(enable.clone())).await.0, StatusCode::OK);
+    assert_eq!(bob.call(Method::POST, "/v1/me/machines/assign", Some(enable)).await.0, StatusCode::OK);
+    assert_eq!(bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] == acme.as_str()).unwrap()["machine_count"], 2);
+    let (_, workers) = bob.call(Method::GET, "/v1/workers", None).await;
+    assert_eq!(workers.as_array().unwrap().iter().find(|w| w["id"] == "bob-laptop").unwrap()["guest"], true);
+    let (s, third) = alice.call(Method::POST, &format!("/v1/orgs/{acme}/tokens"), Some(json!({"name": "third"}))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let third = Machine { c: Client::new(), base: env.base_url.clone(), token: third["token"].as_str().unwrap().into(), id: "third".into() };
+    assert_eq!(third.call("/v1/worker/register", json!({"id": "third", "display_name": "third", "capabilities": {}, "active_runs": []})).await.0, StatusCode::PAYMENT_REQUIRED);
+    let (_, mine) = bob.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(mine.as_array().unwrap().iter().find(|m| m["machine_id"] == mid).unwrap()["orgs"].as_array().unwrap().len(), 2);
+    let (_, a) = bob.task("/v1/runs", "team task", json!({"worker_id": "bob-laptop"})).await;
+    let (_, b) = home.task("/v1/runs", "personal task", json!({"worker_id": "bob-laptop"})).await;
+    let claim = json!({"worker_id": "bob-laptop", "repos": ["proj"], "agents": ["claude"], "kinds": ["agent"], "slots": {"parallel": 1, "active": 0}});
+    let ((s1, v1), (s2, v2)) = tokio::join!(laptop.call("/v1/worker/claim", claim.clone()), laptop.call("/v1/worker/claim", claim.clone()));
+    assert!((s1 == StatusCode::OK && s2 == StatusCode::NO_CONTENT) || (s2 == StatusCode::OK && s1 == StatusCode::NO_CONTENT), "{s1} {v1}; {s2} {v2}");
+    let first = if s1 == StatusCode::OK { v1 } else { v2 };
+    assert_eq!(laptop.call("/v1/worker/claim", claim.clone()).await.0, StatusCode::NO_CONTENT, "capacity is shared across orgs");
+    laptop.finish(first["id"].as_str().unwrap(), json!({})).await;
+    let (s, second) = laptop.call("/v1/worker/claim", claim).await;
+    assert_eq!(s, StatusCode::OK, "{second}");
+    assert_ne!(first["id"], second["id"]);
+    assert!(first["id"] == a["id"] || first["id"] == b["id"]);
+    let (_, dormant) = bob.task("/v1/runs", "wait until re-enabled", json!({"worker_id": "bob-laptop"})).await;
+    assert_eq!(dormant["status"], "queued");
+    // Disabling while busy preserves the worker's ability to finish and retains history.
+    assert_eq!(bob.call(Method::POST, "/v1/me/machines/assign", Some(disable.clone())).await.0, StatusCode::OK);
+    assert_eq!(home.call(Method::POST, "/v1/me/machines/assign", Some(disable)).await.0, StatusCode::OK);
+    laptop.finish(second["id"].as_str().unwrap(), json!({})).await;
+    assert!(laptop.claim().await.is_none());
+    let (s, _) = laptop.call("/v1/worker/heartbeat", json!({"id": "bob-laptop", "capabilities": {}, "active_runs": []})).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, mine) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert!(mine.as_array().unwrap().iter().find(|m| m["machine_id"] == mid).unwrap()["orgs"].as_array().unwrap().is_empty());
+    assert_eq!(bob.call(Method::GET, &format!("/v1/runs/{}", a["id"].as_str().unwrap()), None).await.1["status"], "succeeded");
+    // Re-registering never resets an explicit disable, and still cannot claim queued work.
+    let _ = Machine::start(&env, &laptop.token, &laptop.id).await;
+    assert!(laptop.claim().await.is_none());
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert!(machines.as_array().unwrap().iter().find(|m| m["machine_id"] == mid).unwrap()["orgs"].as_array().unwrap().is_empty());
+    assert_eq!(home.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] == personal.as_str()).unwrap()["machine_count"], 1);
+    assert_eq!(bob.call(Method::POST, &format!("/v1/runs/{}/stop", dormant["id"].as_str().unwrap()), None).await.0, StatusCode::OK);
+    // The same agent account's usage limit applies to all assignments.
+    for api in [&bob, &home] {
+        assert_eq!(api.call(Method::POST, "/v1/me/machines/assign", Some(json!({"machine_id": mid, "enabled": true}))).await.0, StatusCode::OK);
+    }
+    let (_, limited) = bob.task("/v1/runs", "hit limit", json!({"worker_id": "bob-laptop"})).await;
+    assert_eq!(laptop.claim().await.unwrap()["id"], limited["id"]);
+    let path = format!("/v1/worker/runs/{}/finish?worker_id=bob-laptop", limited["id"].as_str().unwrap());
+    assert_eq!(laptop.call(&path, json!({"status": "failed", "result": {}, "usage_limit": {}})).await.0, StatusCode::OK);
+    let (_, waiting) = home.task("/v1/runs", "wait for reset", json!({"worker_id": "bob-laptop"})).await;
+    assert_eq!(waiting["status"], "queued");
+    assert!(laptop.claim().await.is_none());
     env.teardown().await;
 }
 
@@ -458,6 +483,62 @@ async fn owners_rename_their_org_and_members_cannot() {
 }
 
 #[tokio::test]
+async fn deleting_the_enrollment_org_does_not_disconnect_a_personal_machine() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, _, machine, _) = team(&env).await;
+    let original = alice.org.clone().unwrap();
+    let personal = alice.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != original.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let mut home = Api::user(&env, "alice").await;
+    home.org = Some(personal);
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    let mid = machines[0]["machine_id"].clone();
+    assert_eq!(home.call(Method::POST, "/v1/me/machines/assign", Some(json!({"machine_id": mid, "enabled": true}))).await.0, StatusCode::OK);
+    sqlx::query("DELETE FROM orgs WHERE id = $1::uuid").bind(original).execute(&env.pool).await.unwrap();
+    let machine = Machine::start(&env, &machine.token, &machine.id).await;
+    let (_, task) = home.task("/v1/runs", "still connected", json!({"worker_id": "alice-mac"})).await;
+    assert_eq!(machine.claim().await.unwrap()["id"], task["id"]);
+    machine.finish(task["id"].as_str().unwrap(), json!({})).await;
+    assert_eq!(home.call(Method::GET, "/v1/me/machines", None).await.1[0]["machine_id"], mid);
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn existing_owned_workers_migrate_without_reconnecting_or_losing_history() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, _, alice_m, _) = team(&env).await;
+    let (_, task) = alice.task("/v1/runs", "history", json!({"worker_id": "alice-mac"})).await;
+    let mut tx = env.pool.begin().await.unwrap();
+    // Recreate #57's schema and its automatic copies in each owner's personal org.
+    sqlx::raw_sql("ALTER TABLE workers DROP COLUMN machine_id; ALTER TABLE workers DROP COLUMN enabled; DROP INDEX IF EXISTS workers_token_idx; DROP TABLE personal_machines;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql("INSERT INTO workers (org_id, id, display_name, token_hash, capabilities, last_heartbeat_at, owner_id)
+        SELECT m.org_id, w.id, w.display_name, w.token_hash, w.capabilities, w.last_heartbeat_at, w.owner_id
+        FROM workers w JOIN org_members m ON m.user_id = w.owner_id WHERE m.org_id <> w.org_id
+        ON CONFLICT (org_id, id) DO NOTHING;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0024_personal_machines.sql")).execute(&mut *tx).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workers w JOIN personal_machines m ON m.id = w.machine_id WHERE w.owner_id = m.owner_id AND w.token_hash = m.token_hash AND w.enabled")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(count, 4, "all existing assignments survive the upgrade");
+    let identities: i64 = sqlx::query_scalar("SELECT count(*) FROM personal_machines").fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(identities, 2, "home and guest copies become one physical machine each");
+    let homes: i64 = sqlx::query_scalar("SELECT count(*) FROM personal_machines p JOIN worker_tokens t ON t.token_hash = p.token_hash WHERE p.home_org_id = t.org_id").fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(homes, 2, "billing homes are retained");
+    let queued: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1::uuid").bind(task["id"].as_str().unwrap()).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(queued, "queued");
+    tx.commit().await.unwrap();
+    // The same connection still registers, claims the old queued task, and finishes it.
+    let machine = Machine::start(&env, &alice_m.token, &alice_m.id).await;
+    let (_, machines) = alice.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(machines.as_array().unwrap().len(), 1);
+    assert_eq!(machines[0]["orgs"].as_array().unwrap().len(), 2);
+    assert_eq!(machines[0]["home_org"]["id"], alice.org.as_ref().unwrap().as_str());
+    assert_eq!(machine.claim().await.unwrap()["id"], task["id"]);
+    machine.finish(task["id"].as_str().unwrap(), json!({})).await;
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn a_task_whose_machine_was_forgotten_still_opens_its_pr_on_your_machine() {
     let env = TestEnv::start_hosted().await;
     let (_alice, bob, _alice_m, bob_m) = team(&env).await;
@@ -475,5 +556,108 @@ async fn a_task_whose_machine_was_forgotten_still_opens_its_pr_on_your_machine()
     let claimed = bob_m.claim().await.expect("the PR run goes to bob's machine");
     assert_eq!((claimed["id"].clone(), claimed["kind"].as_str()), (pr["id"].clone(), Some("pr")));
 
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn removing_your_machine_from_a_guest_org_disconnects_it_everywhere_and_preserves_history() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, _, _) = team(&env).await;
+    let acme = alice.org.clone().unwrap();
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let mut home = Api::user(&env, "bob").await;
+    home.org = Some(personal.clone());
+    let (_, token) = home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "portable"}))).await;
+    let machine = Machine::start(&env, token["token"].as_str().unwrap(), "portable").await;
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    let mid = machines.as_array().unwrap().iter().find(|m| m["id"] == "portable").unwrap()["machine_id"].clone();
+    assert_eq!(bob.call(Method::POST, "/v1/me/machines/assign", Some(json!({"machine_id": mid, "enabled": true}))).await.0, StatusCode::OK);
+    let (_, task) = home.task("/v1/runs", "running at home", json!({"worker_id": "portable"})).await;
+    assert_eq!(machine.claim().await.unwrap()["id"], task["id"]);
+    assert_eq!(bob.call(Method::DELETE, "/v1/workers/portable", None).await.0, StatusCode::CONFLICT, "a run in another org still makes the physical machine busy");
+    machine.finish(task["id"].as_str().unwrap(), json!({})).await;
+    assert_eq!(bob.call(Method::DELETE, "/v1/workers/portable", None).await.0, StatusCode::NO_CONTENT);
+    for api in [&bob, &home] {
+        let (_, workers) = api.call(Method::GET, "/v1/workers", None).await;
+        assert!(!workers.as_array().unwrap().iter().any(|w| w["id"] == "portable"));
+    }
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert!(!machines.as_array().unwrap().iter().any(|m| m["machine_id"] == mid));
+    let (_, old) = home.call(Method::GET, &format!("/v1/runs/{}", task["id"].as_str().unwrap()), None).await;
+    assert_eq!(old["status"], "succeeded");
+    assert!(old["worker_id"].is_null());
+    assert_eq!(machine.call("/v1/worker/heartbeat", json!({"id": "portable", "capabilities": {}, "active_runs": []})).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(home.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] == personal.as_str()).unwrap()["machine_count"], 0);
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn leaving_the_home_org_moves_billing_home_without_reconnecting() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, _, machine) = team(&env).await;
+    let acme = alice.org.clone().unwrap();
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let bob_id = bob.me().await["user"]["id"].as_str().unwrap().to_string();
+    let mut home = Api::user(&env, "bob").await;
+    home.org = Some(personal.clone());
+    assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{acme}/members/{bob_id}"), None).await.0, StatusCode::NO_CONTENT);
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(machines[0]["home_org"]["id"], personal);
+    assert_eq!(machines[0]["orgs"].as_array().unwrap().len(), 1);
+    assert_eq!(alice.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] == acme.as_str()).unwrap()["machine_count"], 1);
+    assert_eq!(home.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] == personal.as_str()).unwrap()["machine_count"], 1);
+    let machine = Machine::start(&env, &machine.token, &machine.id).await;
+    let (_, task) = home.task("/v1/runs", "continue personally", json!({"worker_id": "bob-linux"})).await;
+    assert_eq!(machine.claim().await.unwrap()["id"], task["id"]);
+    machine.finish(task["id"].as_str().unwrap(), json!({})).await;
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn leaving_an_org_does_not_reenable_a_disabled_assignment_in_its_new_billing_home() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, _, machine) = team(&env).await;
+    let acme = alice.org.clone().unwrap();
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let bob_id = bob.me().await["user"]["id"].as_str().unwrap().to_string();
+    let mut home = Api::user(&env, "bob").await;
+    home.org = Some(personal.clone());
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(home.call(Method::POST, "/v1/me/machines/assign", Some(json!({"machine_id": machines[0]["machine_id"], "enabled": false}))).await.0, StatusCode::OK);
+    assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{acme}/members/{bob_id}"), None).await.0, StatusCode::NO_CONTENT);
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    assert_eq!(machines[0]["home_org"]["id"], personal);
+    assert!(machines[0]["orgs"].as_array().unwrap().is_empty());
+    let machine = Machine::start(&env, &machine.token, &machine.id).await;
+    assert!(machine.claim().await.is_none());
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn an_attachment_follows_a_failover_to_another_personal_machine_token() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, alice_machine, original) = team(&env).await;
+    let acme = alice.org.clone().unwrap();
+    let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
+    let mut home = Api::user(&env, "bob").await;
+    home.org = Some(personal.clone());
+    let (_, token) = home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "backup"}))).await;
+    let backup = Machine::start(&env, token["token"].as_str().unwrap(), "backup").await;
+    let (_, machines) = home.call(Method::GET, "/v1/me/machines", None).await;
+    let mid = machines.as_array().unwrap().iter().find(|m| m["id"] == "backup").unwrap()["machine_id"].clone();
+    assert_eq!(bob.call(Method::POST, "/v1/me/machines/assign", Some(json!({"machine_id": mid, "enabled": true}))).await.0, StatusCode::OK);
+    let (status, task) = bob.task("/v1/runs", "read attachment", json!({"failover": true, "images": [{"media_type": "image/png", "data": "iVBORw0KGgo="}]})).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{task}");
+    assert_eq!(original.claim().await.unwrap()["id"], task["id"]);
+    sqlx::query("UPDATE workers SET last_heartbeat_at = now() - interval '2 minutes' WHERE token_hash = $1")
+        .bind(sidefleet_server::auth::sha256_hex(&original.token)).execute(&env.pool).await.unwrap();
+    sidefleet_server::db::reap_orphaned_runs(&env.pool, 90).await.unwrap();
+    let moved = backup.claim().await.expect("backup claims the moved task");
+    assert_eq!(moved["moved_from"], task["id"]);
+    let image = moved["images"][0]["id"].as_str().unwrap();
+    let url = format!("{}/v1/worker/images/{image}", env.base_url);
+    assert_eq!(backup.c.get(&url).bearer_auth(&backup.token).send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(alice_machine.c.get(&url).bearer_auth(&alice_machine.token).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    backup.finish(moved["id"].as_str().unwrap(), json!({})).await;
     env.teardown().await;
 }

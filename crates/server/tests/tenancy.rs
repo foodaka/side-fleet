@@ -693,7 +693,7 @@ async fn api_tokens_act_as_their_user_in_one_org_within_their_scope() {
     assert_eq!(alice.json(Method::POST, "/v1/api-tokens", Some(json!({"name": "x", "scope": "admin"}))).await.0, StatusCode::BAD_REQUEST);
     let (_, list) = alice.json(Method::GET, "/v1/api-tokens", None).await;
     assert_eq!(list.as_array().unwrap().len(), 3);
-    assert!(list.to_string().find(&read_tok).is_none(), "values are never listed");
+    assert!(!list.to_string().contains(&read_tok), "values are never listed");
     let stored: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM api_tokens").fetch_all(&env.pool).await.unwrap();
     assert!(!stored.contains(&read_tok), "only digests are stored");
 

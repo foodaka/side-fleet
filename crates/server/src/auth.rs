@@ -207,11 +207,7 @@ pub async fn require_dev(State(state): State<AppState>, mut req: Request, next: 
 pub struct WorkerAuth {
     /// Digest of the presented token; a worker stays bound to the token it registered with.
     pub token_hash: String,
-    /// The machine's home org: the one its token belongs to, which counts it against its plan.
     pub org: Uuid,
-    /// Every org it serves: its home and, for a machine with an owner, each other org the owner
-    /// is a member of (home first). It runs its owner's tasks in all of them.
-    pub orgs: Vec<Uuid>,
 }
 
 /// Worker API: a static `SIDEFLEET_WORKER_TOKENS` entry (default org) or a live
@@ -221,17 +217,43 @@ pub async fn require_worker(State(state): State<AppState>, mut req: Request, nex
         return unauthorized("worker");
     };
     let hash = sha256_hex(&t);
-    let (org, orgs) = if state.config.worker_tokens.iter().any(|w| matches(&t, w)) {
-        (DEFAULT_ORG, vec![DEFAULT_ORG])
+    let mut org = if state.config.worker_tokens.iter().any(|w| matches(&t, w)) {
+        DEFAULT_ORG
     } else {
-        match tenancy::token_orgs(&state.pool, &hash).await {
-            Ok(Some(o)) => o,
+        match tenancy::token_org(&state.pool, &hash).await {
+            Ok(Some(org)) => org,
             Ok(None) => return unauthorized("worker"),
             Err(e) => return server_error(e),
         }
     };
+    // Resolve per-run requests through the registered machine, including disabled
+    // assignments while their in-flight tasks drain. Never authorize by run id alone.
+    let path = req.uri().path();
+    let run = path.strip_prefix("/v1/worker/runs/").and_then(|p| p.split('/').next()).and_then(|p| Uuid::parse_str(p).ok());
+    let image = path.strip_prefix("/v1/worker/images/").and_then(|p| Uuid::parse_str(p).ok());
+    if run.is_some() || image.is_some() {
+        let result = sqlx::query_scalar::<_, Uuid>("SELECT r.org_id FROM runs r JOIN workers w ON w.org_id = r.org_id AND w.id = r.worker_id
+            WHERE w.token_hash = $1 AND (r.id = $2 OR ($3::uuid IS NOT NULL AND
+                (EXISTS (SELECT 1 FROM run_images i WHERE i.id = $3 AND i.run_id = r.id)
+                 OR r.images @> jsonb_build_array(jsonb_build_object('id', $3::uuid))))) LIMIT 1")
+            .bind(&hash).bind(run).bind(image).fetch_optional(&state.pool).await;
+        match result {
+            Ok(Some(o)) => org = o,
+            Ok(None) => {
+                let target: Option<Uuid> = match run {
+                    Some(id) => match sqlx::query_scalar("SELECT org_id FROM runs WHERE id = $1").bind(id).fetch_optional(&state.pool).await {
+                        Ok(o) => o, Err(e) => return server_error(e),
+                    },
+                    None => None,
+                };
+                if target == Some(org) { return forbidden("this token does not own that run"); }
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            Err(e) => return server_error(e),
+        }
+    }
     crate::request_log::record_caller(org, None);
-    req.extensions_mut().insert(WorkerAuth { token_hash: hash, org, orgs });
+    req.extensions_mut().insert(WorkerAuth { token_hash: hash, org });
     next.run(req).await
 }
 
@@ -269,6 +291,7 @@ mod tests {
             (Method::DELETE, "/v1/workers/mac"),
             (Method::POST, "/v1/workers/mac/update"),
             (Method::PUT, "/v1/repos"),
+            (Method::POST, "/v1/me/machines/assign"),
         ] {
             assert!(!ok(Scope::Full, m.clone(), p), "{m} {p}");
         }

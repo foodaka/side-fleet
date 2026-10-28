@@ -67,7 +67,9 @@
 
 	/** Forget an offline machine (frees a slot on the plan). It comes back if it connects again with a valid token. */
 	async function remove() {
-		if (!confirm(`Remove ${w.display_name}? It reappears if it connects again; revoke its token to keep it out.`)) return;
+		if (!confirm(w.mine !== false
+            ? `Remove ${w.display_name} from all your organizations? To disable only this organization, use Your machines in Settings.`
+            : `Remove ${w.display_name} from this organization?`)) return;
 		try {
 			await api(`/v1/workers/${encodeURIComponent(w.id)}`, { method: 'DELETE' });
 			toast(`Removed ${w.display_name}`);

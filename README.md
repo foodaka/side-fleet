@@ -167,8 +167,8 @@ On a hosted control plane, an org is a team workspace:
   restore, approve its commands or open its PR. The bell and push notifications are only for your
   own tasks.
 - **Your machines stay yours, in every org.** A machine runs only the tasks of the person who
-  connected it, in every org they belong to: connect it once, and joining a team needs nothing
-  more. It counts against the plan of the org it connected to.
+  connected it, in the organizations they choose. Connect it once, then enable organizations in Settings → Your
+  machines. It counts only against the plan of its home organization.
 - **Rooms** are for working toward one goal together. A room has a goal in one repo, the team's
   notes, and tasks that each run on their owner's machine, in their own worktree. When a task is
   done, its owner presses Add to room to merge its branch into the room branch

@@ -4,6 +4,7 @@
 	import Plus from '@lucide/svelte/icons/plus';
 	import { fleet } from '#lib/sf/state.svelte';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
+	import EnableHere from '#lib/sf/ui/EnableHere.svelte';
 	import MachineCard from '#lib/sf/ui/MachineCard.svelte';
 	import FleetMap from '#lib/sf/ui/FleetMap.svelte';
 	import PendingMachines from '#lib/sf/ui/PendingMachines.svelte';
@@ -33,11 +34,11 @@
 				{`${fleet.online.length} of ${fleet.workers.length} online, ${busy} of ${slotsTotal} task slots busy.` + (outdated ? ` ${outdated} ${outdated === 1 ? 'runs' : 'run'} an older build than this control plane.` : '')}
 			</p>
 			{#if fleet.multi}
-				<p class="mt-0.5 text-xs text-muted-foreground">Each machine runs only its owner's tasks, in every org its owner belongs to. Teammates' machines show here so you can see what the team is running.</p>
+				<p class="mt-0.5 text-xs text-muted-foreground">Each machine runs only its owner's tasks, in the organizations its owner enables. Teammates' machines show here so you can see what the team is running.</p>
 			{/if}
 			{#if limits && fleet.org}
 				<p class="mt-0.5 text-xs text-muted-foreground">
-					{fleet.org.name} is on the {fleet.org.plan} plan: {fleet.workers.filter((w) => !w.guest).length} of {limits.machines} machines, up to {limits.parallel_runs} tasks queued or running at once.
+					{fleet.org.name} is on the {fleet.org.plan} plan: {fleet.org.machine_count ?? fleet.workers.filter((w) => !w.guest).length} of {limits.machines} machines, up to {limits.parallel_runs} tasks queued or running at once.
 				</p>
 			{/if}
 		</div>
@@ -48,6 +49,7 @@
 	</header>
 
 	<PendingMachines />
+	<EnableHere />
 
 	{#if sorted.length}
 		<FleetMap bind:hover />

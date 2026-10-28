@@ -235,6 +235,7 @@ pub async fn delete_session(pool: &PgPool, cookie_value: &str) -> sqlx::Result<(
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerToken {
     pub id: Uuid,
+    pub owner_id: Option<Uuid>,
     pub name: String,
     /// First characters of the value, to tell tokens apart; the rest is never shown again.
     pub prefix: String,
@@ -245,6 +246,7 @@ pub struct WorkerToken {
 
 fn row_to_token(r: &PgRow) -> WorkerToken {
     WorkerToken {
+        owner_id: r.get("owner_id"),
         id: r.get("id"),
         name: r.get("name"),
         prefix: "sfw_".into(),
@@ -254,7 +256,7 @@ fn row_to_token(r: &PgRow) -> WorkerToken {
     }
 }
 
-const TOKEN_COLS: &str = "id, name, created_at, revoked_at, last_used_at";
+const TOKEN_COLS: &str = "id, owner_id, name, created_at, revoked_at, last_used_at";
 
 /// Mint a worker token for `org`. Returns its record and the value, which is not stored.
 /// Machines that connect with it belong to `owner` and run only their tasks.
@@ -295,7 +297,7 @@ pub async fn revoke_token(pool: &PgPool, org: Uuid, id: Uuid) -> sqlx::Result<Op
 
 /// The org a live (not revoked) token belongs to. Also records when it was last used.
 pub async fn token_org(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<Uuid>> {
-    let row = sqlx::query("SELECT id, org_id, last_used_at FROM worker_tokens WHERE token_hash = $1 AND revoked_at IS NULL")
+    let row = sqlx::query("SELECT id, org_id, last_used_at FROM worker_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND (org_id IS NOT NULL OR EXISTS (SELECT 1 FROM personal_machines m WHERE m.token_hash = $1))")
         .bind(token_hash)
         .fetch_optional(pool)
         .await?;
@@ -304,23 +306,7 @@ pub async fn token_org(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<U
     if last.is_none_or(|t| Utc::now() - t > Duration::minutes(1)) {
         sqlx::query("UPDATE worker_tokens SET last_used_at = now() WHERE id = $1").bind(row.get::<Uuid, _>("id")).execute(pool).await?;
     }
-    Ok(Some(row.get("org_id")))
-}
-
-/// A live token's home org and every org its machines serve: the home, then the other orgs its
-/// owner is a member of. Ownerless tokens serve only their home.
-pub async fn token_orgs(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<(Uuid, Vec<Uuid>)>> {
-    let Some(home) = token_org(pool, token_hash).await? else { return Ok(None) };
-    let rows = sqlx::query(
-        "SELECT m.org_id FROM worker_tokens t JOIN org_members m ON m.user_id = t.owner_id
-         WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND m.org_id <> t.org_id ORDER BY m.created_at",
-    )
-    .bind(token_hash)
-    .fetch_all(pool)
-    .await?;
-    let mut orgs = vec![home];
-    orgs.extend(rows.iter().map(|r| r.get::<Uuid, _>("org_id")));
-    Ok(Some((home, orgs)))
+    Ok(Some(row.get::<Option<Uuid>, _>("org_id").unwrap_or(DEFAULT_ORG)))
 }
 
 // ---- API tokens ----

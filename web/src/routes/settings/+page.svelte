@@ -4,6 +4,7 @@
 	import { fleet } from '#lib/sf/state.svelte';
 	import { setMode, userPrefersMode } from 'mode-watcher';
 	import { Kbd } from '#lib/components/ui/kbd';
+	import { Button } from '#lib/components/ui/button';
 	import Check from '@lucide/svelte/icons/check';
 	import Rows from '@lucide/svelte/icons/rows-2';
 	import Columns from '@lucide/svelte/icons/columns-2';
@@ -208,6 +209,16 @@
 			{@render row('stop', 'Ask before stopping a task', 'Stop shows a question first, so a stray tap on a phone doesn’t end a run halfway.', prefs.confirmStop, (v) => prefs.set({ confirmStop: v }))}
 		</div>
 	</div>
+
+	{#if fleet.me?.user}
+		<div class="flex flex-col gap-3">
+			<h2 class="text-[15px] font-medium">Machines</h2>
+			<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3.5 sm:px-5">
+				<p class="text-[12.5px] text-muted-foreground">Choose which organizations each machine takes your tasks from.</p>
+				<Button variant="outline" size="sm" onclick={() => (fleet.machinesOpen = true)}>Your machines</Button>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Appearance -->
 	<div class="flex flex-col gap-3">

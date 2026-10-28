@@ -30,6 +30,7 @@
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
+	import EnableHere from '#lib/sf/ui/EnableHere.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 
@@ -454,6 +455,7 @@
 							</button>
 						</div>
 					</div>
+					{#if !withRepo.length}<EnableHere repo={room.repo} class="px-1" />{/if}
 					<p class="px-1 text-xs text-muted-foreground">
 						{#if !withRepo.length}
 							None of your online machines has {repoLabel(room.repo)}. <a href="#/machines" class="text-foreground underline underline-offset-2">Connect one</a> to take a task; teammates' machines only run their own.

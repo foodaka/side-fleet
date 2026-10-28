@@ -65,10 +65,9 @@ pub async fn set_update_requested(pool: &PgPool, org: Uuid, id: &str, value: boo
     Ok(res.rows_affected() == 1)
 }
 
-/// Whether someone asked machine `id` to update, from any of the orgs it serves.
-pub async fn update_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT bool_or(update_requested) AS u FROM workers WHERE id = $1 AND org_id = ANY($2)").bind(id).bind(orgs).fetch_one(pool).await?;
-    Ok(row.get::<Option<bool>, _>("u").unwrap_or(false))
+pub async fn update_requested(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT update_requested FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get::<bool, _>("update_requested")).unwrap_or(false))
 }
 
 fn row_to_worker(r: &PgRow) -> Worker {
@@ -338,7 +337,7 @@ fn default_model(agent: Agent) -> &'static str {
 
 /// Whether a machine can run `agent`. Workers from before multi-agent support report no agents and run Claude Code.
 async fn worker_has_agent(pool: &PgPool, org: Uuid, worker: &str, agent: Agent) -> sqlx::Result<bool> {
-    let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1 AND org_id = $2").bind(worker).bind(org).fetch_optional(pool).await?;
+    let caps = sqlx::query("SELECT capabilities FROM workers WHERE id = $1 AND org_id = $2 AND enabled").bind(worker).bind(org).fetch_optional(pool).await?;
     let caps: Option<Capabilities> = caps.and_then(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).ok());
     Ok(caps.is_some_and(|c| {
         let a = c.agents.runnable();
@@ -515,7 +514,7 @@ async fn thread_branch_run(
 async fn creators_only_machine(pool: &PgPool, org: Uuid, user: Option<Uuid>, repo: &str) -> sqlx::Result<Option<String>> {
     let Some(user) = user else { return Ok(None) };
     let rows = sqlx::query(
-        "SELECT w.id FROM workers w WHERE w.org_id = $1 AND w.owner_id = $2
+        "SELECT w.id FROM workers w WHERE w.org_id = $1 AND w.owner_id = $2 AND w.enabled
            AND EXISTS (SELECT 1 FROM jsonb_array_elements(w.capabilities->'repos') r
                        WHERE COALESCE(NULLIF(r->>'id', ''), r->>'name') = $3 OR r->>'name' = $3)",
     )
@@ -947,7 +946,7 @@ pub async fn request_stop(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Resul
 /// the repo (by identity or path name) and the agent, has not hit that agent's
 /// usage limit, and is not the machine that lost the run (failover). Workers from before multi-agent support report no
 /// agents and run Claude Code. Only machines of the run's own org count.
-const CAN_RUN: &str = "w.org_id = r.org_id
+const CAN_RUN: &str = "w.enabled AND w.org_id = r.org_id
       AND w.owner_id IS NOT DISTINCT FROM r.created_by
       AND w.last_heartbeat_at > now() - interval '45 seconds'
       AND NOT (w.id = ANY(r.excluded_worker_ids))
@@ -1008,6 +1007,18 @@ pub async fn claim_run(
     // Each pass either claims a run, finds none, or fails one unresumable message and looks again.
     for _ in 0..=MAX_QUEUED_MESSAGES {
         let mut tx = pool.begin().await?;
+        // Every org projection of a personal machine shares the same physical slots.
+        let machine: Option<Uuid> = sqlx::query_scalar("SELECT machine_id FROM workers WHERE org_id = $1 AND id = $2")
+            .bind(org).bind(worker_id).fetch_optional(&mut *tx).await?.flatten();
+        if let Some(machine) = machine {
+            sqlx::query("SELECT id FROM personal_machines WHERE id = $1 FOR UPDATE").bind(machine).execute(&mut *tx).await?;
+            let running: i64 = sqlx::query_scalar("SELECT count(*) FROM runs r JOIN workers w ON w.org_id = r.org_id AND w.id = r.worker_id WHERE w.machine_id = $1 AND r.status = 'running'")
+                .bind(machine).fetch_one(&mut *tx).await?;
+            if slots.is_some_and(|s| running >= s.parallel as i64 || s.active >= s.parallel) {
+                tx.commit().await?;
+                return Ok(Claimed { run: None, failed });
+            }
+        }
         if let Some(max) = max_running {
             // Serialise claims within the org so two workers cannot both take the last slot.
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))").bind(org.to_string()).execute(&mut *tx).await?;
@@ -1026,7 +1037,7 @@ pub async fn claim_run(
              WHERE id = (
                 SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.org_id = $9 AND r.repo = ANY($2)
                   AND NOT (r.repo = ANY($3))
-                  AND r.created_by IS NOT DISTINCT FROM (SELECT o.owner_id FROM workers o WHERE o.org_id = $9 AND o.id = $1)
+                  AND EXISTS (SELECT 1 FROM workers o LEFT JOIN org_members om ON om.org_id = o.org_id AND om.user_id = o.owner_id WHERE o.org_id = $9 AND o.id = $1 AND o.enabled AND (o.owner_id IS NULL OR om.user_id IS NOT NULL) AND r.created_by IS NOT DISTINCT FROM o.owner_id)
                   AND COALESCE(r.pinned_worker_id,
                         (SELECT p.worker_id FROM runs p
                           WHERE r.parent_id IS NOT NULL AND r.moved_from IS NULL
@@ -1191,7 +1202,9 @@ pub async fn finish_run(
             .filter(|t| *t > now && *t < now + chrono::Duration::days(8))
             .unwrap_or(now + chrono::Duration::seconds(DEFAULT_LIMIT_SECS));
         sqlx::query(
-            "INSERT INTO worker_limits (worker_id, agent, until, org_id) VALUES ($1, $2, $3, $4)
+            "INSERT INTO worker_limits (worker_id, agent, until, org_id)
+             SELECT w.id, $2, $3, w.org_id FROM workers w
+             WHERE w.id = $1 AND (w.org_id = $4 OR w.machine_id = (SELECT machine_id FROM workers WHERE org_id = $4 AND id = $1))
              ON CONFLICT (org_id, worker_id, agent) DO UPDATE SET until = EXCLUDED.until",
         )
         .bind(worker_id)
@@ -1500,6 +1513,12 @@ pub async fn upsert_worker(
     token_hash: &str,
     caps: &Capabilities,
 ) -> sqlx::Result<Option<Worker>> {
+    // Re-registering a personal machine refreshes all assignments without adding one.
+    if let Some(row) = sqlx::query("UPDATE personal_machines SET display_name = $3, capabilities = $4, last_heartbeat_at = now() WHERE worker_id = $1 AND token_hash = $2 RETURNING worker_id AS id, display_name, capabilities, last_heartbeat_at")
+        .bind(id).bind(token_hash).bind(display_name).bind(serde_json::to_value(caps).unwrap_or(Value::Null)).fetch_optional(pool).await? {
+        heartbeat(pool, org, id, token_hash, caps).await?;
+        return Ok(Some(row_to_worker(&row)));
+    }
     let row = sqlx::query(
         "INSERT INTO workers (id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active, org_id, owner_id)
          VALUES ($1, $2, $3, $4, now(), $5, $6, $7, (SELECT t.owner_id FROM worker_tokens t WHERE t.token_hash = $3 AND t.org_id = $7))
@@ -1520,6 +1539,13 @@ pub async fn upsert_worker(
     .bind(org)
     .fetch_optional(pool)
     .await?;
+    if row.is_some() {
+        sqlx::query("WITH m AS (INSERT INTO personal_machines (owner_id, worker_id, home_org_id, token_hash, display_name, capabilities, last_heartbeat_at)
+            SELECT owner_id, id, org_id, token_hash, display_name, capabilities, last_heartbeat_at FROM workers WHERE org_id = $1 AND id = $2 AND owner_id IS NOT NULL
+            ON CONFLICT (token_hash, worker_id) DO UPDATE SET display_name = EXCLUDED.display_name RETURNING id)
+            UPDATE workers SET machine_id = (SELECT id FROM m) WHERE org_id = $1 AND id = $2 AND owner_id IS NOT NULL")
+            .bind(org).bind(id).execute(pool).await?;
+    }
     Ok(row.as_ref().map(row_to_worker))
 }
 
@@ -1531,10 +1557,12 @@ pub async fn heartbeat(
     token_hash: &str,
     caps: &Capabilities,
 ) -> sqlx::Result<bool> {
+    let personal = sqlx::query("UPDATE personal_machines SET capabilities = $3, last_heartbeat_at = now() WHERE worker_id = $1 AND token_hash = $2")
+        .bind(id).bind(token_hash).bind(serde_json::to_value(caps).unwrap_or(Value::Null)).execute(pool).await?.rows_affected() > 0;
     let res = sqlx::query(
-        "UPDATE workers SET capabilities = $3, last_heartbeat_at = now(),
+        "UPDATE workers SET display_name = COALESCE((SELECT display_name FROM personal_machines m WHERE m.id = workers.machine_id), display_name), capabilities = $3, last_heartbeat_at = now(),
             slots_parallel = $4, slots_active = $5
-         WHERE id = $1 AND token_hash = $2 AND org_id = $6",
+         WHERE id = $1 AND token_hash = $2 AND (org_id = $6 OR machine_id IS NOT NULL)",
     )
     .bind(id)
     .bind(token_hash)
@@ -1544,7 +1572,7 @@ pub async fn heartbeat(
     .bind(org)
     .execute(pool)
     .await?;
-    Ok(res.rows_affected() == 1)
+    Ok(personal || res.rows_affected() > 0)
 }
 
 pub async fn worker_owns_token(pool: &PgPool, org: Uuid, id: &str, token_hash: &str) -> sqlx::Result<bool> {
@@ -1558,75 +1586,49 @@ pub async fn worker_owns_token(pool: &PgPool, org: Uuid, id: &str, token_hash: &
 }
 
 pub async fn worker_exists(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await?;
+    let row = sqlx::query("SELECT 1 AS ok FROM workers WHERE id = $1 AND org_id = $2 AND enabled").bind(id).bind(org).fetch_optional(pool).await?;
     Ok(row.is_some())
 }
 
-/// Machines that count against `org`'s plan: those connected to it, not members' machines from
-/// their other orgs that also serve it.
+/// Physical machines count against their home org, including when it is disabled
+/// for tasks there. Guest assignments never consume another org's machine slots.
 pub async fn count_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
-    Ok(sqlx::query(
-        "SELECT count(*) AS n FROM workers w WHERE w.org_id = $1
-           AND NOT EXISTS (SELECT 1 FROM worker_tokens t WHERE t.token_hash = w.token_hash AND t.org_id <> w.org_id)",
-    )
-    .bind(org)
-    .fetch_one(pool)
-    .await?
-    .get("n"))
+    sqlx::query_scalar("SELECT (SELECT count(*) FROM personal_machines WHERE home_org_id = $1)
+        + (SELECT count(*) FROM workers WHERE org_id = $1 AND machine_id IS NULL)")
+        .bind(org).fetch_one(pool).await
 }
 
-/// Machines of `org` that connected to another org and serve this one for their owner,
-/// so they don't count against its plan.
 pub async fn guest_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<std::collections::HashSet<String>> {
-    let rows = sqlx::query(
-        "SELECT w.id FROM workers w WHERE w.org_id = $1
-           AND EXISTS (SELECT 1 FROM worker_tokens t WHERE t.token_hash = w.token_hash AND t.org_id <> w.org_id)",
-    )
-    .bind(org)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.iter().map(|r| r.get("id")).collect())
+    let ids: Vec<String> = sqlx::query_scalar("SELECT w.id FROM workers w JOIN personal_machines m ON m.id = w.machine_id
+        WHERE w.org_id = $1 AND m.home_org_id IS DISTINCT FROM $1")
+        .bind(org).fetch_all(pool).await?;
+    Ok(ids.into_iter().collect())
 }
 
-/// List machine `id` (registered in `home`) in each of `orgs` too, with its home row's
-/// details, so it shows and takes its owner's tasks there. A teammate's machine that already
-/// has the id in an org keeps it. Copies in orgs it no longer serves (its owner left) are
-/// dropped once no run points at them; until then they just go offline.
-/// Returns how many copies were made or refreshed.
-pub async fn sync_worker(pool: &PgPool, home: Uuid, orgs: &[Uuid], id: &str, token_hash: &str, registered: bool) -> sqlx::Result<u64> {
-    let others: Vec<Uuid> = orgs.iter().copied().filter(|o| *o != home).collect();
-    let synced = if others.is_empty() {
-        0
-    } else {
-        sqlx::query(
-            "INSERT INTO workers (org_id, id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active, owner_id)
-             SELECT o, w.id, w.display_name, w.token_hash, w.capabilities, w.last_heartbeat_at, w.slots_parallel, w.slots_active, w.owner_id
-             FROM workers w, unnest($3::uuid[]) AS o
-             WHERE w.org_id = $1 AND w.id = $2 AND w.owner_id IS NOT NULL
-             ON CONFLICT (org_id, id) DO UPDATE SET display_name = EXCLUDED.display_name, token_hash = EXCLUDED.token_hash,
-                capabilities = EXCLUDED.capabilities, last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-                slots_parallel = EXCLUDED.slots_parallel, slots_active = EXCLUDED.slots_active,
-                update_requested = workers.update_requested AND NOT $4
-             WHERE workers.owner_id IS NOT DISTINCT FROM EXCLUDED.owner_id",
-        )
-        .bind(home)
-        .bind(id)
-        .bind(&others)
-        .bind(registered)
-        .execute(pool)
-        .await?
-        .rows_affected()
-    };
-    sqlx::query(
-        "DELETE FROM workers w WHERE w.id = $1 AND w.token_hash = $2 AND NOT (w.org_id = ANY($3))
-           AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.org_id = w.org_id AND r.worker_id = w.id)",
-    )
-    .bind(id)
-    .bind(token_hash)
-    .bind(orgs)
-    .execute(pool)
-    .await?;
-    Ok(synced)
+/// Forget an owned physical machine from every org. Claims lock the same row,
+/// so no task can start between the busy check and disconnecting it.
+pub async fn delete_personal_machine(pool: &PgPool, org: Uuid, id: &str, user: Uuid) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query("SELECT m.id, m.token_hash FROM personal_machines m JOIN workers w ON w.machine_id = m.id
+        WHERE w.org_id = $1 AND w.id = $2 AND m.owner_id = $3 FOR UPDATE OF m")
+        .bind(org).bind(id).bind(user).fetch_optional(&mut *tx).await?;
+    let Some(row) = row else { return Ok(false) };
+    let machine: Uuid = row.get("id");
+    let hash: String = row.get("token_hash");
+    let busy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runs r JOIN workers w ON w.org_id = r.org_id AND w.id = r.worker_id
+        WHERE w.machine_id = $1 AND r.status = 'running')")
+        .bind(machine).fetch_one(&mut *tx).await?;
+    if busy { return Ok(false); }
+    sqlx::query("UPDATE runs r SET worker_id = NULL FROM workers w WHERE r.org_id = w.org_id AND r.worker_id = w.id AND w.machine_id = $1")
+        .bind(machine).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM workers WHERE machine_id = $1").bind(machine).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM personal_machines WHERE id = $1").bind(machine).execute(&mut *tx).await?;
+    // A token may enroll several machines. Disconnect only this one in that case.
+    sqlx::query("UPDATE worker_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE token_hash = $1
+        AND NOT EXISTS (SELECT 1 FROM personal_machines WHERE token_hash = $1)")
+        .bind(&hash).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Forget a machine. Its runs stay (without a machine); a worker still holding a
@@ -1659,7 +1661,7 @@ pub async fn count_active_runs(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
 
 pub async fn list_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<Vec<Worker>> {
     let rows = sqlx::query(
-        "SELECT id, display_name, capabilities, last_heartbeat_at, update_requested FROM workers WHERE org_id = $1 ORDER BY display_name",
+        "SELECT id, display_name, capabilities, last_heartbeat_at, update_requested FROM workers WHERE org_id = $1 AND enabled ORDER BY display_name",
     )
     .bind(org)
     .fetch_all(pool)

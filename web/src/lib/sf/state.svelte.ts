@@ -9,7 +9,7 @@ type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 /** Everything the pages share, refreshed from the control plane every 5 seconds. */
 class Fleet {
 	workers = $state<Worker[]>([]);
-	/** Your machines, each once with the org it connected to; every one also serves your other orgs. */
+	/** Your machines in all your orgs. */
 	myMachines = $state<MyMachine[]>([]);
 	/** Settings' "Your machines" dialog. */
 	machinesOpen = $state(false);
@@ -55,6 +55,8 @@ class Fleet {
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
 	isOwner = $derived(this.org?.role === 'owner');
+	/** Your machines that can be enabled in this org. */
+	elsewhere = $derived(this.myMachines.filter((m) => !m.orgs.some((o) => o.id === this.org?.id)));
 
 	#timer: ReturnType<typeof setInterval> | undefined;
 	#asked = false;
@@ -168,6 +170,21 @@ class Fleet {
 			toast.error(archived ? 'Could not archive' : 'Could not unarchive', { description: (e as Error).message });
 		}
 		void this.refresh();
+	}
+
+	/** Enable or disable this machine in an org without reconnecting. */
+	async assignMachine(m: MyMachine, to: string = this.org?.id ?? '', enabled = true): Promise<boolean> {
+		const name = this.me?.orgs.find((o) => o.id === to)?.name ?? 'this org';
+		try {
+			await api('/v1/me/machines/assign', { method: 'POST', body: JSON.stringify({ machine_id: m.machine_id, enabled }), headers: { 'X-Sidefleet-Org': to } });
+			toast.success(`${m.display_name} ${enabled ? 'enabled' : 'disabled'} in ${name}`);
+			await this.refresh();
+			return true;
+		} catch (e) {
+			toast.error(`Could not update ${m.display_name}`, { description: (e as Error).message });
+			await this.refresh();
+			return false;
+		}
 	}
 
 	/** Rename the org the page acts in (owners). */

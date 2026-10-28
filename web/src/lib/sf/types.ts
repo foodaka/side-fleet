@@ -119,15 +119,16 @@ export interface Worker {
 	owner?: { id: string; login: string } | null;
 	/** It runs your tasks: machines only run their owner's tasks. Absent on older control planes (treat as yours). */
 	mine?: boolean;
-	/** Connected to another of its owner's orgs and serving them here too; doesn't count against this org's plan. */
 	guest?: boolean;
 }
 
-/** One of your machines and the org it connected to (`GET /v1/me/machines`); it serves you in all your orgs. */
+/** A personal machine and the organizations it is enabled in. */
 export interface MyMachine {
 	id: string;
 	display_name: string;
-	org: { id: string; name: string };
+	machine_id: string;
+	home_org: { id: string; name: string } | null;
+	orgs: { id: string; name: string }[];
 	online: boolean;
 	last_heartbeat_at: string;
 	/** Repo keys, as tasks match them. */
@@ -245,6 +246,8 @@ export interface Org {
 	role: 'owner' | 'member';
 	/** Null for the default org of a self-hosted control plane. */
 	limits: Limits | null;
+	/** Connected machines charged to this org, including disabled home assignments. */
+	machine_count?: number;
 }
 
 export interface Me {
@@ -255,6 +258,7 @@ export interface Me {
 
 export interface WorkerToken {
 	id: string;
+	owner_id?: string | null;
 	name: string;
 	prefix: string;
 	created_at: string;

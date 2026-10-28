@@ -177,8 +177,7 @@ pub enum Remove {
     LastOwner,
 }
 
-/// Take someone out of an org: their machines' tokens there are revoked (the
-/// machines get 401 at their next call) and their queued runs there stop.
+/// Remove org assignments and stop their work here, preserving personal machine credentials.
 pub async fn remove_member(pool: &PgPool, org: Uuid, user: Uuid) -> sqlx::Result<Remove> {
     let mut tx = pool.begin().await?;
     let role: Option<String> = sqlx::query("SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2 FOR UPDATE")
@@ -195,18 +194,23 @@ pub async fn remove_member(pool: &PgPool, org: Uuid, user: Uuid) -> sqlx::Result
         }
     }
     sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
-    // Their machines connected to this org move home to another org of theirs (their personal one
-    // first) and keep serving their other orgs; they stop serving this one. Revoked if there is none.
-    sqlx::query(
-        "UPDATE worker_tokens SET org_id = m.org_id FROM (
-             SELECT org_id FROM org_members WHERE user_id = $2 ORDER BY (role = 'owner') DESC, created_at LIMIT 1) m
-         WHERE worker_tokens.org_id = $1 AND worker_tokens.owner_id = $2 AND worker_tokens.revoked_at IS NULL",
-    )
-    .bind(org)
-    .bind(user)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE worker_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND owner_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
+    // Keep #57's home-org billing transfer when the owner leaves that org.
+    // The fallback need not be enabled for tasks; assignment and billing are independent.
+    sqlx::query("UPDATE worker_tokens t SET org_id = (SELECT m.org_id FROM org_members m
+        WHERE m.user_id = $2 ORDER BY (m.role = 'owner') DESC, m.created_at, m.org_id LIMIT 1)
+        WHERE t.org_id = $1 AND t.owner_id = $2")
+        .bind(org).bind(user).execute(&mut *tx).await?;
+    // A newly chosen home should be usable immediately. An existing disabled
+    // assignment stays disabled, preserving the owner's selection.
+    sqlx::query("WITH moved AS (
+        UPDATE personal_machines p SET home_org_id = t.org_id FROM worker_tokens t
+        WHERE p.token_hash = t.token_hash AND p.owner_id = $2 AND p.home_org_id = $1 RETURNING p.*)
+        INSERT INTO workers (org_id, id, display_name, token_hash, capabilities, last_heartbeat_at, owner_id, machine_id)
+        SELECT home_org_id, worker_id, display_name, token_hash, capabilities, last_heartbeat_at, owner_id, id
+        FROM moved WHERE home_org_id IS NOT NULL AND home_org_id <> $1
+        ON CONFLICT (org_id, id) DO NOTHING")
+        .bind(org).bind(user).execute(&mut *tx).await?;
+    sqlx::query("UPDATE workers SET enabled = false WHERE org_id = $1 AND owner_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
     sqlx::query("UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND user_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
     // Invite links they made would otherwise let them (or whoever has one) back in.
     sqlx::query("UPDATE org_invites SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND created_by = $2").bind(org).bind(user).execute(&mut *tx).await?;

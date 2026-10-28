@@ -121,25 +121,49 @@ machines).
 
 ## 5. A member leaves or is removed
 
-See 01 §4: tokens they own are revoked, their machines go offline, and their queued and running
-runs are stopped. Their threads stay visible to the team, and anyone can **fork** one to carry on
-from where it was, on their own machine.
+Their assignments in that org are disabled and their queued and running tasks
+there are stopped. Their personal machine credentials stay valid, including when
+this was the org where they originally connected. A departing member’s billing
+home moves to another membership (an org they own first), preserving #57’s
+behavior. An existing disabled assignment stays disabled. Other org assignments continue
+working. Their threads remain in the old org, with history intact.
 
-## 6. One machine, all your orgs
+## 6. Personal machines across organizations
 
-A machine connects to one org, its home: the org of its token, which counts it against that
-org's plan. It then serves its owner in every org they belong to (`WorkerAuth.orgs`):
-- On each register and heartbeat the server copies its `workers` row into the owner's other orgs
-  (`db::sync_worker`), so it is listed there, marked `guest`, and doesn't count against their
-  plans. Joining an org picks it up within a heartbeat; copies in orgs the owner left are dropped
-  once no run points at them.
-- A claim looks in each of those orgs (still only the owner's runs), and calls about a run act
-  in the run's org.
-- Removing someone from an org moves their machines connected to it home to another org of
-  theirs (their personal one first) instead of revoking them, so they keep working elsewhere.
+A machine connects once and belongs to its user. `personal_machines` holds a stable
+UUID, owner, worker id, connection token digest and latest capabilities. Existing
+owned workers migrate automatically, without reconnecting. Static, ownerless
+self-hosted workers retain their existing behavior.
 
-Settings > Your machines lists each machine once, with the org it connected to. Approving a
-machine by its code lets you pick that org.
+`workers` rows are org assignments and preserve existing run references; each
+personal assignment points to its permanent `machine_id`. Disabling an assignment
+keeps the row for history and in-flight work but excludes it from routing and the
+org's machine list and limit. Org membership is checked again at claim time.
+
+Existing #57 home and guest records migrate to one identity per connection and
+worker id, preserving all existing assignments and run references.
+
+Settings > Your machines lists each physical machine once, even with no enabled
+orgs. Its Organizations menu enables or disables any of the owner's memberships.
+The composer offers “Enable here” for machines not enabled in the current org.
+Assignment makes the owner's tasks available there; teammates cannot use it.
+
+- `GET /v1/me/machines` returns `machine_id` and enabled `orgs` for each machine.
+- `POST /v1/me/machines/assign`, `{machine_id, enabled}`, changes the assignment
+  in the current org. Only the machine owner can assign it. Guest assignments do not count against
+  the target org’s machine limit. Each physical machine counts once against its
+  home org’s plan, even if tasks are disabled there.
+- Workers claim across their assignments with the same token. The machine row is
+  locked during claims so running tasks across orgs count against one physical
+  parallel limit. Agent usage limits apply across assignments too.
+- Heartbeats, restart reconciliation, update acknowledgments and PR checks cover
+  all assignments. Per-run requests resolve the run's org through the machine's
+  registered token. Disabling an assignment allows in-flight tasks to finish.
+- Removing your own machine disconnects it across all assignments, and is refused
+  while it has a task running in any org. Disabling an org only changes task
+  availability there; it does not disconnect the machine.
+- Personal machine tokens can only be revoked by their owner. Org admins can
+  remove an assignment without disconnecting the machine from other orgs.
 
 ## 7. Later: sharing machines (deferred)
 

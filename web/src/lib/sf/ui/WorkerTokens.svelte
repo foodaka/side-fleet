@@ -94,8 +94,10 @@
 						<span class="text-xs text-muted-foreground">{t.last_used_at ? `used ${rel(t.last_used_at, fleet.now)}` : 'never used'}</span>
 						{#if t.revoked_at}
 							<span class="text-xs text-err-ink">revoked {rel(t.revoked_at, fleet.now)}</span>
-						{:else}
+						{:else if !t.owner_id || t.owner_id === fleet.me?.user?.id}
 							<button type="button" class="text-xs text-err-ink hover:underline" onclick={() => revoke(t)}>Revoke</button>
+						{:else}
+							<span class="text-xs text-muted-foreground" title="Only its owner can revoke a personal machine token. Remove the machine from this organization to disable it here.">Personal token</span>
 						{/if}
 					</li>
 				{/each}

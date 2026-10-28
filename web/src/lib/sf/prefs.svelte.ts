@@ -1,5 +1,8 @@
 // Your preferences for how the app behaves (the Settings page). Kept in this
-// browser and shared by its open tabs.
+// browser and shared by its open tabs; signed in, the ones about tasks and sending
+// are also kept with your account, so every browser you sign in on starts the same.
+
+import { api } from './api';
 
 const KEY = 'sidefleet_prefs';
 
@@ -37,6 +40,12 @@ const DEFAULTS: Stored = {
 };
 const MODES = ['acceptEdits', 'bypassPermissions', 'plan', 'ask'];
 
+/** What follows you between browsers. How the Changes panel looks (and the theme) suits each screen, so it stays put. */
+const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop'] as const;
+const synced = (s: Partial<Stored>) =>
+	Object.fromEntries(SYNCED.filter((k) => s[k] !== undefined).map((k) => [k, s[k]])) as Partial<Stored>;
+const savedHere = () => { try { return localStorage.getItem(KEY) !== null; } catch { return false; } };
+
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 const touch = () => typeof matchMedia !== 'undefined' && !matchMedia('(any-pointer: fine)').matches;
 
@@ -64,13 +73,16 @@ class Prefs {
 	roomPermission = $state(DEFAULTS.roomPermission);
 	workspace = $state<Workspace>(DEFAULTS.workspace);
 
+	/** Signed in: the synced ones are kept with your account too. */
+	account = $state(false);
+
 	constructor() {
-		this.#load();
-		if (typeof window !== 'undefined') window.addEventListener('storage', (e) => { if (e.key === KEY) this.#load(); });
+		this.#apply(read());
+		if (typeof window !== 'undefined') window.addEventListener('storage', (e) => { if (e.key === KEY) this.#apply(read()); });
 	}
 
-	#load() {
-		const s = { ...DEFAULTS, ...read() };
+	#apply(p: Partial<Stored>) {
+		const s = { ...DEFAULTS, ...p };
 		this.sendKey = ['smart', 'enter', 'mod-enter'].includes(s.sendKey) ? s.sendKey : DEFAULTS.sendKey;
 		this.diffView = s.diffView === 'split' ? 'split' : 'unified';
 		this.diffHideWhitespace = !!s.diffHideWhitespace;
@@ -81,10 +93,8 @@ class Prefs {
 		this.workspace = s.workspace === 'checkout' ? 'checkout' : 'worktree';
 	}
 
-	/** Change preferences and save them. */
-	set(p: Partial<Stored>) {
-		Object.assign(this, p);
-		const s: Stored = {
+	#stored(): Stored {
+		return {
 			sendKey: this.sendKey,
 			diffView: this.diffView,
 			diffHideWhitespace: this.diffHideWhitespace,
@@ -94,7 +104,44 @@ class Prefs {
 			roomPermission: this.roomPermission,
 			workspace: this.workspace
 		};
-		try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* storage blocked: lasts until reload */ }
+	}
+
+	#saveHere() {
+		try { localStorage.setItem(KEY, JSON.stringify(this.#stored())); } catch { /* storage blocked: lasts until reload */ }
+	}
+
+	#push() {
+		void api('/v1/me/prefs', { method: 'PUT', body: JSON.stringify(synced(this.#stored())) }).catch(() => { /* kept here; sent with the next change */ });
+	}
+
+	/** Take your account's preferences over this browser's. The first time, this browser's become your account's. */
+	async #pull() {
+		try {
+			const theirs = synced(await api<Partial<Stored>>('/v1/me/prefs'));
+			if (!Object.keys(theirs).length) {
+				if (savedHere()) this.#push();
+				return;
+			}
+			this.#apply({ ...this.#stored(), ...theirs });
+			this.#saveHere();
+		} catch {
+			/* offline, or the developer key (nobody in particular): this browser's copy stands */
+		}
+	}
+
+	/** Signed in: keep the synced preferences with your account, and pick up changes made elsewhere when you come back to the tab. */
+	connect() {
+		if (this.account) return;
+		this.account = true;
+		void this.#pull();
+		document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void this.#pull(); });
+	}
+
+	/** Change preferences and save them. */
+	set(p: Partial<Stored>) {
+		Object.assign(this, p);
+		this.#saveHere();
+		if (this.account && Object.keys(synced(p)).length) this.#push();
 	}
 
 	/** The mode a new task starts with for this agent: only Claude Code can ask you, so the others edit files instead. */

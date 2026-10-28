@@ -1,6 +1,7 @@
 <script lang="ts">
 	// How the app behaves for you: what new tasks start with, which key sends, how changes
-	// are shown, what asks before it acts. Kept in this browser; every change applies at once.
+	// are shown, what asks before it acts. Every change applies at once.
+	import { fleet } from '#lib/sf/state.svelte';
 	import { setMode, userPrefersMode } from 'mode-watcher';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import Check from '@lucide/svelte/icons/check';
@@ -94,7 +95,14 @@
 <section class="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 py-8 md:px-8">
 	<header>
 		<h1 class="text-[22px] font-semibold tracking-tight">Settings</h1>
-		<p class="mt-1 text-[13px] text-muted-foreground">How Sidefleet behaves for you. Changes apply right away and are kept in this browser.</p>
+		<p class="mt-1 text-[13px] text-muted-foreground">
+			How Sidefleet behaves for you. Changes apply right away.
+			{#if prefs.account}
+				New task defaults, the send key and confirmations are kept with your account{fleet.me?.user ? ` (${fleet.me.user.login})` : ''}, so every browser you sign in on uses them. How changes look and the theme stay with this device.
+			{:else}
+				They’re kept in this browser.
+			{/if}
+		</p>
 	</header>
 
 	<!-- New tasks -->

@@ -134,6 +134,7 @@
 	let effort = $state('');
 	// Your room default from Settings, narrower than full access unless you chose otherwise: room tasks read teammates' notes.
 	let perm = $state(prefs.roomPermission);
+	$effect(() => { perm = prefs.roomPermission; });
 	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
 	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
 	let machine = $state('');

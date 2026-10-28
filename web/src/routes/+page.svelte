@@ -43,6 +43,9 @@
 	// Every new task starts from your defaults in Settings; changing them here is for this task only.
 	let perm = $state(prefs.permission);
 	let iso = $state<string>(prefs.workspace);
+	// ...including when they arrive from your account after the page opened.
+	$effect(() => { perm = prefs.permission; });
+	$effect(() => { iso = prefs.workspace; });
 	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
 	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
 	let repo = $state(load('sidefleet_repo'));

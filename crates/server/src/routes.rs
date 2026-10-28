@@ -100,6 +100,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::team::router())
         .merge(crate::rooms::router())
         .merge(crate::machines::router())
+        .merge(crate::prefs::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()

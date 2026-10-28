@@ -22,6 +22,7 @@
 	import InboxBell from '#lib/sf/ui/InboxBell.svelte';
 	import { inbox } from '#lib/sf/inbox.svelte';
 	import { fleet } from '#lib/sf/state.svelte';
+	import { prefs } from '#lib/sf/prefs.svelte';
 	import { seen } from '#lib/sf/seen.svelte';
 	import { pendingJoin } from '#lib/sf/join';
 	import { goto } from '$app/navigation';
@@ -31,6 +32,8 @@
 
 	let { children }: LayoutProps = $props();
 	onMount(() => fleet.start());
+	// Signed in with GitHub: your settings follow you to every browser.
+	$effect(() => { if (fleet.me?.user) prefs.connect(); });
 
 	// A deploy replaces the hashed page chunks, so a tab opened before it can't load a page it
 	// hasn't visited yet (it 404s and SvelteKit shows "500 Internal Error"). Reload onto the page

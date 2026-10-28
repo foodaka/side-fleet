@@ -9,6 +9,7 @@
 	import { api } from '../api';
 	import { fleet } from '../state.svelte';
 	import { PERMISSIONS, permsFor, agentName, defaultModel, hasAgent, machineModels, modelValid, permHint, repoKey, repoLabel } from '../format';
+	import { prefs } from '../prefs.svelte';
 	import type { AgentId, Run } from '../types';
 	import AgentModelPicker from '../ui/AgentModelPicker.svelte';
 
@@ -29,7 +30,7 @@
 		agent = run.agent;
 		model = run.model;
 		effort = run.effort ?? '';
-		perm = PERMISSIONS.some((p) => p.id === run.permission_mode) ? run.permission_mode! : 'acceptEdits';
+		perm = PERMISSIONS.some((p) => p.id === run.permission_mode) ? run.permission_mode! : prefs.permission;
 		task = '';
 		machine = '';
 	});

@@ -1076,3 +1076,34 @@ async fn chat_apps_hear_when_their_tasks_finish_or_need_approval() {
     assert!(v["error"].as_str().unwrap().contains("private or local"), "{v}");
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn preferences_follow_you_to_every_browser_and_stay_yours() {
+    let env = TestEnv::start_hosted().await;
+    let laptop = Browser::login(&env, "alice").await;
+    let phone = Browser::login(&env, "alice").await;
+    let bob = Browser::login(&env, "bob").await;
+
+    // Nothing saved yet.
+    assert_eq!(laptop.json(Method::GET, "/v1/me/prefs", None).await, (StatusCode::OK, json!({})));
+
+    // Saved on the laptop, there on the phone; Bob's are his own.
+    let p = json!({"permission": "bypassPermissions", "roomPermission": "acceptEdits", "workspace": "checkout"});
+    assert_eq!(laptop.json(Method::PUT, "/v1/me/prefs", Some(p.clone())).await, (StatusCode::OK, p.clone()));
+    assert_eq!(phone.json(Method::GET, "/v1/me/prefs", None).await, (StatusCode::OK, p.clone()));
+    assert_eq!(bob.json(Method::GET, "/v1/me/prefs", None).await, (StatusCode::OK, json!({})));
+
+    // Only an object, and not a big one.
+    assert_eq!(laptop.json(Method::PUT, "/v1/me/prefs", Some(json!(["x"]))).await.0, StatusCode::BAD_REQUEST);
+    let big = json!({ "x": "a".repeat(20_000) });
+    assert_eq!(laptop.json(Method::PUT, "/v1/me/prefs", Some(big)).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(phone.json(Method::GET, "/v1/me/prefs", None).await.1, p);
+
+    // The developer key is nobody in particular, and a chat app's token can't touch them.
+    assert_eq!(with_token(&env, DEV_KEY, Method::GET, "/v1/me/prefs", None).await.0, StatusCode::NOT_FOUND);
+    let (_, tok) = laptop.json(Method::POST, "/v1/api-tokens", Some(json!({"name": "hermes", "scope": "full"}))).await;
+    let tok = tok["token"].as_str().unwrap();
+    assert_eq!(with_token(&env, tok, Method::GET, "/v1/me/prefs", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(with_token(&env, tok, Method::PUT, "/v1/me/prefs", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
+    env.teardown().await;
+}

@@ -8,7 +8,8 @@
 	import DiffStat from './DiffStat.svelte';
 	import FileStatus from './FileStatus.svelte';
 	import { highlight, segments, type Tok } from './highlight';
-	import { omittedReason, parsePatch, splitPath, splitRows, type DiffFile, type Line } from './parse';
+	import { changes, omittedReason, parsePatch, splitPath, splitRows, type DiffFile, type Line } from './parse';
+	import { prefs } from '../prefs.svelte';
 
 	let {
 		file,
@@ -30,7 +31,7 @@
 	const LARGE = 800;
 	let forced = $state(false);
 	const large = $derived(file.additions + file.deletions > LARGE && !forced);
-	const parsed = $derived(file.patch && open && !large ? parsePatch(file.patch) : null);
+	const parsed = $derived(file.patch && open && !large ? parsePatch(file.patch, { hideWhitespace: prefs.diffHideWhitespace }) : null);
 	const [dir, name] = $derived(splitPath(file.path));
 	const lastLine = $derived(parsed?.hunks.reduce((m, h) => Math.max(m, ...h.lines.map((l) => Math.max(l.old ?? 0, l.new ?? 0))), 1) ?? 1);
 	const numW = $derived(`${String(lastLine).length + 2.5}ch`);
@@ -121,6 +122,11 @@
 				<p class="text-[13px] text-muted-foreground">Large diffs are not shown by default. This one changes {(file.additions + file.deletions).toLocaleString()} lines.</p>
 				<button type="button" class="rounded-md border bg-background px-3 py-1 text-[12.5px] font-medium hover:bg-muted" onclick={() => (forced = true)}>Load diff</button>
 			</div>
+		{:else if parsed && !changes(parsed)}
+			<div class="flex flex-col items-center gap-2 px-4 py-6 text-center">
+				<p class="text-[13px] text-muted-foreground">Only whitespace changed in this file.</p>
+				<button type="button" class="rounded-md border bg-background px-3 py-1 text-[12.5px] font-medium hover:bg-muted" onclick={() => prefs.set({ diffHideWhitespace: false })}>Show whitespace</button>
+			</div>
 		{:else if parsed && !near}
 			<div style="height: {estimate}px"></div>
 		{:else if parsed && layout === 'unified'}
@@ -151,7 +157,7 @@
 								{#if r.left}
 									<td class="num {r.left.kind}">{r.left.old}</td>
 									<td class="sign {r.left.kind}">{sign(r.left)}</td>
-									<td class="code split-l {r.left.kind}">{@render code(r.left, 'old')}</td>
+									<td class="code split-l {r.left.kind}">{@render code(r.left, r.left.kind === 'ctx' ? 'new' : 'old')}</td>
 								{:else}
 									<td class="empty"></td><td class="empty"></td><td class="empty split-l"></td>
 								{/if}

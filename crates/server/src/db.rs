@@ -470,8 +470,15 @@ async fn thread_branch_run(
     if root.isolation != "worktree" {
         return Ok(PrOutcome::InPlace);
     }
-    let Some(worker) = thread.iter().rev().find_map(|r| r.worker_id.clone()) else {
-        return Ok(PrOutcome::NoMachine);
+    let worker = match thread.iter().rev().find_map(|r| r.worker_id.clone()) {
+        Some(w) => w,
+        // It ran, but its machine was forgotten (removed, or moved by an older control plane):
+        // the creator's one machine here with the repo is where its worktree is.
+        None if thread.iter().any(|r| r.started_at.is_some()) => match creators_only_machine(pool, org, root.created_by, &root.repo).await? {
+            Some(w) => w,
+            None => return Ok(PrOutcome::NoMachine),
+        },
+        None => return Ok(PrOutcome::NoMachine),
     };
     let (task, context) = make(&root);
     let session = session_for(&thread, latest.agent, None);
@@ -502,6 +509,22 @@ async fn thread_branch_run(
     let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task})).await?;
     tx.commit().await?;
     Ok(PrOutcome::Created(run, ev))
+}
+
+/// The id of `user`'s machine in `org` that has `repo`, if they have exactly one.
+async fn creators_only_machine(pool: &PgPool, org: Uuid, user: Option<Uuid>, repo: &str) -> sqlx::Result<Option<String>> {
+    let Some(user) = user else { return Ok(None) };
+    let rows = sqlx::query(
+        "SELECT w.id FROM workers w WHERE w.org_id = $1 AND w.owner_id = $2
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements(w.capabilities->'repos') r
+                       WHERE COALESCE(NULLIF(r->>'id', ''), r->>'name') = $3 OR r->>'name' = $3)",
+    )
+    .bind(org)
+    .bind(user)
+    .bind(repo)
+    .fetch_all(pool)
+    .await?;
+    Ok(if rows.len() == 1 { Some(rows[0].get("id")) } else { None })
 }
 
 /// Store what a worker found out about threads' pull requests. Only threads in

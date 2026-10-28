@@ -456,3 +456,24 @@ async fn owners_rename_their_org_and_members_cannot() {
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn a_task_whose_machine_was_forgotten_still_opens_its_pr_on_your_machine() {
+    let env = TestEnv::start_hosted().await;
+    let (_alice, bob, _alice_m, bob_m) = team(&env).await;
+    let (_, v) = bob.task("/v1/runs", "Fix the readme", json!({})).await;
+    let id = v["id"].as_str().unwrap().to_string();
+    let run = bob_m.claim().await.expect("bob's task");
+    bob_m.finish(run["id"].as_str().unwrap(), json!({"text": "done"})).await;
+
+    // An older control plane's "move machine" forgot which machine ran the thread.
+    sqlx::query("UPDATE runs SET worker_id = NULL WHERE id = $1::uuid OR parent_id = $1::uuid").bind(&id).execute(&env.pool).await.unwrap();
+
+    // Bob has one machine with the repo, so that's where its worktree is.
+    let (s, pr) = bob.call(Method::POST, &format!("/v1/runs/{id}/pr"), None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{pr}");
+    let claimed = bob_m.claim().await.expect("the PR run goes to bob's machine");
+    assert_eq!((claimed["id"].clone(), claimed["kind"].as_str()), (pr["id"].clone(), Some("pr")));
+
+    env.teardown().await;
+}

@@ -207,7 +207,11 @@ pub async fn require_dev(State(state): State<AppState>, mut req: Request, next: 
 pub struct WorkerAuth {
     /// Digest of the presented token; a worker stays bound to the token it registered with.
     pub token_hash: String,
+    /// The machine's home org: the one its token belongs to, which counts it against its plan.
     pub org: Uuid,
+    /// Every org it serves: its home and, for a machine with an owner, each other org the owner
+    /// is a member of (home first). It runs its owner's tasks in all of them.
+    pub orgs: Vec<Uuid>,
 }
 
 /// Worker API: a static `SIDEFLEET_WORKER_TOKENS` entry (default org) or a live
@@ -217,17 +221,17 @@ pub async fn require_worker(State(state): State<AppState>, mut req: Request, nex
         return unauthorized("worker");
     };
     let hash = sha256_hex(&t);
-    let org = if state.config.worker_tokens.iter().any(|w| matches(&t, w)) {
-        DEFAULT_ORG
+    let (org, orgs) = if state.config.worker_tokens.iter().any(|w| matches(&t, w)) {
+        (DEFAULT_ORG, vec![DEFAULT_ORG])
     } else {
-        match tenancy::token_org(&state.pool, &hash).await {
-            Ok(Some(org)) => org,
+        match tenancy::token_orgs(&state.pool, &hash).await {
+            Ok(Some(o)) => o,
             Ok(None) => return unauthorized("worker"),
             Err(e) => return server_error(e),
         }
     };
     crate::request_log::record_caller(org, None);
-    req.extensions_mut().insert(WorkerAuth { token_hash: hash, org });
+    req.extensions_mut().insert(WorkerAuth { token_hash: hash, org, orgs });
     next.run(req).await
 }
 
@@ -265,7 +269,6 @@ mod tests {
             (Method::DELETE, "/v1/workers/mac"),
             (Method::POST, "/v1/workers/mac/update"),
             (Method::PUT, "/v1/repos"),
-            (Method::POST, "/v1/me/machines/move"),
         ] {
             assert!(!ok(Scope::Full, m.clone(), p), "{m} {p}");
         }

@@ -125,26 +125,21 @@ See 01 §4: tokens they own are revoked, their machines go offline, and their qu
 runs are stopped. Their threads stay visible to the team, and anyone can **fork** one to carry on
 from where it was, on their own machine.
 
-## 6. Moving a machine between orgs
+## 6. One machine, all your orgs
 
-People will connect a machine to their personal org, then join a team. They should be able to
-move it without reconnecting.
+A machine connects to one org, its home: the org of its token, which counts it against that
+org's plan. It then serves its owner in every org they belong to (`WorkerAuth.orgs`):
+- On each register and heartbeat the server copies its `workers` row into the owner's other orgs
+  (`db::sync_worker`), so it is listed there, marked `guest`, and doesn't count against their
+  plans. Joining an org picks it up within a heartbeat; copies in orgs the owner left are dropped
+  once no run points at them.
+- A claim looks in each of those orgs (still only the owner's runs), and calls about a run act
+  in the run's org.
+- Removing someone from an org moves their machines connected to it home to another org of
+  theirs (their personal one first) instead of revoking them, so they keep working elsewhere.
 
-Built (`crates/server/src/machines.rs`). From the org you want the machine in, the page lists your
-machines in your other orgs (`GET /v1/me/machines`) and moves one with a click
-(`POST /v1/me/machines/move`, `{from, id}`). Rooms offer it when none of your machines here has the
-room's repo; so do the home page and Machines.
-- Owner only, between orgs the owner belongs to, within the target org's machine limit, and only
-  when nothing is running on the machine.
-- The machine's worker token is pointed at the target org and its `workers` row is carried over, so
-  the next heartbeat lands there with nothing to reconnect. Past runs in the old org keep their
-  history without a machine, as when a machine is removed.
-- Machines connected with the control plane's static token, or sharing a token with other machines,
-  can't move; they reconnect from the target org instead.
-
-Approving a machine by its code also lets you pick which of your orgs it joins.
-Settings > Your machines lists every machine of yours with the org it is in, and moves one to any
-other of your orgs. The org switcher always shows which org you're working in.
+Settings > Your machines lists each machine once, with the org it connected to. Approving a
+machine by its code lets you pick that org.
 
 ## 7. Later: sharing machines (deferred)
 

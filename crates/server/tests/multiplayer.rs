@@ -60,6 +60,11 @@ impl Machine {
         assert_eq!(s, StatusCode::OK, "{v}");
         m
     }
+    /// Register without asserting it worked.
+    async fn try_start(env: &TestEnv, token: &str, id: &str) -> (StatusCode, Value) {
+        let m = Machine { c: Client::new(), base: env.base_url.clone(), token: token.into(), id: id.into() };
+        m.call("/v1/worker/register", json!({"id": id, "display_name": id, "capabilities": {}, "active_runs": []})).await
+    }
     async fn call(&self, path: &str, body: Value) -> (StatusCode, Value) {
         let r = self.c.post(format!("{}{}", self.base, path)).bearer_auth(&self.token).json(&body).send().await.unwrap();
         let s = r.status();
@@ -301,7 +306,7 @@ async fn rooms_brief_their_tasks_and_merge_them_into_one_branch() {
 }
 
 #[tokio::test]
-async fn removing_someone_cuts_off_their_machines_and_queued_tasks() {
+async fn removing_someone_takes_their_machines_out_of_the_org_and_stops_their_queued_tasks() {
     let env = TestEnv::start_hosted().await;
     let (alice, bob, _, bob_m) = team(&env).await;
     let org = alice.org.clone().unwrap();
@@ -312,8 +317,14 @@ async fn removing_someone_cuts_off_their_machines_and_queued_tasks() {
     assert_eq!(bob.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{}", alice.me().await["user"]["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{bob_id}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(alice.call(Method::GET, &format!("/v1/runs/{queued}"), None).await.1["status"], "stopped");
-    let (s, _) = bob_m.call("/v1/worker/heartbeat", json!({"id": "bob-linux", "capabilities": {}, "active_runs": []})).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // Bob's machine, connected to Acme, moves home to his personal org (where it was already
+    // listed) and keeps working for him there, but Acme no longer lists it or hands it work.
+    let (s, v) = bob_m.call("/v1/worker/heartbeat", json!({"id": "bob-linux", "capabilities": {}, "active_runs": []})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, acme_workers) = alice.call(Method::GET, "/v1/workers", None).await;
+    assert!(!acme_workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-linux"), "{acme_workers}");
+    let (_, home) = Api::user(&env, "bob").await.call(Method::GET, "/v1/workers", None).await;
+    assert!(home.as_array().unwrap().iter().any(|w| w["id"] == "bob-linux"), "{home}");
     // The last owner can't leave.
     let alice_id = alice.me().await["user"]["id"].as_str().unwrap().to_string();
     assert_eq!(alice.call(Method::DELETE, &format!("/v1/orgs/{org}/members/{alice_id}"), None).await.0, StatusCode::CONFLICT);
@@ -374,57 +385,53 @@ async fn removing_someone_also_revokes_the_invites_they_made() {
 }
 
 #[tokio::test]
-async fn you_can_move_your_own_machines_between_your_orgs_but_not_anyone_elses() {
+async fn your_machine_serves_you_in_every_org_you_belong_to() {
     let env = TestEnv::start_hosted().await;
-    let (alice, bob, _alice_m, _) = team(&env).await;
+    let (alice, bob, alice_m, _bob_linux) = team(&env).await;
     let acme = alice.org.clone().unwrap();
 
-    // Bob's laptop joined his personal org, not Acme.
+    // Bob connects his laptop to his personal org only.
     let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != acme.as_str()).unwrap()["id"].as_str().unwrap().to_string();
     let mut bob_home = Api::user(&env, "bob").await;
     bob_home.org = Some(personal.clone());
     let (_, tok) = bob_home.call(Method::POST, &format!("/v1/orgs/{personal}/tokens"), Some(json!({"name": "laptop"}))).await;
     let laptop = Machine::start(&env, tok["token"].as_str().unwrap(), "bob-laptop").await;
 
-    // Bob sees each of his machines and the org it is in; Alice sees only hers.
-    let where_ = |v: &Value| -> Vec<(String, String)> {
-        v.as_array().unwrap().iter().map(|m| (m["id"].as_str().unwrap().to_string(), m["org"]["id"].as_str().unwrap().to_string())).collect()
-    };
-    let (s, mine) = bob.call(Method::GET, "/v1/me/machines", None).await;
-    assert_eq!(s, StatusCode::OK, "{mine}");
-    let mut found = where_(&mine);
-    found.sort();
-    assert_eq!(found, [("bob-laptop".to_string(), personal.clone()), ("bob-linux".to_string(), acme.clone())]);
-    let laptop_row = mine.as_array().unwrap().iter().find(|m| m["id"] == "bob-laptop").unwrap();
-    assert_eq!((laptop_row["online"].as_bool(), &laptop_row["repos"], &laptop_row["agents"]), (Some(true), &json!(["github.com/acme/proj"]), &json!(["claude"])));
-    assert_eq!(where_(&alice.call(Method::GET, "/v1/me/machines", None).await.1), [("alice-mac".to_string(), acme.clone())]);
-
-    // Alice can't pull Bob's laptop into Acme, and Bob can't take Alice's machine home.
-    let (s, _) = alice.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
-    let (s, _) = bob_home.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": acme, "id": "alice-mac"}))).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
-
-    // Acme's free plan is full (Alice's and Bob's machines); once Bob frees his slot, the laptop moves
-    // into Acme, keeps heart-beating with the same token and takes his Acme tasks.
-    let (s, v) = bob.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
-    assert_eq!(s, StatusCode::PAYMENT_REQUIRED, "{v}");
-    assert_eq!(bob.call(Method::DELETE, "/v1/workers/bob-linux", None).await.0, StatusCode::NO_CONTENT);
-    let (s, v) = bob.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": personal, "id": "bob-laptop"}))).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    let (s, v) = laptop.call("/v1/worker/heartbeat", json!({"id": "bob-laptop", "capabilities": {}, "active_runs": []})).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
+    // It shows in Acme as Bob's, without counting against Acme's plan (full with Alice's and Bob's Linux box).
     let (_, workers) = bob.call(Method::GET, "/v1/workers", None).await;
-    assert!(workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-laptop" && w["mine"] == true), "{workers}");
-    let (_, home) = bob_home.call(Method::GET, "/v1/workers", None).await;
-    assert_eq!(home, json!([]));
-    assert_eq!(where_(&bob.call(Method::GET, "/v1/me/machines", None).await.1), [("bob-laptop".to_string(), acme.clone())]);
-    let (_, run) = bob.task("/v1/runs", "on the laptop", json!({"worker_id": "bob-laptop"})).await;
-    assert_eq!(laptop.claim().await.expect("bob's task")["id"], run["id"]);
+    let row = workers.as_array().unwrap().iter().find(|w| w["id"] == "bob-laptop").cloned().unwrap_or(Value::Null);
+    assert_eq!((row["mine"].as_bool(), row["online"].as_bool(), row["guest"].as_bool()), (Some(true), Some(true), Some(true)), "{workers}");
+    assert!(workers.as_array().unwrap().iter().any(|w| w["id"] == "alice-mac" && w["guest"] == false), "{workers}");
+    let (_, theirs) = alice.call(Method::GET, "/v1/workers", None).await;
+    assert!(theirs.as_array().unwrap().iter().any(|w| w["id"] == "bob-laptop" && w["owner"]["login"] == "bob"), "{theirs}");
+    let (s, v) = alice.call(Method::POST, &format!("/v1/orgs/{acme}/tokens"), Some(json!({"name": "alice-2"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let (s, v) = Machine::try_start(&env, v["token"].as_str().unwrap(), "alice-2").await;
+    assert_eq!(s, StatusCode::PAYMENT_REQUIRED, "Acme is at 2 machines without Bob's laptop: {v}");
 
-    // With a task running there it stays put.
-    let (s, v) = bob_home.call(Method::POST, "/v1/me/machines/move", Some(json!({"from": acme, "id": "bob-laptop"}))).await;
-    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // The laptop runs Bob's tasks from Acme and from his personal org, and never Alice's.
+    let (_, alice_run) = alice.task("/v1/runs", "Alice's task", json!({})).await;
+    let (s, acme_run) = bob.task("/v1/runs", "Bob's Acme task", json!({"worker_id": "bob-laptop"})).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{acme_run}");
+    let got = laptop.claim().await.expect("bob's Acme task");
+    assert_eq!(got["id"], acme_run["id"]);
+    laptop.finish(got["id"].as_str().unwrap(), json!({"text": "done in Acme"})).await;
+    assert_eq!(bob.call(Method::GET, &format!("/v1/runs/{}", acme_run["id"].as_str().unwrap()), None).await.1["status"], "succeeded");
+    let (_, home_run) = bob_home.task("/v1/runs", "Bob's own task", json!({})).await;
+    assert_eq!(laptop.claim().await.expect("bob's personal task")["id"], home_run["id"]);
+    assert!(laptop.claim().await.is_none(), "Alice's task stays for her machine");
+    assert_eq!(alice_m.claim().await.expect("alice's task")["id"], alice_run["id"]);
+
+    // "Your machines" lists each machine once, with the org it connected to.
+    let (_, mine) = bob.call(Method::GET, "/v1/me/machines", None).await;
+    let mut listed: Vec<(String, String)> = mine.as_array().unwrap().iter().map(|m| (m["id"].as_str().unwrap().into(), m["org"]["id"].as_str().unwrap().into())).collect();
+    listed.sort();
+    assert_eq!(listed, [("bob-laptop".to_string(), personal.clone()), ("bob-linux".to_string(), acme.clone())]);
+
+    // Removing your machine in one org removes it from the others it served.
+    assert_eq!(bob.call(Method::DELETE, "/v1/workers/bob-linux", None).await.0, StatusCode::NO_CONTENT);
+    let (_, home_workers) = bob_home.call(Method::GET, "/v1/workers", None).await;
+    assert!(!home_workers.as_array().unwrap().iter().any(|w| w["id"] == "bob-linux"), "{home_workers}");
 
     env.teardown().await;
 }
@@ -446,6 +453,27 @@ async fn owners_rename_their_org_and_members_cannot() {
     let personal = bob.me().await["orgs"].as_array().unwrap().iter().find(|o| o["id"] != org.as_str()).unwrap()["id"].as_str().unwrap().to_string();
     assert_eq!(bob.call(Method::PATCH, &format!("/v1/orgs/{personal}"), Some(json!({"name": "Bob's shop"}))).await.0, StatusCode::OK);
     assert_eq!(alice.call(Method::PATCH, &format!("/v1/orgs/{personal}"), Some(json!({"name": "mine"}))).await.0, StatusCode::NOT_FOUND);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn a_task_whose_machine_was_forgotten_still_opens_its_pr_on_your_machine() {
+    let env = TestEnv::start_hosted().await;
+    let (_alice, bob, _alice_m, bob_m) = team(&env).await;
+    let (_, v) = bob.task("/v1/runs", "Fix the readme", json!({})).await;
+    let id = v["id"].as_str().unwrap().to_string();
+    let run = bob_m.claim().await.expect("bob's task");
+    bob_m.finish(run["id"].as_str().unwrap(), json!({"text": "done"})).await;
+
+    // An older control plane's "move machine" forgot which machine ran the thread.
+    sqlx::query("UPDATE runs SET worker_id = NULL WHERE id = $1::uuid OR parent_id = $1::uuid").bind(&id).execute(&env.pool).await.unwrap();
+
+    // Bob has one machine with the repo, so that's where its worktree is.
+    let (s, pr) = bob.call(Method::POST, &format!("/v1/runs/{id}/pr"), None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{pr}");
+    let claimed = bob_m.claim().await.expect("the PR run goes to bob's machine");
+    assert_eq!((claimed["id"].clone(), claimed["kind"].as_str()), (pr["id"].clone(), Some("pr")));
 
     env.teardown().await;
 }

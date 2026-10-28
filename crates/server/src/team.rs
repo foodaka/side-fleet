@@ -195,6 +195,17 @@ pub async fn remove_member(pool: &PgPool, org: Uuid, user: Uuid) -> sqlx::Result
         }
     }
     sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
+    // Their machines connected to this org move home to another org of theirs (their personal one
+    // first) and keep serving their other orgs; they stop serving this one. Revoked if there is none.
+    sqlx::query(
+        "UPDATE worker_tokens SET org_id = m.org_id FROM (
+             SELECT org_id FROM org_members WHERE user_id = $2 ORDER BY (role = 'owner') DESC, created_at LIMIT 1) m
+         WHERE worker_tokens.org_id = $1 AND worker_tokens.owner_id = $2 AND worker_tokens.revoked_at IS NULL",
+    )
+    .bind(org)
+    .bind(user)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE worker_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND owner_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
     sqlx::query("UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id = $1 AND user_id = $2").bind(org).bind(user).execute(&mut *tx).await?;
     // Invite links they made would otherwise let them (or whoever has one) back in.

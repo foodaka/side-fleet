@@ -65,9 +65,10 @@ pub async fn set_update_requested(pool: &PgPool, org: Uuid, id: &str, value: boo
     Ok(res.rows_affected() == 1)
 }
 
-pub async fn update_requested(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT update_requested FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await?;
-    Ok(row.map(|r| r.get::<bool, _>("update_requested")).unwrap_or(false))
+/// Whether someone asked machine `id` to update, from any of the orgs it serves.
+pub async fn update_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT bool_or(update_requested) AS u FROM workers WHERE id = $1 AND org_id = ANY($2)").bind(id).bind(orgs).fetch_one(pool).await?;
+    Ok(row.get::<Option<bool>, _>("u").unwrap_or(false))
 }
 
 fn row_to_worker(r: &PgRow) -> Worker {
@@ -469,8 +470,15 @@ async fn thread_branch_run(
     if root.isolation != "worktree" {
         return Ok(PrOutcome::InPlace);
     }
-    let Some(worker) = thread.iter().rev().find_map(|r| r.worker_id.clone()) else {
-        return Ok(PrOutcome::NoMachine);
+    let worker = match thread.iter().rev().find_map(|r| r.worker_id.clone()) {
+        Some(w) => w,
+        // It ran, but its machine was forgotten (removed, or moved by an older control plane):
+        // the creator's one machine here with the repo is where its worktree is.
+        None if thread.iter().any(|r| r.started_at.is_some()) => match creators_only_machine(pool, org, root.created_by, &root.repo).await? {
+            Some(w) => w,
+            None => return Ok(PrOutcome::NoMachine),
+        },
+        None => return Ok(PrOutcome::NoMachine),
     };
     let (task, context) = make(&root);
     let session = session_for(&thread, latest.agent, None);
@@ -501,6 +509,22 @@ async fn thread_branch_run(
     let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task})).await?;
     tx.commit().await?;
     Ok(PrOutcome::Created(run, ev))
+}
+
+/// The id of `user`'s machine in `org` that has `repo`, if they have exactly one.
+async fn creators_only_machine(pool: &PgPool, org: Uuid, user: Option<Uuid>, repo: &str) -> sqlx::Result<Option<String>> {
+    let Some(user) = user else { return Ok(None) };
+    let rows = sqlx::query(
+        "SELECT w.id FROM workers w WHERE w.org_id = $1 AND w.owner_id = $2
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements(w.capabilities->'repos') r
+                       WHERE COALESCE(NULLIF(r->>'id', ''), r->>'name') = $3 OR r->>'name' = $3)",
+    )
+    .bind(org)
+    .bind(user)
+    .bind(repo)
+    .fetch_all(pool)
+    .await?;
+    Ok(if rows.len() == 1 { Some(rows[0].get("id")) } else { None })
 }
 
 /// Store what a worker found out about threads' pull requests. Only threads in
@@ -1538,8 +1562,71 @@ pub async fn worker_exists(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<b
     Ok(row.is_some())
 }
 
+/// Machines that count against `org`'s plan: those connected to it, not members' machines from
+/// their other orgs that also serve it.
 pub async fn count_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
-    Ok(sqlx::query("SELECT count(*) AS n FROM workers WHERE org_id = $1").bind(org).fetch_one(pool).await?.get("n"))
+    Ok(sqlx::query(
+        "SELECT count(*) AS n FROM workers w WHERE w.org_id = $1
+           AND NOT EXISTS (SELECT 1 FROM worker_tokens t WHERE t.token_hash = w.token_hash AND t.org_id <> w.org_id)",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await?
+    .get("n"))
+}
+
+/// Machines of `org` that connected to another org and serve this one for their owner,
+/// so they don't count against its plan.
+pub async fn guest_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<std::collections::HashSet<String>> {
+    let rows = sqlx::query(
+        "SELECT w.id FROM workers w WHERE w.org_id = $1
+           AND EXISTS (SELECT 1 FROM worker_tokens t WHERE t.token_hash = w.token_hash AND t.org_id <> w.org_id)",
+    )
+    .bind(org)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| r.get("id")).collect())
+}
+
+/// List machine `id` (registered in `home`) in each of `orgs` too, with its home row's
+/// details, so it shows and takes its owner's tasks there. A teammate's machine that already
+/// has the id in an org keeps it. Copies in orgs it no longer serves (its owner left) are
+/// dropped once no run points at them; until then they just go offline.
+/// Returns how many copies were made or refreshed.
+pub async fn sync_worker(pool: &PgPool, home: Uuid, orgs: &[Uuid], id: &str, token_hash: &str, registered: bool) -> sqlx::Result<u64> {
+    let others: Vec<Uuid> = orgs.iter().copied().filter(|o| *o != home).collect();
+    let synced = if others.is_empty() {
+        0
+    } else {
+        sqlx::query(
+            "INSERT INTO workers (org_id, id, display_name, token_hash, capabilities, last_heartbeat_at, slots_parallel, slots_active, owner_id)
+             SELECT o, w.id, w.display_name, w.token_hash, w.capabilities, w.last_heartbeat_at, w.slots_parallel, w.slots_active, w.owner_id
+             FROM workers w, unnest($3::uuid[]) AS o
+             WHERE w.org_id = $1 AND w.id = $2 AND w.owner_id IS NOT NULL
+             ON CONFLICT (org_id, id) DO UPDATE SET display_name = EXCLUDED.display_name, token_hash = EXCLUDED.token_hash,
+                capabilities = EXCLUDED.capabilities, last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                slots_parallel = EXCLUDED.slots_parallel, slots_active = EXCLUDED.slots_active,
+                update_requested = workers.update_requested AND NOT $4
+             WHERE workers.owner_id IS NOT DISTINCT FROM EXCLUDED.owner_id",
+        )
+        .bind(home)
+        .bind(id)
+        .bind(&others)
+        .bind(registered)
+        .execute(pool)
+        .await?
+        .rows_affected()
+    };
+    sqlx::query(
+        "DELETE FROM workers w WHERE w.id = $1 AND w.token_hash = $2 AND NOT (w.org_id = ANY($3))
+           AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.org_id = w.org_id AND r.worker_id = w.id)",
+    )
+    .bind(id)
+    .bind(token_hash)
+    .bind(orgs)
+    .execute(pool)
+    .await?;
+    Ok(synced)
 }
 
 /// Forget a machine. Its runs stay (without a machine); a worker still holding a

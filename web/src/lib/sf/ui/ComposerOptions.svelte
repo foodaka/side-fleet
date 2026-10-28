@@ -1,6 +1,7 @@
 <script lang="ts">
 	// The composer's less-used settings behind one control: machine, permissions, workspace and
 	// failover. At their defaults it is just an icon; anything changed is named on the control.
+	import { goto } from '$app/navigation';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
 	import { WORKSPACES, permHint, permName, permsFor } from '../format';
@@ -11,6 +12,7 @@
 		perm,
 		onperm,
 		defaultPerm = 'acceptEdits',
+		defaultIso = 'worktree',
 		sameAs,
 		machines = [],
 		machine = '',
@@ -24,8 +26,10 @@
 		/** The permission mode; '' means "same as before" when `sameAs` is given. */
 		perm: string;
 		onperm?: (p: string) => void;
-		/** The mode that counts as unchanged. */
+		/** The mode that counts as unchanged: your default from Settings. */
 		defaultPerm?: string;
+		/** The workspace that counts as unchanged. */
+		defaultIso?: string;
 		/** The reply box: the previous message's mode, offered as "Same permissions". */
 		sameAs?: string | null;
 		/** Machines to choose from; the section shows only when there is a choice. */
@@ -52,7 +56,7 @@
 		[
 			showMachines && pinned ? pinned.display_name : '',
 			perm && perm !== defaultPerm ? permName(perm) : '',
-			iso && iso !== 'worktree' ? WORKSPACES.find((w) => w.id === iso)?.name : '',
+			iso && iso !== defaultIso ? WORKSPACES.find((w) => w.id === iso)?.name : '',
 			showFailover && failover ? 'Moves if it drops' : ''
 		].filter(Boolean)
 	);
@@ -124,6 +128,11 @@
 			<DropdownMenu.CheckboxItem bind:checked={failover}>
 				<span class="flex flex-col"><span>Move if it drops</span><span class={hint}>Pushes checkpoints of the task's branch to origin, so another machine can take over</span></span>
 			</DropdownMenu.CheckboxItem>
+		{/if}
+
+		{#if sameAs === undefined}
+			<DropdownMenu.Separator />
+			<DropdownMenu.Item onclick={() => goto('#/settings')}><span class={hint}>Changes here are for this task only. Set your defaults in Settings…</span></DropdownMenu.Item>
 		{/if}
 	</DropdownMenu.Content>
 </DropdownMenu.Root>

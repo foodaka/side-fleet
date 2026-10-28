@@ -19,7 +19,8 @@
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { api, ApiError } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, agentModel, agentName, defaultModel, hasAgent, machineModels, modelValid, rel, repoCloneCommand, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, agentModel, agentName, defaultModel, hasAgent, machineModels, modelValid, permsFor, rel, repoCloneCommand, repoKey, repoLabel } from '#lib/sf/format';
+	import { prefs } from '#lib/sf/prefs.svelte';
 	import type { AgentId, RoomDetail, RoomNote, TaskCard } from '#lib/sf/types';
 	import { compareUrl, fixConflictsPrompt } from '#lib/sf/rooms';
 	import Avatar from '#lib/sf/ui/Avatar.svelte';
@@ -131,8 +132,10 @@
 	let agent = $state<AgentId>(AGENTS.some((a) => a.id === stored('sidefleet_agent')) ? (stored('sidefleet_agent') as AgentId) : 'claude');
 	let model = $state('');
 	let effort = $state('');
-	// Not full access by default: room tasks read teammates' notes, so commands wait for a yes unless you choose otherwise.
-	let perm = $state('acceptEdits');
+	// Your room default from Settings, narrower than full access unless you chose otherwise: room tasks read teammates' notes.
+	let perm = $state(prefs.roomPermission);
+	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
+	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
 	let machine = $state('');
 	let task = $state('');
 	let starting = $state(false);
@@ -169,7 +172,7 @@
 		try {
 			const r = await api<{ id: string }>(`/v1/rooms/${room.id}/tasks`, {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: perm, worker_id: pinned?.id, images: await attachments.payload() })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: effectivePerm, worker_id: pinned?.id, images: await attachments.payload() })
 			});
 			task = '';
 			attachments.clear();
@@ -425,7 +428,7 @@
 							bind:value={task}
 							rows="2"
 							placeholder="Take a piece of the goal: what should your agent do?"
-							onkeydown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) startTask(e); }}
+							onkeydown={(e) => { if (prefs.sends(e, 'task')) startTask(e); }}
 							onpaste={attachments.paste}
 							class="block max-h-[240px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 						></textarea>
@@ -440,7 +443,7 @@
 								size="sm"
 								unavailable={(a) => (withRepo.some((w) => hasAgent(w, a)) ? '' : `Not on a machine of yours with ${repoLabel(room?.repo)}`)}
 							/>
-							<ComposerOptions {agent} perm={perm} onperm={(v) => (perm = v)} defaultPerm="acceptEdits" {machines} machine={pinned?.id ?? ''} onmachine={(v) => (machine = v)} size="sm" />
+							<ComposerOptions {agent} perm={effectivePerm} onperm={(v) => (perm = v)} defaultPerm={prefs.permissionFor(agent, true)} {machines} machine={pinned?.id ?? ''} onmachine={(v) => (machine = v)} size="sm" />
 							<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canAttach} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
 								<Paperclip class="size-4" />
 							</button>

@@ -11,7 +11,8 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
-	import { AGENTS, MODELS, WORKSPACES, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { prefs } from '#lib/sf/prefs.svelte';
+	import { AGENTS, MODELS, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
@@ -39,9 +40,9 @@
 	const initialEffort = (a: AgentId) => (effortValid(a, load(effortKey(a))) ? load(effortKey(a)) : '');
 	let effort = $state(initialEffort(savedAgent));
 	let machine = $state(load('sidefleet_machine'));
-	// Every new task starts with full access; a narrower mode is chosen per task and not remembered.
-	let perm = $state('bypassPermissions');
-	let iso = $state(WORKSPACES.some((w) => w.id === load('sidefleet_iso')) ? load('sidefleet_iso') : 'worktree');
+	// Every new task starts from your defaults in Settings; changing them here is for this task only.
+	let perm = $state(prefs.permission);
+	let iso = $state<string>(prefs.workspace);
 	// Only Claude Code can ask you about tool calls; the others fall back to editing files.
 	const effectivePerm = $derived(permsFor(agent).some((p) => p.id === perm) ? perm : 'acceptEdits');
 	let repo = $state(load('sidefleet_repo'));
@@ -141,7 +142,7 @@
 	}
 
 	function keydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) run(e);
+		if (prefs.sends(e, 'task')) run(e);
 	}
 	function grow() {
 		if (!box) return;
@@ -151,7 +152,6 @@
 	$effect(() => { void task; grow(); });
 
 	const recent = $derived(fleet.runs.slice(0, 6));
-	const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 	const noMachines = $derived(fleet.loaded && fleet.myOnline.length === 0);
 	const examples = [
 		'Find why the login test is flaky and fix it',
@@ -259,12 +259,13 @@
 						{agent}
 						perm={effectivePerm}
 						onperm={(v) => (perm = v)}
-						defaultPerm="bypassPermissions"
+						defaultPerm={prefs.permissionFor(agent)}
+						defaultIso={prefs.workspace}
 						{machines}
 						machine={pinned?.id ?? ''}
 						onmachine={pickMachine}
 						{iso}
-						oniso={(v) => { iso = v; save('sidefleet_iso', v); }}
+						oniso={(v) => (iso = v)}
 						bind:failover
 					/>
 					</div>
@@ -274,7 +275,7 @@
 							<Paperclip class="size-4" />
 						</button>
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-						{#if task.trim()}<span class="hidden items-center gap-1 text-xs text-faint sm:flex"><Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd><Kbd>↵</Kbd></span>{/if}
+						{#if task.trim()}<a href="#/settings" title="Change which key sends in Settings" class="hidden items-center gap-1 text-xs text-faint hover:text-muted-foreground sm:flex pointer-coarse:hidden">{#each prefs.sendKeys('task') as k (k)}<Kbd>{k}</Kbd>{/each}</a>{/if}
 						<button type="submit" disabled={!canRun} aria-label="Run task" class="grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />
 						</button>

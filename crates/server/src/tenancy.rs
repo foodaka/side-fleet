@@ -307,6 +307,22 @@ pub async fn token_org(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<U
     Ok(Some(row.get("org_id")))
 }
 
+/// A live token's home org and every org its machines serve: the home, then the other orgs its
+/// owner is a member of. Ownerless tokens serve only their home.
+pub async fn token_orgs(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<(Uuid, Vec<Uuid>)>> {
+    let Some(home) = token_org(pool, token_hash).await? else { return Ok(None) };
+    let rows = sqlx::query(
+        "SELECT m.org_id FROM worker_tokens t JOIN org_members m ON m.user_id = t.owner_id
+         WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND m.org_id <> t.org_id ORDER BY m.created_at",
+    )
+    .bind(token_hash)
+    .fetch_all(pool)
+    .await?;
+    let mut orgs = vec![home];
+    orgs.extend(rows.iter().map(|r| r.get::<Uuid, _>("org_id")));
+    Ok(Some((home, orgs)))
+}
+
 // ---- API tokens ----
 
 /// What an API token may do. Browser sessions and the developer key are not limited.

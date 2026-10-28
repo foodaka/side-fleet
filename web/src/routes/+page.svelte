@@ -15,7 +15,6 @@
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
-	import MoveHere from '#lib/sf/ui/MoveHere.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
@@ -182,12 +181,6 @@
 					Your teammates' machines only run their own tasks, so connect one of yours to take on work. Meanwhile you can follow along in <a href="#/rooms" class="text-foreground underline underline-offset-2">Rooms</a>.
 				</p>
 			{/if}
-			{#if fleet.elsewhere.length}
-				<div class="flex flex-col gap-2 rounded-xl border bg-card p-4">
-					<p class="text-[13px] font-medium">Already connected a machine to another org?</p>
-					<MoveHere />
-				</div>
-			{/if}
 		</header>
 		<Onboarding />
 	</section>
@@ -199,11 +192,6 @@
 				{fleet.mine.map((w) => w.display_name).join(', ')} {fleet.mine.length === 1 ? 'has' : 'have'} stopped checking in.
 				Run <code class="font-mono text-[13px] text-foreground">sidefleet status</code> there, or connect another machine below.
 			</p>
-			{#if fleet.elsewhere.some((m) => m.online)}
-				<div class="flex flex-col gap-2 rounded-xl border bg-card p-4">
-					<MoveHere />
-				</div>
-			{/if}
 		</header>
 		<div class="rounded-2xl border bg-card p-5 shadow-[0_1px_2px_rgb(0_0_0/0.03)]">
 			<AddMachine />

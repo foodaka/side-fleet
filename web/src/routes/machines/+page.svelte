@@ -7,7 +7,6 @@
 	import MachineCard from '#lib/sf/ui/MachineCard.svelte';
 	import FleetMap from '#lib/sf/ui/FleetMap.svelte';
 	import PendingMachines from '#lib/sf/ui/PendingMachines.svelte';
-	import MoveHere from '#lib/sf/ui/MoveHere.svelte';
 	import WorkerTokens from '#lib/sf/ui/WorkerTokens.svelte';
 
 	let hover = $state<string | null>(null);
@@ -34,11 +33,11 @@
 				{`${fleet.online.length} of ${fleet.workers.length} online, ${busy} of ${slotsTotal} task slots busy.` + (outdated ? ` ${outdated} ${outdated === 1 ? 'runs' : 'run'} an older build than this control plane.` : '')}
 			</p>
 			{#if fleet.multi}
-				<p class="mt-0.5 text-xs text-muted-foreground">Each machine runs only its owner's tasks. Teammates' machines show here so you can see what the team is running.</p>
+				<p class="mt-0.5 text-xs text-muted-foreground">Each machine runs only its owner's tasks, in every org its owner belongs to. Teammates' machines show here so you can see what the team is running.</p>
 			{/if}
 			{#if limits && fleet.org}
 				<p class="mt-0.5 text-xs text-muted-foreground">
-					{fleet.org.name} is on the {fleet.org.plan} plan: {fleet.workers.length} of {limits.machines} machines, up to {limits.parallel_runs} tasks queued or running at once.
+					{fleet.org.name} is on the {fleet.org.plan} plan: {fleet.workers.filter((w) => !w.guest).length} of {limits.machines} machines, up to {limits.parallel_runs} tasks queued or running at once.
 				</p>
 			{/if}
 		</div>
@@ -49,18 +48,6 @@
 	</header>
 
 	<PendingMachines />
-
-	{#if fleet.elsewhere.length}
-		<section class="flex flex-col gap-3" aria-labelledby="elsewhere-h">
-			<div>
-				<h2 id="elsewhere-h" class="text-[15px] font-semibold tracking-tight">Your machines in other orgs</h2>
-				<p class="mt-0.5 text-[13px] text-muted-foreground">A machine takes tasks from one org at a time. Move one here and it carries on without reconnecting.</p>
-			</div>
-			<div class="flex flex-col gap-2.5 rounded-xl border bg-card p-4">
-				<MoveHere />
-			</div>
-		</section>
-	{/if}
 
 	{#if sorted.length}
 		<FleetMap bind:hover />

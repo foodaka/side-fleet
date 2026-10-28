@@ -166,9 +166,9 @@ On a hosted control plane, an org is a team workspace:
   switch between Mine and Team to see your tasks or everyone's. Only a thread's creator can reply,
   restore, approve its commands or open its PR. The bell and push notifications are only for your
   own tasks.
-- **Your machines stay yours.** A machine runs only the tasks of the person who connected it. If
-  you connected one to your personal org before joining a team, "Move it to <org>" brings it over
-  without reconnecting.
+- **Your machines stay yours, in every org.** A machine runs only the tasks of the person who
+  connected it, in every org they belong to: connect it once, and joining a team needs nothing
+  more. It counts against the plan of the org it connected to.
 - **Rooms** are for working toward one goal together. A room has a goal in one repo, the team's
   notes, and tasks that each run on their owner's machine, in their own worktree. When a task is
   done, its owner presses Add to room to merge its branch into the room branch

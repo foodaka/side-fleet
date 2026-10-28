@@ -9,7 +9,7 @@ type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 /** Everything the pages share, refreshed from the control plane every 5 seconds. */
 class Fleet {
 	workers = $state<Worker[]>([]);
-	/** Your machines in all your orgs. */
+	/** Your machines, each once with the org it connected to; every one also serves your other orgs. */
 	myMachines = $state<MyMachine[]>([]);
 	/** Settings' "Your machines" dialog. */
 	machinesOpen = $state(false);
@@ -55,8 +55,6 @@ class Fleet {
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
 	isOwner = $derived(this.org?.role === 'owner');
-	/** Your machines in your other orgs, which you can move into this one. */
-	elsewhere = $derived(this.myMachines.filter((m) => m.org.id !== this.org?.id));
 
 	#timer: ReturnType<typeof setInterval> | undefined;
 	#asked = false;
@@ -170,20 +168,6 @@ class Fleet {
 			toast.error(archived ? 'Could not archive' : 'Could not unarchive', { description: (e as Error).message });
 		}
 		void this.refresh();
-	}
-
-	/** Move one of your machines to another of your orgs (this one unless named); it carries on without reconnecting. */
-	async moveMachine(m: MyMachine, to: string = this.org?.id ?? ''): Promise<boolean> {
-		const name = this.me?.orgs.find((o) => o.id === to)?.name ?? 'this org';
-		try {
-			await api('/v1/me/machines/move', { method: 'POST', body: JSON.stringify({ from: m.org.id, id: m.id }), headers: { 'X-Sidefleet-Org': to } });
-			toast.success(`${m.display_name} moved to ${name}`, { description: `It takes your tasks in ${name} now, not in ${m.org.name}.` });
-			await this.refresh();
-			return true;
-		} catch (e) {
-			toast.error(`Could not move ${m.display_name}`, { description: (e as Error).message });
-			return false;
-		}
 	}
 
 	/** Rename the org the page acts in (owners). */

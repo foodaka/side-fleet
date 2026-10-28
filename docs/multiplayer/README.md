@@ -96,6 +96,6 @@ The developer key, static worker tokens and API tokens minted with it have no us
 2. **GitHub identity.** PRs and pushes use the machine's `gh` and git login. With owner-only
    machines, that's always the driver's own login, so this is fine for now. A GitHub App
    ([04](04-thread-is-the-pr.md) §6) is still worth it for webhooks instead of polling.
-3. **One machine in several orgs.** Today a worker token belongs to one org. Lending one machine
-   to two teams means one `sidefleet run` serving several tokens. That's out of scope here, and
-   [02](02-machines.md) §6 covers moving a machine between orgs instead.
+3. **One machine in several orgs.** Done for its owner: a machine serves its owner in every org
+   they belong to ([02](02-machines.md) §6). Lending a machine to other people is still out of
+   scope (§7 there).

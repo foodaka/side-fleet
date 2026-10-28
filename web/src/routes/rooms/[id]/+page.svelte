@@ -29,7 +29,6 @@
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
-	import MoveHere from '#lib/sf/ui/MoveHere.svelte';
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 
@@ -152,8 +151,6 @@
 	});
 	const hasRepo = (w: (typeof fleet.workers)[number], repo: string) => (w.capabilities.repos ?? []).some((r) => repoKey(r) === repo || r.name === repo);
 	const withRepo = $derived(room ? fleet.myOnline.filter((w) => hasRepo(w, room.repo)) : []);
-	/** None here, but one of yours in another org has the repo: offer to move it. */
-	const movable = $derived(room && !withRepo.length && fleet.elsewhere.some((m) => m.repos.includes(room.repo)));
 	const machines = $derived(withRepo.filter((w) => hasAgent(w, agent)));
 	const pinned = $derived(machines.find((w) => w.id === machine));
 	const models = $derived(machineModels(pinned ? [pinned] : machines, agent));
@@ -453,19 +450,15 @@
 							</button>
 						</div>
 					</div>
-					{#if movable}
-						<MoveHere repo={room.repo} class="px-1" />
-					{:else}
-						<p class="px-1 text-xs text-muted-foreground">
-							{#if !withRepo.length}
-								None of your online machines has {repoLabel(room.repo)}. <a href="#/machines" class="text-foreground underline underline-offset-2">Connect one</a> to take a task; teammates' machines only run their own.
-							{:else if !machines.length}
-								None of your machines with {repoLabel(room.repo)} has {agentName(agent)}.
-							{:else}
-								Runs on {pinned?.display_name ?? (machines.length === 1 ? machines[0].display_name : 'whichever of your machines is free first')}, {room.integrated_at ? `starting from ${room.branch}` : 'starting from the default branch'}. The agent gets the goal, the notes and what the other tasks are doing.
-							{/if}
-						</p>
-					{/if}
+					<p class="px-1 text-xs text-muted-foreground">
+						{#if !withRepo.length}
+							None of your online machines has {repoLabel(room.repo)}. <a href="#/machines" class="text-foreground underline underline-offset-2">Connect one</a> to take a task; teammates' machines only run their own.
+						{:else if !machines.length}
+							None of your machines with {repoLabel(room.repo)} has {agentName(agent)}.
+						{:else}
+							Runs on {pinned?.display_name ?? (machines.length === 1 ? machines[0].display_name : 'whichever of your machines is free first')}, {room.integrated_at ? `starting from ${room.branch}` : 'starting from the default branch'}. The agent gets the goal, the notes and what the other tasks are doing.
+						{/if}
+					</p>
 				</form>
 
 				{#if !tasks.length}

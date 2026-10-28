@@ -119,9 +119,11 @@ export interface Worker {
 	owner?: { id: string; login: string } | null;
 	/** It runs your tasks: machines only run their owner's tasks. Absent on older control planes (treat as yours). */
 	mine?: boolean;
+	/** Connected to another of its owner's orgs and serving them here too; doesn't count against this org's plan. */
+	guest?: boolean;
 }
 
-/** One of your machines and the org it is in (`GET /v1/me/machines`); you can move it to another of your orgs. */
+/** One of your machines and the org it connected to (`GET /v1/me/machines`); it serves you in all your orgs. */
 export interface MyMachine {
 	id: string;
 	display_name: string;

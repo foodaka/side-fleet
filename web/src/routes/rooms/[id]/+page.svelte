@@ -159,6 +159,13 @@
 	const pinned = $derived(machines.find((w) => w.id === machine));
 	const models = $derived(machineModels(pinned ? [pinned] : machines, agent));
 	const canStart = $derived(!!task.trim() && machines.length > 0 && modelValid(agent, model) && !starting);
+	/** Why the start button is off, shown on it; empty while it's only waiting for a task to be typed. */
+	const blocked = $derived(
+		!room ? '' :
+		!fleet.myOnline.length ? 'None of your machines is online' :
+		!withRepo.length ? `None of your online machines has ${repoLabel(room.repo)} checked out` :
+		!machines.length ? `None of your machines with ${repoLabel(room.repo)} has ${agentName(agent)}` : ''
+	);
 	// No machine of yours has this agent for the repo: switch to one that does.
 	$effect(() => {
 		if (!withRepo.length || machines.length) return;
@@ -449,20 +456,40 @@
 								<Paperclip class="size-4" />
 							</button>
 							<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-							<button type="submit" aria-label="Start task" disabled={!canStart} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
+							<button type="submit" aria-label="Start task" title={blocked || undefined} disabled={!canStart} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 								<ArrowUp class="size-4" strokeWidth={2.2} />
 							</button>
 						</div>
 					</div>
-					<p class="px-1 text-xs text-muted-foreground">
-						{#if !withRepo.length}
-							None of your online machines has {repoLabel(room.repo)}. <a href="#/machines" class="text-foreground underline underline-offset-2">Connect one</a> to take a task; teammates' machines only run their own.
-						{:else if !machines.length}
-							None of your machines with {repoLabel(room.repo)} has {agentName(agent)}.
-						{:else}
-							Runs on {pinned?.display_name ?? (machines.length === 1 ? machines[0].display_name : 'whichever of your machines is free first')}, {room.integrated_at ? `starting from ${room.branch}` : 'starting from the default branch'}. The agent gets the goal, the notes and what the other tasks are doing.
-						{/if}
-					</p>
+					{#if !withRepo.length}
+						<div class="flex gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
+							<TriangleAlert class="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+							<div class="flex min-w-0 flex-col gap-1.5">
+								{#if !fleet.myOnline.length}
+									<p><span class="font-medium text-foreground">None of your machines is online.</span> <a href="#/machines" class="text-foreground underline underline-offset-2">Connect one</a> with {repoLabel(room.repo)} checked out to take a task; teammates' machines only run their own.</p>
+								{:else}
+									<p>
+										<span class="font-medium text-foreground">{fleet.myOnline.length === 1 ? `${fleet.myOnline[0].display_name} doesn't` : "None of your online machines"} {fleet.myOnline.length === 1 ? 'have' : 'has'} {repoLabel(room.repo)} checked out,</span>
+										so it can't take a task here. Clone it into the folder Sidefleet scans for repos (the one passed with <code class="font-mono">--repos</code>); it shows up here within about 15 seconds, no restart needed.
+									</p>
+									{#if repoCloneCommand(room.repo)}
+										<span class="inline-flex w-fit max-w-full min-w-0 items-center gap-1 rounded-md bg-muted py-0.5 pr-0.5 pl-1.5">
+											<span class="truncate font-mono text-[11.5px] text-foreground/80">{repoCloneCommand(room.repo)}</span>
+											<CopyButton text={() => repoCloneCommand(room?.repo)} label="" class="h-5 bg-transparent px-1 text-muted-foreground hover:bg-accent hover:text-foreground" />
+										</span>
+									{/if}
+								{/if}
+							</div>
+						</div>
+					{:else}
+						<p class="px-1 text-xs text-muted-foreground">
+							{#if !machines.length}
+								None of your machines with {repoLabel(room.repo)} has {agentName(agent)}.
+							{:else}
+								Runs on {pinned?.display_name ?? (machines.length === 1 ? machines[0].display_name : 'whichever of your machines is free first')}, {room.integrated_at ? `starting from ${room.branch}` : 'starting from the default branch'}. The agent gets the goal, the notes and what the other tasks are doing.
+							{/if}
+						</p>
+					{/if}
 				</form>
 
 				{#if !tasks.length}

@@ -123,8 +123,11 @@ async fn moved_tree(cwd: &Path, from: &str, tree: &str, to: &str) -> Result<Stri
         ("GIT_COMMITTER_NAME", "sidefleet".to_string()), ("GIT_COMMITTER_EMAIL", "sidefleet@localhost".to_string()),
     ];
     let wip = git(cwd, &["commit-tree", tree, "-p", from, "-m", "sidefleet snapshot"], &who).await?;
+    // `wip` has only `from` as its parent, and `to` descends from `from`, so
+    // Git infers exactly that merge base. Avoid --merge-base, which older Git
+    // versions (including Debian 12's Git 2.39) do not support.
     // Exits non-zero on conflicts, which the helper turns into an error.
-    let out = git(cwd, &["merge-tree", "--write-tree", "--merge-base", from, &wip, to], &[]).await?;
+    let out = git(cwd, &["merge-tree", "--write-tree", &wip, to], &[]).await?;
     Ok(out.lines().next().unwrap_or_default().to_string())
 }
 

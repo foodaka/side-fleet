@@ -8,10 +8,10 @@
 > Sidefleet is under active development: expect rough edges, and things may change between
 > versions.
 
-Type a task on a web page, pick an agent, a model and a repo, and a machine you own picks it up:
-your desk Mac, a Mac mini, a VPS. It runs Claude Code, Codex or opencode in its own git worktree
-and streams the agent's narration back live; reply to keep the conversation going. No API keys for
-Claude or Codex: it uses the login already on that machine. opencode brings any other model
+Type a task on a web page, pick an agent, a model and a repo, and let a machine you own pick it up:
+your desk Mac, a Mac mini or a VPS. It runs Claude Code, Codex or opencode in its own git worktree
+and streams the agent's narration back live; reply to keep the conversation going. No API keys are
+needed for Claude or Codex: it uses the login already on that machine. opencode brings any other model
 (Kimi, GLM, DeepSeek, Qwen through OpenRouter, or local ones). No open ports: machines only make
 outbound calls to your control plane. One Rust binary, macOS and Linux.
 
@@ -33,12 +33,12 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   machines that have the chosen agent.
 - **Your machines, one page**: every connected machine with its repos, agents, CPU and running
   tasks on a live fleet map. Tasks go to the least busy machine that has the repo and agent, or
-  pin one to a machine. Machines can be signed in to different accounts: when one hits its usage
-  limit, its task moves to another machine and the page shows "usage limit until 14:00".
+  you can pin a task to a machine. Machines can be signed in to different accounts: when one hits
+  its usage limit, its task moves to another machine and the page shows "usage limit until 14:00".
 - **Isolated by default**: each task gets its own git worktree and branch (`sidefleet/<id>`), so
   several tasks on one repo run side by side without touching your checkout. Choose "In place"
   when a task needs installed dependencies or local config.
-- **Survives a machine dropping** (opt-in per task): with "Move if it drops", the worker commits
+- **Survives a machine disconnecting** (opt-in per task): with "Move if it drops", the worker commits
   and pushes the task's branch to the repo's `origin` at most once a minute while the agent edits.
   If the machine stops responding (a laptop going to sleep), the task moves to another machine with
   the repo and continues from the last pushed commit, with a digest of the thread so far. Off by
@@ -48,14 +48,15 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   restore can itself be undone.
 - **Fork**: start a new thread from any message, with any agent and model (say, a Claude Code
   thread continued in Codex). The new thread starts on its own branch with the files as they were
-  after that message, and its agent gets the conversation up to there as a transcript.
-- **Live, and a conversation**: events stream over SSE within milliseconds, survive reloads and
+  after that message, and its agent gets the conversation up to that point as a transcript.
+- **Live and conversational**: events stream over SSE within milliseconds, survive reloads and
   dropped connections, and replies resume the same agent session like a chat. Reply while it works
   and the message waits its turn, or press Send now to interrupt. Screenshots and other images the
   agent opens show inline, so you can ask for one from your phone. Drop, paste or attach images to a
   task or reply and the agent gets them too.
-- **Waiting on you**: a bell lists every task that needs you, with why and for how long: finished
-  and waiting for a reply, failed, paused on a usage limit, or its machine dropped. Each such task
+- **Waiting on you**: a bell lists every task that needs you, along with the reason and how long
+  it has been waiting: finished and waiting for a reply, failed, paused on a usage limit, or
+  disconnected from its machine. Each such task
   also gets a marker in the sidebar. A task leaves the list when you open it, reply or dismiss it,
   and what you have seen is kept on the control plane, so it is the same on your phone and laptop.
   Turn on "Notify me" for a push notification when a task starts waiting; it carries only the
@@ -69,8 +70,8 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Chat with your fleet**: connect the AI assistant you already chat with (Hermes, OpenClaw,
   Claude Code or any MCP client) on the Chat apps page, and run and check tasks from Telegram,
   WhatsApp or Discord: "fix the failing test in my web repo", "how did it go?", "open a PR". You
-  choose what it may do: check on tasks, run them, or also approve commands. With updates in chat
-  on, it messages you when a task finishes, fails or needs your OK, and you answer right there.
+  choose what it may do: check on tasks, run them, or also approve commands. With chat updates
+  enabled, it messages you when a task finishes, fails or needs your OK, and you answer right there.
 - **Permission modes**: full access for unattended commands (the default for new tasks on the
   page), read and edit files, read only for questions, or "Ask me": Claude Code edits files on its
   own and asks you on the page (phone included) before anything else, such as a shell command,
@@ -93,8 +94,8 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 curl -fsSL https://raw.githubusercontent.com/foodaka/side-fleet/main/install.sh | sh
 ```
 
-Downloads a prebuilt `sidefleet` into `~/.local/bin` (no sudo), or builds from source when there
-is no release for your platform.
+The installer downloads a prebuilt `sidefleet` binary into `~/.local/bin` (no sudo), or builds
+from source when there is no release for your platform.
 
 <details>
 <summary>Private repo? Install with the GitHub CLI or from a clone</summary>
@@ -106,7 +107,7 @@ which the script then uses for the download:
 gh api repos/foodaka/side-fleet/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
 ```
 
-Or clone over SSH and build from the checkout, never contacting GitHub:
+Or clone over SSH and run the installer from the checkout:
 
 ```bash
 git clone git@github.com:foodaka/side-fleet.git && sh side-fleet/install.sh
@@ -134,13 +135,13 @@ Sidefleet control plane is running.
 ```
 
 Keys are saved to `~/.sidefleet/server.env`. If the machine has a coding agent installed, `serve`
-runs a worker on it too, so a single box is one command.
+runs a worker on it too, so a single machine needs only one command.
 
 **2. Open the page** and paste the developer key.
 
 **3. Connect more machines.** On any machine with an agent set up (see [Agents](#agents)), run the
-install line, then the connect line the page shows you. The page switches to the compose box as soon as the first
-heartbeat lands.
+install command, then the connect command the page shows you. The page switches to the compose
+box as soon as the first heartbeat arrives.
 
 Across networks, put the control plane on [Tailscale](https://tailscale.com) and use its tailnet
 IP: no port forwarding, no public exposure. Running it on a VPS or a spare machine is covered in
@@ -174,14 +175,14 @@ On a hosted control plane, an org is a team workspace:
   done, its owner presses Add to room to merge its branch into the room branch
   (`sidefleet/room-<id>`, never force-pushed), and new tasks then start from it. Every task's agent
   gets a brief with the goal, the notes and what the other tasks are doing, so it doesn't redo or
-  undo a teammate's work. A merge conflict shows its files on the task card, with Ask my agent to
-  fix. When the work is finished, Compare on GitHub opens the room branch for one PR.
+  undo a teammate's work. A merge conflict shows its files on the task card, with an Ask my agent to
+  fix option. When the work is finished, Compare on GitHub opens the room branch for one PR.
 
 ![A room: four people's tasks toward one goal, two merged, one conflicting, with the team's notes](docs/screenshots/room.png)
 ![A teammate's running task: watch it, or continue it on your own machine](docs/screenshots/run-teammate.png)
 ![The Team page: invite links and members](docs/screenshots/team.png)
 
-How it's designed, and what comes next, is in [docs/multiplayer/](docs/multiplayer/README.md).
+The design and future plans are documented in [docs/multiplayer/](docs/multiplayer/README.md).
 
 ## Agents
 
@@ -201,18 +202,18 @@ The page's permission modes map onto each agent:
 |---|---|---|---|
 | Read & edit files | `acceptEdits` | sandbox `workspace-write` (commands run sandboxed, no network) | shell denied |
 | Full access | `bypassPermissions` | no sandbox | all permissions granted |
-| Read only | `plan` | sandbox `read-only` | `plan` agent, edits, shell and fetches denied |
-| Ask me | `acceptEdits`, other tools asked on the page | not offered yet | not offered yet |
+| Read only | `plan` | sandbox `read-only` | `plan` agent; edits, shell commands and fetches denied |
+| Ask me | `acceptEdits`, approval for other tools requested on the page | not offered yet | not offered yet |
 
 With "Ask me", a tool call that `acceptEdits` would refuse shows on the page as a card with
 Approve and Deny, and the thread is marked "Waiting on you" in the sidebar. The agent waits until
-you decide, or denies the call after 15 minutes (`sidefleet run --approval-timeout <secs>`). Claude
+you decide or the call is denied after 15 minutes (`sidefleet run --approval-timeout <secs>`). Claude
 Code's `acceptEdits` already lets simple file commands in the workspace (`mkdir`, `rm`, `ls`)
 through without asking; everything else, such as running a script, a network call or an MCP tool,
-is asked.
+requires approval.
 
-Whatever you have already allowed Claude Code on that machine still applies: rules in
-`~/.claude/settings.json`, and the checkout's own `.claude/settings.local.json` (where "don't ask
+The permissions you have already granted Claude Code on that machine still apply, including rules in
+`~/.claude/settings.json` and the checkout's own `.claude/settings.local.json` (where "don't ask
 again" answers go), which the worker copies into each task's worktree while git ignores it.
 
 ## Command line
@@ -231,7 +232,7 @@ sidefleet detect                      # what this machine can run, as JSON
 sidefleet update                      # pull the latest, reinstall, restart services
 ```
 
-Every flag can also come from the environment (`SIDEFLEET_BIND`, `DATABASE_URL`,
+Every flag can also be set through the environment (`SIDEFLEET_BIND`, `DATABASE_URL`,
 `SIDEFLEET_DEV_KEY`, `SIDEFLEET_WORKER_TOKENS`, …), a `.env` in the current directory, or
 `~/.sidefleet/server.env` / `worker.env`. `sidefleet <command> --help` lists them all. Worker logs
 are in `~/.sidefleet/logs/`.
@@ -247,7 +248,7 @@ cargo run -p sidefleet -- serve
 ```
 
 The web UI's build output in `crates/server/web-dist/` is committed so Rust-only installs keep
-working, but only by CI: after a change to `web/` lands on main, the `web-dist` workflow rebuilds
+working. Only CI updates it: after a change to `web/` lands on main, the `web-dist` workflow rebuilds
 it and commits the result. Pull requests change `web/` only and leave `web-dist/` alone (CI fails
 otherwise); run `pnpm build` in `web/` to try a change locally, then `git checkout
 crates/server/web-dist` before committing. Tagging
@@ -255,7 +256,7 @@ crates/server/web-dist` before committing. Tagging
 
 ## Layout
 
-- `crates/core`: shared models, the agents and the mapping of each one's output to events, redaction.
+- `crates/core`: shared models, agents, mapping of each agent's output to events, and redaction.
 - `crates/server`: Axum control plane, Postgres via sqlx migrations; embeds the web app.
 - `crates/worker`: machine detection, control-plane client, process-group executor, worker loop.
 - `crates/cli`: the `sidefleet` binary.
@@ -265,12 +266,12 @@ crates/server/web-dist` before committing. Tagging
 
 ## Known limitations
 
-- **This drives your own agent sign-ins, headless** (Claude, ChatGPT, or the API keys opencode
+- **This runs agents headlessly using your own sign-ins** (Claude, ChatGPT, or the API keys opencode
   uses). Usage counts against those accounts' plans or bills. Check the terms that apply to your
   subscriptions for automated or unattended use, and never share or resell access to an account
   through it.
-- Self-hosted, there is a single shared developer key and no TLS of its own. Keep that control
-  plane on a private network (LAN or Tailscale), or run the hosted mode behind TLS
+- In self-hosted mode, the control plane has a single shared developer key and no built-in TLS.
+  Keep that control plane on a private network (LAN or Tailscale), or run the hosted mode behind TLS
   ([HOSTED.md](HOSTED.md)).
 - The control plane runs as one process: live events fan out in memory, so it does not scale out
   to several instances yet.

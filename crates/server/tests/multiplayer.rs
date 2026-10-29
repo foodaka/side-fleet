@@ -183,6 +183,10 @@ async fn machines_only_run_their_owners_tasks() {
         .map(|w| (w["id"].as_str().unwrap(), w["mine"].as_bool().unwrap(), w["owner"]["login"].as_str().unwrap()))
         .collect();
     assert!(mine.contains(&("alice-mac", false, "alice")) && mine.contains(&("bob-linux", true, "bob")), "{mine:?}");
+    // Bob sees Alice's machine, but not which repos it has checked out.
+    let repos = |id: &str| workers.as_array().unwrap().iter().find(|w| w["id"] == id).unwrap()["capabilities"]["repos"].as_array().unwrap().len();
+    assert_eq!(repos("alice-mac"), 0, "{workers}");
+    assert!(repos("bob-linux") > 0, "{workers}");
 
     // Bob's task never goes to Alice's machine, even when she asks first.
     let (s, v) = bob.task("/v1/runs", "Bob's task", json!({})).await;

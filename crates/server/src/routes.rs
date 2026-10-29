@@ -750,7 +750,12 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
         let mut v = serde_json::to_value(&w).unwrap_or(json!({}));
         v["online"] = json!(online);
         let owner = owners.get(&w.id).cloned().flatten();
-        v["mine"] = json!(owner.as_ref().map(|(id, _)| *id) == caller.user_id());
+        let owner_id = owner.as_ref().map(|(id, _)| *id);
+        v["mine"] = json!(owner_id == caller.user_id());
+        // Which repos a teammate's machine has checked out is their business; it only runs their tasks.
+        if owner_id.is_some() && owner_id != caller.user_id() {
+            v["capabilities"]["repos"] = json!([]);
+        }
         v["owner"] = owner.map_or(json!(null), |(id, login)| json!({ "id": id, "login": login }));
         // Agents whose usage limit this machine hit: agent -> when it resets.
         v["limited_until"] = json!(limits.remove(&w.id).unwrap_or_default());

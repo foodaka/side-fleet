@@ -8,13 +8,20 @@ export const AGENTS: { id: AgentId; name: string; hint: string }[] = [
 
 export const agentName = (id: string | null | undefined) => AGENTS.find((a) => a.id === id)?.name ?? 'Claude Code';
 
-/** Claude Code's model aliases, each the latest version the machine's Claude Code knows; Codex and opencode offer whatever each machine reports. */
+/** Claude Code's model aliases, each the latest version the machine's Claude Code knows; Codex and opencode offer whatever each machine reports.
+ * `version` is what each alias currently resolves to, shown in the picker: bump it when a new model ships. */
 export const MODELS = [
-	{ id: 'sonnet', name: 'Sonnet', hint: 'Balanced' },
-	{ id: 'opus', name: 'Opus', hint: 'Most capable' },
-	{ id: 'fable', name: 'Fable', hint: 'Newest family' },
-	{ id: 'haiku', name: 'Haiku', hint: 'Fastest' }
+	{ id: 'sonnet', name: 'Sonnet', version: '5.5', hint: 'Balanced' },
+	{ id: 'opus', name: 'Opus', version: '5.5', hint: 'Most capable' },
+	{ id: 'fable', name: 'Fable', version: '5.1', hint: 'Newest family' },
+	{ id: 'haiku', name: 'Haiku', version: '5.5', hint: 'Fastest' }
 ] as const;
+
+/** A Claude alias as the picker shows it, `Opus 5.5`; anything else as {@link modelName} reads it. */
+export function pickerModelName(id: string) {
+	const m = MODELS.find((x) => x.id === id);
+	return m ? `${m.name} ${m.version}` : modelName(id);
+}
 
 /** A full Claude model id (`claude-sonnet-5-5`): what Claude Code reports running, and what tasks from before the aliases stored. */
 const claudeId = /^claude-[a-z0-9-]+$/;

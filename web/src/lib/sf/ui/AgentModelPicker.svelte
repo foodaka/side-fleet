@@ -4,7 +4,7 @@
 	// then the reasoning effort, for the agents that take one.
 	import * as Select from '#lib/components/ui/select';
 	import GaugeIcon from '@lucide/svelte/icons/gauge';
-	import { AGENTS, EFFORTS, MODELS, agentName, effortName, effortValid, modelName, modelValid } from '../format';
+	import { AGENTS, EFFORTS, MODELS, agentName, effortName, effortValid, modelValid, pickerModelName } from '../format';
 	import type { AgentId } from '../types';
 	import AgentIcon from './AgentIcon.svelte';
 
@@ -74,9 +74,9 @@
 
 {#if agent === 'claude'}
 	<Select.Root type="single" value={model} onValueChange={pickModel}>
-		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Model">{modelName(model)}</Select.Trigger>
+		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Model">{pickerModelName(model)}</Select.Trigger>
 		<Select.Content>
-			{#each MODELS as m (m.id)}<Select.Item value={m.id} label={m.name}><span class="flex flex-col"><span>{m.name}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
+			{#each MODELS as m (m.id)}<Select.Item value={m.id} label={pickerModelName(m.id)}><span class="flex flex-col"><span>{pickerModelName(m.id)}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
 		</Select.Content>
 	</Select.Root>
 {:else if agent === 'codex' && (models.length || !model)}

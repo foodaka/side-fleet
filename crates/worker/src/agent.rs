@@ -24,6 +24,11 @@ fn untrack(pid: i32) {
     LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid);
 }
 
+/// Agents running right now (each the leader of its process group).
+pub fn live_agents() -> Vec<i32> {
+    LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Kill every agent this process started. Called on Ctrl-C / SIGTERM.
 pub fn kill_all_agents() -> usize {
     let pids: Vec<i32> = LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).clone();

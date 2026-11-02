@@ -96,10 +96,15 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let parallel = cfg.parallel.max(1);
         let active_count = active_count.clone();
         let active = active.clone();
+        // Woken early after stopping a dev server, so the page sees it gone sooner.
+        let wake = Arc::new(tokio::sync::Notify::new());
         tokio::spawn(async move {
             let mut agents_checked = Instant::now();
             loop {
-                tokio::time::sleep(interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = wake.notified() => {}
+                }
                 // Agents installed after start-up show up without a restart.
                 if agents_checked.elapsed() >= AGENT_RECHECK {
                     agents_checked = Instant::now();
@@ -119,8 +124,13 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 }
                 let snapshot = caps.lock().await.clone();
                 let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
-                match client.heartbeat(&snapshot, &ids).await {
+                let wts = cfg2.worktrees_dir.clone();
+                let dev_servers = tokio::task::spawn_blocking(move || crate::devservers::scan(&wts)).await.ok();
+                match client.heartbeat(&snapshot, &ids, dev_servers).await {
                     Ok(resp) => {
+                        if !resp.stop_dev_servers.is_empty() {
+                            tokio::spawn(stop_dev_servers(cfg2.worktrees_dir.clone(), resp.stop_dev_servers, wake.clone()));
+                        }
                         if !resp.check_prs.is_empty() {
                             tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
                         }
@@ -914,6 +924,17 @@ async fn check_prs(client: ControlClient, dir: PathBuf, checks: Vec<PrCheck>) {
             tracing::warn!(error = %e, "reporting pull requests failed");
         }
     }
+}
+
+/// Stop the dev servers someone asked to stop from the page, then heartbeat again.
+async fn stop_dev_servers(dir: PathBuf, stops: Vec<sidefleet_core::DevServerStop>, wake: Arc<tokio::sync::Notify>) {
+    for s in &stops {
+        match crate::devservers::stop(&dir, s).await {
+            Ok(how) => tracing::info!(pid = s.pid, thread = %s.thread, ?how, "stopped a dev server"),
+            Err(e) => tracing::warn!(pid = s.pid, thread = %s.thread, error = %e, "not stopping a dev server"),
+        }
+    }
+    wake.notify_one();
 }
 
 async fn report_finish(client: &ControlClient, run_id: Uuid, status: RunStatus, result: serde_json::Value, usage_limit: Option<sidefleet_core::UsageLimit>) {

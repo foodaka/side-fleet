@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 sidefleet-core.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 gethostname.workspace = true
 nix.workspace = true
 reqwest.workspace = true
@@ -25,7 +26,6 @@ sysinfo.workspace = true
 
 [dev-dependencies]
 sidefleet-server.workspace = true
-chrono.workspace = true
 futures.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true

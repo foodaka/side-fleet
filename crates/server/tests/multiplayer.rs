@@ -481,3 +481,70 @@ async fn a_task_whose_machine_was_forgotten_still_opens_its_pr_on_your_machine()
 
     env.teardown().await;
 }
+
+/// A heartbeat from `m` reporting `servers` (None: an older worker that doesn't look).
+async fn heartbeat_with(m: &Machine, servers: Option<Value>) -> Value {
+    let mut body = json!({"id": m.id, "capabilities": {"repos": [{"name": "proj", "path": "/tmp/proj", "id": "github.com/acme/proj"}]}, "active_runs": []});
+    if let Some(s) = servers {
+        body["dev_servers"] = s;
+    }
+    let (s, v) = m.call("/v1/worker/heartbeat", body).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v
+}
+
+#[tokio::test]
+async fn dev_servers_a_task_left_running_show_on_its_thread_and_its_owner_stops_them() {
+    let env = TestEnv::start_hosted().await;
+    let (alice, bob, alice_m, bob_m) = team(&env).await;
+    let (_, v) = alice.task("/v1/runs", "start the app", json!({})).await;
+    let run = v["id"].as_str().unwrap().to_string();
+    assert_eq!(alice_m.claim().await.unwrap()["id"], run.as_str());
+    alice_m.finish(&run, json!({"result": "it's on :3000"})).await;
+
+    let started = "2026-11-02T10:00:00Z";
+    let server = json!({"thread": run, "pid": 4242, "ports": [3000, 3001], "command": "npm run dev", "started_at": started});
+    let report = json!([server, {"thread": uuid::Uuid::new_v4(), "pid": 1, "ports": [22], "command": "sshd"}]);
+    heartbeat_with(&alice_m, Some(report.clone())).await;
+    // Bob's machine can't put servers on Alice's thread, nor clear hers.
+    heartbeat_with(&bob_m, Some(json!([{"thread": run, "pid": 6666, "ports": [6666], "command": "nc -l 6666"}]))).await;
+
+    let servers = format!("/v1/runs/{run}/dev-servers");
+    let stop_path = format!("/v1/runs/{run}/dev-servers/stop");
+    let (s, l) = alice.call(Method::GET, &servers, None).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    assert_eq!(l.as_array().unwrap().len(), 1, "{l}");
+    assert_eq!(l[0]["pid"], 4242);
+    assert_eq!(l[0]["ports"], json!([3000, 3001]));
+    assert_eq!(l[0]["command"], "npm run dev");
+    assert_eq!(l[0]["worker_id"], "alice-mac");
+    assert_eq!(l[0]["stopping"], false);
+    assert_eq!(bob.call(Method::GET, &servers, None).await.1, l, "teammates see the thread's servers");
+
+    // Only Alice (or an owner) stops what runs on her machine.
+    assert_eq!(bob.call(Method::POST, &stop_path, Some(json!({"pid": 4242}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(alice.call(Method::POST, &stop_path, Some(json!({"pid": 9999}))).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(heartbeat_with(&alice_m, Some(report.clone())).await.get("stop_dev_servers"), None, "nothing to stop yet");
+    let (s, l) = alice.call(Method::POST, &stop_path, Some(json!({"pid": 4242}))).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    assert_eq!(l[0]["stopping"], true);
+
+    // Her machine is told with its next heartbeat; Bob's isn't.
+    let hb = heartbeat_with(&alice_m, Some(report.clone())).await;
+    assert_eq!(hb["stop_dev_servers"], json!([{"thread": run, "pid": 4242, "started_at": started}]));
+    assert_eq!(heartbeat_with(&bob_m, Some(json!([]))).await.get("stop_dev_servers"), None);
+    // An older worker's heartbeat (no report) changes nothing and gets no stops.
+    assert_eq!(heartbeat_with(&alice_m, None).await.get("stop_dev_servers"), None);
+    assert_eq!(alice.call(Method::GET, &servers, None).await.1.as_array().unwrap().len(), 1);
+
+    // A later process with the same pid is another server: the stop doesn't carry over.
+    let reused = json!([{"thread": run, "pid": 4242, "ports": [3000], "command": "npm run dev", "started_at": "2026-11-02T11:00:00Z"}]);
+    assert_eq!(heartbeat_with(&alice_m, Some(reused)).await.get("stop_dev_servers"), None);
+    assert_eq!(alice.call(Method::GET, &servers, None).await.1[0]["stopping"], false);
+
+    // Gone from the report, gone from the page.
+    heartbeat_with(&alice_m, Some(json!([]))).await;
+    assert_eq!(alice.call(Method::GET, &servers, None).await.1, json!([]));
+
+    env.teardown().await;
+}

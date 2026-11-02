@@ -164,6 +164,37 @@ pub struct PrReport {
     pub pr: PullRequest,
 }
 
+/// A server a task's agent left running: a process listening on TCP whose working
+/// directory is inside that task's worktree on the machine. Reported with each heartbeat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DevServer {
+    /// The thread (root run id) whose worktree the process runs in.
+    pub thread: Uuid,
+    pub pid: u32,
+    /// The TCP ports it listens on.
+    pub ports: Vec<u16>,
+    /// Its command line, redacted and shortened.
+    pub command: String,
+    /// When the process started, so a stop request never hits a later process with the same pid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+/// A dev server someone asked to stop (sent to its machine with the heartbeat response).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DevServerStop {
+    pub thread: Uuid,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+/// `POST /v1/runs/{id}/dev-servers/stop`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopDevServerRequest {
+    pub pid: u32,
+}
+
 pub fn default_kind() -> String {
     "agent".into()
 }
@@ -640,6 +671,10 @@ pub struct HeartbeatRequest {
     pub capabilities: Capabilities,
     #[serde(default)]
     pub active_runs: Vec<Uuid>,
+    /// Servers left running in this machine's task worktrees: the full set, replacing the
+    /// last report. None from older workers, which don't look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_servers: Option<Vec<DevServer>>,
 }
 
 /// Returned on every heartbeat.
@@ -654,6 +689,9 @@ pub struct HeartbeatResponse {
     /// Open pull requests this worker opened, due to be checked for a merge or close.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_prs: Vec<PrCheck>,
+    /// Dev servers someone asked to stop from the page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_dev_servers: Vec<DevServerStop>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,6 +7,7 @@ pub mod auth;
 pub mod chat_updates;
 pub mod claims;
 pub mod db;
+pub mod devservers;
 pub mod events;
 pub mod fork;
 pub mod inbox;

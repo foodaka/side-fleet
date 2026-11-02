@@ -70,6 +70,8 @@ export interface Turn {
 		cost: number | null;
 		/** Tokens used, for agents that report no cost (Codex). */
 		tokens: number | null;
+		/** How full the agent's context window was at the end; null when the agent didn't say. */
+		context: Context | null;
 	} | null;
 	lastText: string;
 	/** The text the agent is writing right now, until its final message replaces it. Never stored. */
@@ -79,6 +81,12 @@ export interface Turn {
 	diff: { turn: DiffSet; total: DiffSet | null } | null;
 	/** Snapshots (commits) of the files before and after this turn, to restore to or fork from. */
 	snapshot: { before: string; after: string } | null;
+}
+
+/** Tokens in the agent's context window, and the window's size when known. */
+export interface Context {
+	used: number;
+	limit: number | null;
 }
 
 function newTurn(run: Run): Turn {
@@ -122,6 +130,14 @@ export class Thread {
 	changes = $derived.by(() => {
 		const d = this.turns.findLast((t) => t.diff)?.diff;
 		return d ? (d.total ?? d.turn) : null;
+	});
+	/**
+	 * How full the session's context is, after the latest message its agent finished
+	 * (one still running only adds to it). Null before any; `unknown` when it didn't say.
+	 */
+	context = $derived.by((): { agent: AgentId; context: Context | null } | null => {
+		const t = this.turns.findLast((t) => t.run.kind === 'agent' && t.result);
+		return t ? { agent: t.run.agent, context: t.result!.context } : null;
 	});
 
 	async load(id: string) {
@@ -378,7 +394,8 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				durationMs: p.duration_ms ?? null,
 				turns: p.num_turns ?? null,
 				cost: p.total_cost_usd ?? null,
-				tokens: tokenCount(p.usage)
+				tokens: tokenCount(p.usage),
+				context: contextOf(p.context)
 			};
 			t.activity = null;
 			break;
@@ -409,6 +426,13 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			t.activity = null;
 			break;
 	}
+}
+
+function contextOf(c: Record<string, any> | null | undefined): Context | null {
+	const used = Number(c?.used);
+	if (!c || !Number.isFinite(used) || used <= 0) return null;
+	const limit = Number(c.limit);
+	return { used, limit: Number.isFinite(limit) && limit > 0 ? limit : null };
 }
 
 /** Input plus output tokens from Codex or opencode usage. */

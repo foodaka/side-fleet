@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use crate::agent::relative_path;
 use crate::redact::{redact, summarize_tool_input};
-use crate::stream::{truncate_bytes, MappedLine, TOOL_RESULT_MAX_BYTES};
+use crate::stream::{context_payload, truncate_bytes, MappedLine, TOOL_RESULT_MAX_BYTES};
 use crate::NewEvent;
 use serde_json::{json, Map, Value};
 
@@ -33,6 +33,8 @@ pub struct OpencodeStream {
     cost: f64,
     steps: u32,
     tokens: Map<String, Value>,
+    /// Tokens in the context window after the latest step.
+    context_used: Option<u64>,
     finished: bool,
 }
 
@@ -48,6 +50,7 @@ impl OpencodeStream {
             cost: 0.0,
             steps: 0,
             tokens: Map::new(),
+            context_used: None,
             finished: false,
         }
     }
@@ -95,6 +98,7 @@ impl OpencodeStream {
                 self.cost += part.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
                 if let Some(Value::Object(t)) = part.get("tokens") {
                     add_tokens(&mut self.tokens, t);
+                    self.context_used = Some(context_tokens(t));
                 }
             }
             "error" => {
@@ -189,6 +193,8 @@ impl OpencodeStream {
                 "total_cost_usd": if self.steps > 0 { json!((self.cost * 1e6).round() / 1e6) } else { Value::Null },
                 "usage": Value::Object(self.tokens.clone()),
                 "session_id": self.session_id,
+                // opencode does not say how big the model's window is.
+                "context": self.context_used.map(|used| context_payload(used, None)),
             }),
         }]
     }
@@ -212,6 +218,14 @@ fn add_tokens(acc: &mut Map<String, Value>, t: &Map<String, Value>) {
             _ => {}
         }
     }
+}
+
+/// Tokens in the context window after a step, counted the way opencode's own sidebar
+/// does: what it read (`input` excludes the cache), wrote and reasoned.
+fn context_tokens(t: &Map<String, Value>) -> u64 {
+    let n = |v: Option<&Value>| v.and_then(Value::as_u64).unwrap_or(0);
+    let cache = t.get("cache");
+    n(t.get("input")) + n(t.get("output")) + n(t.get("reasoning")) + n(cache.and_then(|c| c.get("read"))) + n(cache.and_then(|c| c.get("write")))
 }
 
 /// `{"name":"APIError","data":{"message":"Rate limit exceeded"}}` -> `Rate limit exceeded`.
@@ -271,6 +285,7 @@ mod tests {
         assert_eq!(r["total_cost_usd"], 0.0153);
         assert_eq!(r["usage"]["input"], 27000);
         assert_eq!(r["usage"]["cache"]["read"], 20000);
+        assert_eq!(r["context"], json!({"used": 15000 + 400 + 20 + 12000, "limit": null}), "the last step's, not the sum");
     }
 
     #[test]

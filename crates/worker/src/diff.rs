@@ -345,6 +345,8 @@ async fn git(cwd: &Path, args: &[&str], env: &[(&str, String)]) -> Result<String
         .args(args)
         .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
         .stdin(std::process::Stdio::null())
+        // A caller that gives up on a slow git (a stop, a time limit) ends it too.
+        .kill_on_drop(true)
         .output()
         .await
         .context("running git")?;

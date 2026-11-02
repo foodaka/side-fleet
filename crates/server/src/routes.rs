@@ -4,11 +4,12 @@
 
 use std::convert::Infallible;
 use std::time::Duration;
+use chrono::{DateTime, Utc};
 
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
+    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -66,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/messages", post(follow_up).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/runs/{id}/events", get(run_events_sse))
         .route("/v1/runs/{id}/stop", post(stop_run))
+        .route("/v1/runs/{id}/start-now", post(start_now))
         .route("/v1/runs/{id}/restore", post(restore_run))
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/pr", post(open_pr))
@@ -302,6 +304,11 @@ async fn start_run(
         Some(i) if ISOLATION_MODES.contains(&i) => i,
         Some(_) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("isolation must be one of {}", ISOLATION_MODES.join(", ")))),
     };
+    let start_at = check_start_at(req.start_at)?;
+    if room.is_some() && start_at.is_some() {
+        // Its brief says what teammates are doing now, which would be stale by then.
+        return Err(ApiError(StatusCode::BAD_REQUEST, "a room's tasks start right away; start_at is for tasks outside rooms".into()));
+    }
     let worker = own_machine(state, caller, req.worker_id.as_deref()).await?;
     if room.is_some() && isolation != "worktree" {
         return Err(ApiError(StatusCode::BAD_REQUEST, "a room's tasks work in their own worktree, so they can be merged into the room branch".into()));
@@ -325,13 +332,28 @@ async fn start_run(
         room_id: room.as_ref().map(|r| r.id),
         context: brief.as_deref(),
         resume_from_branch: from_branch.as_deref(),
+        start_at,
     };
     check_run_limit(state, caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
     tag_run(state, caller, run.id).await?;
     state.events.publish(ev);
-    tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, "run queued");
+    tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, start_at = ?run.start_at, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+}
+
+/// A start time for a new task: in the future and at most `MAX_START_DELAY_DAYS`
+/// ahead. One already past (a slow phone, a clock a little off) means now.
+fn check_start_at(at: Option<DateTime<Utc>>) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(at) = at else { return Ok(None) };
+    let now = Utc::now();
+    if at <= now {
+        return Ok(None);
+    }
+    if at > now + chrono::Duration::days(MAX_START_DELAY_DAYS) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("start_at can be at most {MAX_START_DELAY_DAYS} days ahead")));
+    }
+    Ok(Some(at))
 }
 
 fn parse_agent(agent: Option<&str>) -> Result<Agent, ApiError> {
@@ -719,6 +741,21 @@ async fn stop_run(
         state.events.publish(ev);
     }
     tracing::info!(run_id = %id, status = run.status.as_str(), "stop requested");
+    Ok(Json(run))
+}
+
+/// Start a task scheduled for later right away.
+async fn start_now(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Run>, ApiError> {
+    own_thread(&state, &caller, id).await?;
+    let (run, ev) = db::start_now(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
+    if let Some(ev) = ev {
+        state.events.publish(ev);
+        tracing::info!(run_id = %id, "scheduled run started early");
+    }
     Ok(Json(run))
 }
 

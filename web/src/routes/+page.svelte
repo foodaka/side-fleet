@@ -12,7 +12,7 @@
 	import { api } from '#lib/sf/api';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { prefs } from '#lib/sf/prefs.svelte';
-	import { AGENTS, MODELS, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, rel, duration, repoKey, repoLabel } from '#lib/sf/format';
+	import { AGENTS, MODELS, permsFor, agentName, defaultModel, effortValid, hasAgent, machineModels, modelValid, rel, duration, repoKey, repoLabel, startTime } from '#lib/sf/format';
 	import type { AgentId } from '#lib/sf/types';
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
@@ -20,6 +20,7 @@
 	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
+	import StartAtPicker from '#lib/sf/ui/StartAtPicker.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 
 	const PICK = '__pick__';
@@ -51,6 +52,8 @@
 	let repo = $state(load('sidefleet_repo'));
 	// Off by default and not remembered: it pushes the task's branch to origin.
 	let failover = $state(false);
+	// Start later (ISO time); '' starts now. Not remembered: each task picks its own.
+	let startAt = $state('');
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
@@ -132,9 +135,10 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload() })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload(), start_at: startAt || undefined })
 			});
 			task = '';
+			startAt = '';
 			attachments.clear();
 			void fleet.refresh();
 			await goto('#/runs/' + r.id);
@@ -271,6 +275,7 @@
 						oniso={(v) => (iso = v)}
 						bind:failover
 					/>
+					<StartAtPicker bind:value={startAt} />
 					</div>
 					<span class="flex shrink-0 items-center gap-2">
 						{#if task.length > 2000}<span class="tnum text-xs text-faint">{task.length.toLocaleString()} characters</span>{/if}
@@ -296,6 +301,7 @@
 					{:else}
 						Runs with {agentName(agent)} on <span class="text-foreground">{target.display_name}</span>{#if warning}, <span class="text-err-ink">{warning}</span>{/if}
 					{/if}{effectivePerm === 'bypassPermissions' ? ' with full access' : ''}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
+					{#if startAt}<br />Starts <span class="text-foreground">{startTime(startAt, fleet.now)}</span>; until then no machine picks it up, and you can start it early or cancel it from its page.{/if}
 					{#if iso === 'worktree' && failover}<br />If that machine drops, the task moves to another one; its branch is pushed to origin as it goes.{/if}
 				{/if}
 			</p>

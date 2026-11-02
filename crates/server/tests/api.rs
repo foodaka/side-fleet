@@ -469,6 +469,38 @@ async fn stop_while_running_is_signalled_to_the_worker() {
 }
 
 #[tokio::test]
+async fn a_stop_the_worker_never_acts_on_is_finished_here() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let (_, body) = api.create_run("long task", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", id, json!([{"kind": "agent_init", "payload": {"model": "m", "session_id": "sess"}}])).await;
+    // The thread's next message waits behind the running turn.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/messages")).json(&json!({"task": "and then?"})).send().await.unwrap();
+    let next: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+
+    // The worker is still heart-beating but is stuck: it never finishes.
+    api.stop(id).await;
+    let stop_unresponsive = || sidefleet_server::db::stop_unresponsive_runs(&env.pool, 60);
+    assert!(stop_unresponsive().await.unwrap().is_empty(), "the worker gets a minute to act on it");
+    assert_eq!(api.get_run(id).await.status, RunStatus::Running);
+    assert!(api.claim("w", &["r"]).await.is_none());
+
+    sqlx::query("UPDATE runs SET stop_requested_at = now() - interval '2 minutes' WHERE id = $1").bind(id).execute(&env.pool).await.unwrap();
+    assert_eq!(stop_unresponsive().await.unwrap().len(), 1);
+    assert_eq!(api.get_run(id).await.status, RunStatus::Stopped);
+    assert_eq!(api.claim("w", &["r"]).await.unwrap().id, next);
+
+    // When the worker comes unstuck, its finish changes nothing.
+    api.finish("w", id, "succeeded", json!({})).await;
+    assert_eq!(api.get_run(id).await.status, RunStatus::Stopped);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn control_plane_redacts_secrets_in_stored_payloads() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);
@@ -1928,4 +1960,71 @@ async fn every_response_carries_a_request_id_for_the_logs() {
     // A caller's own id is kept, so a client can tie its logs to ours.
     let r = api.dev(reqwest::Method::GET, "/v1/workers").header("x-request-id", "abc-123").send().await.unwrap();
     assert_eq!(r.headers().get("x-request-id").unwrap(), "abc-123");
+}
+
+// ---- start later ----
+
+#[tokio::test]
+async fn a_task_scheduled_for_later_waits_for_its_time_or_start_now() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let create = |start_at: Value| {
+        api.dev(reqwest::Method::POST, "/v1/runs")
+            .json(&json!({"task": "nightly cleanup", "model": "claude-haiku-5-5", "repo": "r", "start_at": start_at}))
+            .send()
+    };
+    let id_of = |v: Value| -> Uuid { v["id"].as_str().unwrap().parse().unwrap() };
+
+    // Too far ahead, or not a time.
+    let far = chrono::Utc::now() + chrono::Duration::days(31);
+    assert_eq!(create(json!(far)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(create(json!("tomorrow")).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A time already past (a slow phone) starts now.
+    let r = create(json!(chrono::Utc::now() - chrono::Duration::seconds(5))).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let past = id_of(r.json().await.unwrap());
+    assert!(api.get_run(past).await.start_at.is_none());
+    assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, past);
+    api.finish("w1", past, "succeeded", json!({})).await;
+
+    // Tomorrow: no machine takes it, and the list and summary say when it starts.
+    let tomorrow = chrono::Utc::now() + chrono::Duration::days(1);
+    let r = create(json!(tomorrow)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let later = id_of(r.json().await.unwrap());
+    let run = api.get_run(later).await;
+    assert_eq!(run.status, RunStatus::Queued);
+    assert_eq!(run.start_at.map(|t| t.timestamp()), Some(tomorrow.timestamp()));
+    assert!(api.claim("w1", &["r"]).await.is_none(), "a scheduled task was claimed early");
+    let list: Vec<RunSummary> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    assert!(list.iter().any(|s| s.run.id == later && s.run.start_at.is_some()));
+    let summary: Value = api.dev(reqwest::Method::GET, &format!("/v1/runs/{later}/summary")).send().await.unwrap().json().await.unwrap();
+    assert!(summary["start_at"].is_string());
+
+    // Start now: claimable at once.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{later}/start-now")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(r.json::<Run>().await.unwrap().start_at.is_none());
+    assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, later);
+    // Once it runs, start-now changes nothing.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{later}/start-now")).send().await.unwrap();
+    assert_eq!(r.json::<Run>().await.unwrap().status, RunStatus::Running);
+    api.finish("w1", later, "succeeded", json!({})).await;
+
+    // In two seconds: claimed once the time comes.
+    let r = create(json!(chrono::Utc::now() + chrono::Duration::seconds(2))).await.unwrap();
+    let soon = id_of(r.json().await.unwrap());
+    assert!(api.claim("w1", &["r"]).await.is_none());
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, soon);
+    api.finish("w1", soon, "succeeded", json!({})).await;
+
+    // Stop cancels one that hasn't started.
+    let cancelled = id_of(create(json!(tomorrow)).await.unwrap().json().await.unwrap());
+    assert_eq!(api.stop(cancelled).await.status, RunStatus::Stopped);
+    assert!(api.claim("w1", &["r"]).await.is_none());
+
+    env.teardown().await;
 }

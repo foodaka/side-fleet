@@ -199,8 +199,9 @@ pub async fn connect_and_migrate(database_url: &str) -> anyhow::Result<PgPool> {
     Ok(pool)
 }
 
-/// Marks runs whose worker stopped heart-beating as failed, so the UI does not
-/// show them as running forever. Runs every 15s.
+/// Marks runs whose worker stopped heart-beating as failed, and stops runs whose
+/// worker ignored a stop for a minute, so the UI does not show them as running
+/// forever. Runs every 15s.
 pub async fn reaper(state: AppState) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
@@ -211,6 +212,15 @@ pub async fn reaper(state: AppState) {
                 }
             }
             Err(e) => tracing::warn!(error = %e, "reaper failed"),
+        }
+        match db::stop_unresponsive_runs(&state.pool, 60).await {
+            Ok(stopped) => {
+                for ev in stopped {
+                    tracing::warn!(run_id = %ev.run_id, "worker did not act on a stop; stopped it here");
+                    state.events.publish(ev);
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "stopping unresponsive runs failed"),
         }
     }
 }

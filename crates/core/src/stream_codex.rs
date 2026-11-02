@@ -8,16 +8,22 @@
 //! * `{"type":"turn.completed","usage":{...}}` / `{"type":"turn.failed","error":{"message":...}}`
 //! * `{"type":"error","message":...}`: a stream error (often a retry)
 //!
+//! `exec --json` says nothing about the context window, so the `result`'s `context`
+//! comes from the session's rollout file (`$CODEX_HOME/sessions/.../rollout-*-<thread
+//! id>.jsonl`), whose `token_count` events carry the latest call's usage and the window.
+//!
 //! Tool calls become the same `tool_use` / `tool_result` events Claude Code
 //! produces, named like Claude Code's tools (Bash, Edit, ...) so the page
 //! renders them the same way.
 
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::agent::relative_path;
 use crate::redact::{redact, redact_json, summarize_tool_input};
-use crate::stream::{truncate_bytes, MappedLine, TOOL_RESULT_MAX_BYTES};
+use crate::stream::{context_payload, truncate_bytes, MappedLine, TOOL_RESULT_MAX_BYTES};
 use crate::NewEvent;
 use serde_json::{json, Value};
 
@@ -29,6 +35,8 @@ pub struct CodexStream {
     last_text: String,
     announced: HashSet<String>,
     turns: u32,
+    /// Where Codex keeps its rollout files; None when there is no home directory.
+    sessions_dir: Option<PathBuf>,
 }
 
 impl CodexStream {
@@ -41,7 +49,17 @@ impl CodexStream {
             last_text: String::new(),
             announced: HashSet::new(),
             turns: 0,
+            sessions_dir: std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+                .map(|d| d.join("sessions")),
         }
+    }
+
+    #[cfg(test)]
+    fn with_sessions_dir(mut self, dir: &Path) -> Self {
+        self.sessions_dir = Some(dir.to_path_buf());
+        self
     }
 
     pub fn map_line(&mut self, line: &str) -> MappedLine {
@@ -111,6 +129,7 @@ impl CodexStream {
                 "total_cost_usd": Value::Null,
                 "usage": usage.cloned().unwrap_or(Value::Null),
                 "session_id": self.session_id,
+                "context": if is_error { None } else { self.context() },
             }),
         }
     }
@@ -221,6 +240,52 @@ impl CodexStream {
     }
 }
 
+impl CodexStream {
+    /// How full the context window is, from the session's latest `token_count`.
+    fn context(&self) -> Option<Value> {
+        let file = find_rollout(self.sessions_dir.as_deref()?, self.session_id.as_deref()?)?;
+        let info = last_token_count(&file)?;
+        let used = info.pointer("/last_token_usage/total_tokens").and_then(Value::as_u64)?;
+        Some(context_payload(used, info.get("model_context_window").and_then(Value::as_u64)))
+    }
+}
+
+/// `sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`, newest days first (a
+/// resumed session keeps the file of the day it started).
+fn find_rollout(sessions: &Path, thread_id: &str) -> Option<PathBuf> {
+    let suffix = format!("-{thread_id}.jsonl");
+    let newest_first = |dir: &Path| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        v
+    };
+    for year in newest_first(sessions) {
+        for month in newest_first(&year) {
+            for day in newest_first(&month) {
+                let found = newest_first(&day).into_iter().find(|f| f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)));
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `info` of the last `token_count` event in a rollout, read from its tail.
+fn last_token_count(file: &Path) -> Option<Value> {
+    const TAIL: u64 = 1 << 20;
+    let mut f = std::fs::File::open(file).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    String::from_utf8_lossy(&buf).lines().rev().filter(|l| l.contains("\"token_count\"")).find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        (v.pointer("/payload/type")? == "token_count").then(|| v.pointer("/payload/info").filter(|i| !i.is_null()).cloned())?
+    })
+}
+
 /// Codex's usage with the keys renamed: names containing "token" are redacted as secrets.
 fn usage(u: &Value) -> Value {
     let n = |k: &str| u.get(k).cloned().unwrap_or(Value::Null);
@@ -311,7 +376,7 @@ mod tests {
     use super::*;
 
     fn run(lines: &str) -> Vec<NewEvent> {
-        let mut s = CodexStream::new("gpt-6-luna", "/home/u/code/app");
+        let mut s = CodexStream::new("gpt-6-luna", "/home/u/code/app").with_sessions_dir(Path::new("/nonexistent/sessions"));
         lines
             .lines()
             .flat_map(|l| match s.map_line(l) {
@@ -343,6 +408,51 @@ mod tests {
         assert_eq!(r["session_id"], "01a15d87-b42a-7e40-a8ef-059317c5b5d9");
         assert_eq!(r["usage"]["output"], 223);
         assert_eq!(r["usage"], crate::redact::redact_json(&r["usage"]), "usage survives the control plane's redaction");
+    }
+
+    #[test]
+    fn context_comes_from_the_sessions_rollout() {
+        let tid = "01a19d9f-e5a3-72d0-9732-6e6c2575e702";
+        let sessions = std::env::temp_dir().join(format!("sf-codex-{}", uuid::Uuid::new_v4().simple()));
+        let day = sessions.join("2026/11/02");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(sessions.join("2026/10/30")).unwrap();
+        // Real lines from codex-cli 0.158 (the last call of a turn read 12,757 tokens).
+        let count = |input: u64, total: u64| {
+            format!(
+                r#"{{"timestamp":"2026-11-02T18:57:55.491Z","ordinal":26,"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":37678,"cached_input_tokens":25015,"cache_write_input_tokens":12654,"output_tokens":175,"reasoning_output_tokens":93,"total_tokens":37853}},"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":12565,"cache_write_input_tokens":89,"output_tokens":100,"reasoning_output_tokens":93,"total_tokens":{total}}},"model_context_window":258400}},"rate_limits":null}}}}"#
+            )
+        };
+        let rollout = [
+            r#"{"timestamp":"2026-11-02T18:57:44.000Z","type":"session_meta","payload":{"id":"x"}}"#.to_string(),
+            count(12568, 12595),
+            r#"{"timestamp":"2026-11-02T18:57:50.876Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":null}}"#.to_string(),
+            count(12657, 12757),
+            r#"{"timestamp":"2026-11-02T18:57:55.600Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#.to_string(),
+        ];
+        std::fs::write(day.join(format!("rollout-2026-11-02T18-57-44-{tid}.jsonl")), rollout.join("\n")).unwrap();
+        std::fs::write(day.join("rollout-2026-11-02T18-50-00-other.jsonl"), count(1, 1)).unwrap();
+
+        let mut s = CodexStream::new("", "/home/u/app").with_sessions_dir(&sessions);
+        let lines = format!(
+            "{}\n{}",
+            format_args!(r#"{{"type":"thread.started","thread_id":"{tid}"}}"#),
+            r#"{"type":"turn.completed","usage":{"input_tokens":37678,"cached_input_tokens":25015,"cache_write_input_tokens":12654,"output_tokens":175,"reasoning_output_tokens":93}}"#
+        );
+        let e: Vec<NewEvent> = lines.lines().flat_map(|l| match s.map_line(l) {
+            MappedLine::Events(e) => e,
+            MappedLine::Raw(r) => panic!("raw line {r}"),
+        }).collect();
+        let r = &e.last().unwrap().payload;
+        assert_eq!(r["context"], json!({"used": 12757, "limit": 258400}));
+        assert_eq!(redact_json(&r["context"]), r["context"]);
+
+        // No rollout for the session: unknown.
+        let mut s = CodexStream::new("", "/home/u/app").with_sessions_dir(&sessions);
+        s.map_line(r#"{"type":"thread.started","thread_id":"missing"}"#);
+        let MappedLine::Events(e) = s.map_line(r#"{"type":"turn.completed","usage":{}}"#) else { panic!() };
+        assert_eq!(e[0].payload["context"], Value::Null);
+        std::fs::remove_dir_all(&sessions).unwrap();
     }
 
     #[test]

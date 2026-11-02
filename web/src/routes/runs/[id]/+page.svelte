@@ -14,7 +14,7 @@
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
 	import type { AgentId, Run } from '#lib/sf/types';
-	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel } from '#lib/sf/format';
+	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel, scheduled, startTime } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
@@ -27,6 +27,7 @@
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
+	import ContextMeter from '#lib/sf/thread/ContextMeter.svelte';
 	import { prefs } from '#lib/sf/prefs.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
@@ -160,6 +161,14 @@
 	async function sendNow() {
 		try { await thread?.interrupt(); } catch (err) { toast.error('Could not interrupt', { description: (err as Error).message }); }
 	}
+	async function startNow(id: string) {
+		try {
+			await thread?.startNow(id);
+			void fleet.refresh();
+		} catch (err) {
+			toast.error('Could not start it', { description: (err as Error).message });
+		}
+	}
 	async function cancel(id: string) {
 		try { await thread?.cancel(id); } catch (err) { toast.error('Could not cancel', { description: (err as Error).message }); }
 	}
@@ -232,7 +241,11 @@
 					{/if}
 				</div>
 				<div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground max-md:-mx-4 max-md:flex-nowrap max-md:overflow-x-auto max-md:px-4 max-md:[scrollbar-width:none] max-md:[&>*]:shrink-0">
-					<StatusPill status={latest.status} extra={latest.status === 'running' ? duration(latest.started_at, null, fleet.now) : ''} />
+					{#if latest.start_at && scheduled(latest, fleet.now)}
+						<StatusPill status="queued" label="Scheduled" extra={startTime(latest.start_at, fleet.now)} />
+					{:else}
+						<StatusPill status={latest.status} extra={latest.status === 'running' ? duration(latest.started_at, null, fleet.now) : ''} />
+					{/if}
 					{#if fleet.multi && root.created_by}
 						<span class="inline-flex items-center gap-1.5" title={theirs ? `Started by @${ownerLogin ?? 'a teammate'}; it runs on their machine` : 'Your task'}>
 							<Avatar login={ownerLogin} size={16} class="ring-0" /><span class="text-foreground/80">{theirs ? `@${ownerLogin ?? 'teammate'}` : 'You'}</span>
@@ -259,6 +272,10 @@
 						</a>
 					{/if}
 					{#if thread.runs.length > 1}<span class="tnum max-md:hidden">{thread.runs.length} messages</span>{/if}
+					<!-- On phones the composer has no room for it. -->
+					{#if thread.context && !theirs}
+						<ContextMeter context={thread.context.context} agent={thread.context.agent} class="-my-2 sm:hidden" />
+					{/if}
 					{#if root.forked_from}
 						<a href="#/runs/{root.forked_from}" class="inline-flex items-center gap-1 hover:text-foreground"><GitFork class="size-3" />Forked from <span class="max-w-[16rem] truncate text-foreground/80">{forkSource ?? 'another thread'}</span></a>
 					{/if}
@@ -298,6 +315,7 @@
 							waiting={thread.waiting(turn.run.id)}
 							onsendnow={sendNow}
 							oncancel={() => cancel(turn.run.id)}
+							onstartnow={theirs ? undefined : () => startNow(turn.run.id)}
 							onopendiff={openDiff}
 							onrestore={!live && !theirs && turn.run.isolation === 'worktree' ? () => restore(turn.run.id) : undefined}
 							ondecide={theirs ? undefined : (item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}
@@ -388,6 +406,9 @@
 						/>
 						<ComposerOptions {agent} perm={replyPerm} onperm={(v) => (perm = v)} defaultPerm="" sameAs={latest?.permission_mode ?? null} size="sm" />
 						<span class="hidden min-w-0 flex-1 basis-0 truncate px-1 text-xs text-faint sm:inline" title={hint}>{hint}</span>
+						{#if thread?.context && thread.context.agent === agent}
+							<ContextMeter context={thread.context.context} agent={agent} class="ml-auto max-sm:hidden" />
+						{/if}
 						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canReply} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
 							<Paperclip class="size-4" />
 						</button>

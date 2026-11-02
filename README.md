@@ -43,6 +43,9 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   If the machine stops responding (a laptop going to sleep), the task moves to another machine with
   the repo and continues from the last pushed commit, with a digest of the thread so far. Off by
   default, because it pushes; only the task's own `sidefleet/...` branch is ever pushed.
+- **Start later**: pick "Tonight", "Tomorrow morning" or any date and time in the composer, and
+  the task waits until then: no machine picks it up early. The sidebar lists it as scheduled, and
+  its page has Start now and Cancel. Chat apps can schedule one too.
 - **Restore**: every message's files are snapshotted before and after it, so "Restore to before"
   puts the worktree back to how it was before any message. The conversation carries on, and a
   restore can itself be undone.

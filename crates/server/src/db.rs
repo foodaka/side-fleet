@@ -925,7 +925,7 @@ pub async fn request_stop(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Resul
                 return Ok(Some((row_to_run(&row), Some(ev))));
             }
             let row = sqlx::query(&format!(
-                "UPDATE runs SET stop_requested = true WHERE id = $1 RETURNING {RUN_COLS}"
+                "UPDATE runs SET stop_requested = true, stop_requested_at = COALESCE(stop_requested_at, now()) WHERE id = $1 RETURNING {RUN_COLS}"
             ))
             .bind(run_id)
             .fetch_one(&mut *tx)
@@ -1324,6 +1324,39 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
         .execute(&mut *tx)
         .await?;
         let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "failed", "reason": "worker lost"})).await?;
+        tx.commit().await?;
+        out.push(ev);
+    }
+    Ok(out)
+}
+
+/// Stop running runs whose stop was asked for over `grace_secs` ago: their worker
+/// is still heart-beating but is not acting on it (stuck after the agent exited,
+/// or too old to know how), and the thread's next message waits behind them.
+/// A late finish from the worker is then ignored.
+pub async fn stop_unresponsive_runs(pool: &PgPool, grace_secs: i64) -> sqlx::Result<Vec<RunEvent>> {
+    let rows = sqlx::query(
+        "SELECT id FROM runs
+         WHERE status = 'running' AND stop_requested AND stop_requested_at < now() - make_interval(secs => $1)",
+    )
+    .bind(grace_secs as f64)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let id: Uuid = row.get("id");
+        let mut tx = pool.begin().await?;
+        let Some(run) = lock_run(&mut tx, None, id).await? else { continue };
+        if run.status != RunStatus::Running {
+            continue;
+        }
+        out.extend(crate::approvals::cancel_pending(&mut tx, id).await?);
+        sqlx::query("UPDATE runs SET status = 'stopped', finished_at = now(), result = $2 WHERE id = $1")
+            .bind(id)
+            .bind(json!({"reason": "stopped; the worker did not act on the stop"}))
+            .execute(&mut *tx)
+            .await?;
+        let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "stopped", "reason": "worker unresponsive"})).await?;
         tx.commit().await?;
         out.push(ev);
     }

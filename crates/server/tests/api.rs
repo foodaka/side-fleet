@@ -469,6 +469,38 @@ async fn stop_while_running_is_signalled_to_the_worker() {
 }
 
 #[tokio::test]
+async fn a_stop_the_worker_never_acts_on_is_finished_here() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let (_, body) = api.create_run("long task", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    api.post_events("w", id, json!([{"kind": "agent_init", "payload": {"model": "m", "session_id": "sess"}}])).await;
+    // The thread's next message waits behind the running turn.
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/messages")).json(&json!({"task": "and then?"})).send().await.unwrap();
+    let next: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+
+    // The worker is still heart-beating but is stuck: it never finishes.
+    api.stop(id).await;
+    let stop_unresponsive = || sidefleet_server::db::stop_unresponsive_runs(&env.pool, 60);
+    assert!(stop_unresponsive().await.unwrap().is_empty(), "the worker gets a minute to act on it");
+    assert_eq!(api.get_run(id).await.status, RunStatus::Running);
+    assert!(api.claim("w", &["r"]).await.is_none());
+
+    sqlx::query("UPDATE runs SET stop_requested_at = now() - interval '2 minutes' WHERE id = $1").bind(id).execute(&env.pool).await.unwrap();
+    assert_eq!(stop_unresponsive().await.unwrap().len(), 1);
+    assert_eq!(api.get_run(id).await.status, RunStatus::Stopped);
+    assert_eq!(api.claim("w", &["r"]).await.unwrap().id, next);
+
+    // When the worker comes unstuck, its finish changes nothing.
+    api.finish("w", id, "succeeded", json!({})).await;
+    assert_eq!(api.get_run(id).await.status, RunStatus::Stopped);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn control_plane_redacts_secrets_in_stored_payloads() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

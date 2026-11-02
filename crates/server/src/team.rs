@@ -218,7 +218,7 @@ pub async fn remove_member(pool: &PgPool, org: Uuid, user: Uuid) -> sqlx::Result
     .bind(user)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE runs SET stop_requested = true WHERE org_id = $1 AND created_by = $2 AND status = 'running'").bind(org).bind(user).execute(&mut *tx).await?;
+    sqlx::query("UPDATE runs SET stop_requested = true, stop_requested_at = COALESCE(stop_requested_at, now()) WHERE org_id = $1 AND created_by = $2 AND status = 'running'").bind(org).bind(user).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Remove::Removed)
 }

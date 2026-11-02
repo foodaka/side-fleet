@@ -765,30 +765,76 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     }
 
     // What this turn changed, sent before the outcome so it lands while the run is still live.
+    // This is git over the whole tree, which can be slow or hang: it gives way to a stop
+    // (the agent is gone, so nothing else is listening for one) and to a time limit.
     if let Some(before) = &before {
-        match diff::snapshot(&diff_cwd).await {
-            Ok(after) => {
-                let mut events = Vec::new();
-                if let Some(before_commit) = &before_commit {
-                    match snapshot::keep(&diff_cwd, &after, &snapshot::ref_name(root_id, run_id, "after")).await {
-                        Ok(c) => events.push(NewEvent { kind: "snapshot".into(), payload: json!({"before": before_commit, "after": c}) }),
-                        Err(e) => tracing::warn!(error = %format!("{e:#}"), "keeping the snapshot failed"),
-                    }
-                }
-                if let Some(payload) = diff::diff_event(&diff_cwd, base.as_ref(), before, &after).await {
-                    events.push(NewEvent { kind: "diff".into(), payload });
-                }
-                if !events.is_empty() {
-                    if let Err(e) = client.post_events(run_id, events).await {
-                        tracing::warn!(error = %e, "posting diff failed");
-                    }
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "no snapshot after the run"),
+        let record = record_changes(client, run_id, root_id, &diff_cwd, base.as_ref(), before, before_commit.as_deref());
+        let already_stopped = outcome.status == RunStatus::Stopped;
+        let skipped = tokio::select! {
+            _ = record => None,
+            _ = stop_requested(client, run_id), if !already_stopped => Some("the run was stopped"),
+            _ = tokio::time::sleep(RECORD_CHANGES_LIMIT) => Some("it took too long"),
+        };
+        if let Some(why) = skipped {
+            tracing::warn!(run_id = %run_id, why, "gave up recording the run's changes");
+            let msg = format!("This turn's changes were not recorded: {why}.");
+            let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
         }
     }
 
     report_finish(client, run_id, outcome.status, outcome.result, outcome.usage_limit).await;
+}
+
+/// How long snapshotting and diffing a finished turn may take before the run is
+/// reported without it, so a stuck git cannot hold the thread forever.
+const RECORD_CHANGES_LIMIT: Duration = Duration::from_secs(300);
+
+/// Snapshot the tree after the turn and post its snapshot and diff events.
+async fn record_changes(
+    client: &ControlClient,
+    run_id: Uuid,
+    root_id: Uuid,
+    cwd: &Path,
+    base: Option<&diff::Point>,
+    before: &diff::Point,
+    before_commit: Option<&str>,
+) {
+    let after = match diff::snapshot(cwd).await {
+        Ok(after) => after,
+        Err(e) => {
+            tracing::warn!(error = %e, "no snapshot after the run");
+            return;
+        }
+    };
+    let mut events = Vec::new();
+    if let Some(before_commit) = before_commit {
+        match snapshot::keep(cwd, &after, &snapshot::ref_name(root_id, run_id, "after")).await {
+            Ok(c) => events.push(NewEvent { kind: "snapshot".into(), payload: json!({"before": before_commit, "after": c}) }),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "keeping the snapshot failed"),
+        }
+    }
+    if let Some(payload) = diff::diff_event(cwd, base, before, &after).await {
+        events.push(NewEvent { kind: "diff".into(), payload });
+    }
+    if !events.is_empty() {
+        if let Err(e) = client.post_events(run_id, events).await {
+            tracing::warn!(error = %e, "posting diff failed");
+        }
+    }
+}
+
+/// Resolves once the page asks to stop the run, or the run is no longer running.
+async fn stop_requested(client: &ControlClient, run_id: Uuid) {
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        poll.tick().await;
+        match client.control(run_id).await {
+            Ok(ctl) if ctl.stop_requested || ctl.status != RunStatus::Running => return,
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "control poll failed"),
+        }
+    }
 }
 
 /// Listen for the run's permission prompts and relay each to the page.

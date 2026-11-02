@@ -58,7 +58,8 @@ pub async fn restore(dir: &Path, snapshot: &str) -> Result<()> {
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C").arg(dir).args(args).stdin(std::process::Stdio::null());
+    // kill_on_drop: a caller that gives up on a slow git (a stop, a time limit) ends it too.
+    cmd.arg("-C").arg(dir).args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
     // commit-tree needs an identity even on machines without one configured.
     for (k, v) in [
         ("GIT_AUTHOR_NAME", "Sidefleet"),

@@ -86,7 +86,8 @@ fn tools() -> Vec<(Scope, Value)> {
                     "agent": { "type": "string", "enum": ["claude", "codex", "opencode"], "description": "Which coding agent (default claude)." },
                     "model": { "type": "string", "description": "Model for that agent: for claude one of sonnet (default), opus, fable, haiku." },
                     "access": { "type": "string", "enum": ["edit", "ask", "read_only", "full"],
-                        "description": "edit (default): reads and edits files, refuses shell commands. ask: edits files and asks for approval before commands (claude only). read_only: looks and answers, changes nothing. full: also runs commands without asking." }
+                        "description": "edit (default): reads and edits files, refuses shell commands. ask: edits files and asks for approval before commands (claude only). read_only: looks and answers, changes nothing. full: also runs commands without asking." },
+                    "start_at": { "type": "string", "description": "Start later, once, at this time: RFC 3339 with the user's UTC offset, e.g. 2026-11-03T07:00:00+01:00. At most 30 days ahead. Optional: starts now." }
                 } }
             }),
         ),
@@ -316,14 +317,32 @@ async fn call_tool(api: &Api<'_>, name: &str, args: &Value) -> Result<String, St
                 "full" => "bypassPermissions",
                 other => return Err(format!("access {other:?} must be edit, ask, read_only or full.")),
             };
+            let start_at = match arg(args, "start_at") {
+                None => None,
+                Some(t) => Some(
+                    chrono::DateTime::parse_from_rfc3339(t)
+                        .map_err(|_| format!("start_at {t:?} must be RFC 3339 with an offset, e.g. 2026-11-03T07:00:00+01:00."))?
+                        .with_timezone(&chrono::Utc),
+                ),
+            };
             let mut body = json!({ "task": task, "repo": repo, "agent": agent, "model": model, "permission_mode": mode });
             if let Some(m) = machine {
                 body["worker_id"] = json!(m);
+            }
+            if let Some(at) = start_at {
+                body["start_at"] = json!(at);
             }
             let r = api.call(Method::POST, "/v1/runs", Some(body)).await?;
             let id = r["id"].as_str().unwrap_or("");
             let s = api.call(Method::GET, &format!("/v1/runs/{id}/summary"), None).await.ok();
             let url = s.as_ref().and_then(|s| s["url"].as_str()).unwrap_or("");
+            if let Some(at) = s.as_ref().and_then(|s| s["start_at"].as_str()) {
+                return Ok(format!(
+                    "Scheduled task {id} in {} with {} to start at {at} (UTC). Until then no machine picks it up; stop_task cancels it. Page: {url}",
+                    repo_label(&repo),
+                    agent_name(agent)
+                ));
+            }
             Ok(format!(
                 "Started task {id} in {} with {}. It starts as soon as a machine with the repo is free and usually takes a few minutes.\n\
                  Follow it with task_status (wait: true). Page: {url}",
@@ -365,9 +384,9 @@ async fn call_tool(api: &Api<'_>, name: &str, args: &Value) -> Result<String, St
     }
 }
 
-/// Still working, with nothing waiting on the user.
+/// Still working, with nothing waiting on the user. A task scheduled for later isn't (yet).
 fn busy(s: &Value) -> bool {
-    matches!(s["status"].as_str(), Some("queued" | "running")) && s["pending_approvals"].as_array().is_none_or(|a| a.is_empty())
+    matches!(s["status"].as_str(), Some("queued" | "running")) && s["pending_approvals"].as_array().is_none_or(|a| a.is_empty()) && s["start_at"].is_null()
 }
 
 fn agent_name(a: &str) -> &str {
@@ -496,7 +515,10 @@ fn tasks_text(runs: &Value, heading: &str) -> String {
 
 fn status_word(s: &Value) -> String {
     match s["status"].as_str().unwrap_or("") {
-        "queued" => "waiting for a machine".into(),
+        "queued" => match s["start_at"].as_str() {
+            Some(at) => format!("scheduled to start at {at} (UTC)"),
+            None => "waiting for a machine".into(),
+        },
         "succeeded" => "done".into(),
         other => other.to_string(),
     }

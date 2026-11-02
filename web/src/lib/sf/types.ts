@@ -51,6 +51,8 @@ export interface Run {
 	room_id?: string | null;
 	/** For an `integrate` run: the room branch it merges into. */
 	context?: string | null;
+	/** A task scheduled to start later: no machine picks it up before this time. */
+	start_at?: string | null;
 }
 
 export interface PullRequest {

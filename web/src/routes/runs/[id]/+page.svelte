@@ -14,7 +14,7 @@
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
 	import type { AgentId, Run } from '#lib/sf/types';
-	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel } from '#lib/sf/format';
+	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel, scheduled, startTime } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
@@ -161,6 +161,14 @@
 	async function sendNow() {
 		try { await thread?.interrupt(); } catch (err) { toast.error('Could not interrupt', { description: (err as Error).message }); }
 	}
+	async function startNow(id: string) {
+		try {
+			await thread?.startNow(id);
+			void fleet.refresh();
+		} catch (err) {
+			toast.error('Could not start it', { description: (err as Error).message });
+		}
+	}
 	async function cancel(id: string) {
 		try { await thread?.cancel(id); } catch (err) { toast.error('Could not cancel', { description: (err as Error).message }); }
 	}
@@ -233,7 +241,11 @@
 					{/if}
 				</div>
 				<div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground max-md:-mx-4 max-md:flex-nowrap max-md:overflow-x-auto max-md:px-4 max-md:[scrollbar-width:none] max-md:[&>*]:shrink-0">
-					<StatusPill status={latest.status} extra={latest.status === 'running' ? duration(latest.started_at, null, fleet.now) : ''} />
+					{#if latest.start_at && scheduled(latest, fleet.now)}
+						<StatusPill status="queued" label="Scheduled" extra={startTime(latest.start_at, fleet.now)} />
+					{:else}
+						<StatusPill status={latest.status} extra={latest.status === 'running' ? duration(latest.started_at, null, fleet.now) : ''} />
+					{/if}
 					{#if fleet.multi && root.created_by}
 						<span class="inline-flex items-center gap-1.5" title={theirs ? `Started by @${ownerLogin ?? 'a teammate'}; it runs on their machine` : 'Your task'}>
 							<Avatar login={ownerLogin} size={16} class="ring-0" /><span class="text-foreground/80">{theirs ? `@${ownerLogin ?? 'teammate'}` : 'You'}</span>
@@ -303,6 +315,7 @@
 							waiting={thread.waiting(turn.run.id)}
 							onsendnow={sendNow}
 							oncancel={() => cancel(turn.run.id)}
+							onstartnow={theirs ? undefined : () => startNow(turn.run.id)}
 							onopendiff={openDiff}
 							onrestore={!live && !theirs && turn.run.isolation === 'worktree' ? () => restore(turn.run.id) : undefined}
 							ondecide={theirs ? undefined : (item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}

@@ -4,7 +4,7 @@
 	import { fleet } from '../state.svelte';
 	import { seen } from '../seen.svelte';
 	import { inbox, reasonTone } from '../inbox.svelte';
-	import { ago, dayGroup, duration, repoLabel } from '../format';
+	import { ago, dayGroup, duration, repoLabel, scheduled, startTime } from '../format';
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
 	import PrIcon from './PrIcon.svelte';
@@ -53,9 +53,11 @@
 		q ? [...fleet.runs, ...(fleet.archived ?? [])].filter((r) => [r.task, repoLabel(r.repo), r.worker_id ?? ''].some((s) => s.toLowerCase().includes(q))) : []
 	);
 
-	// Threads waiting on you first, then running, then queued.
-	const rank = (r: RunSummary) => (r.pending_approvals ? 0 : r.thread_status === 'running' ? 1 : 2);
-	const active = $derived(runs.filter(live).sort((a, b) => rank(a) - rank(b)));
+	// Threads waiting on you first, then running, then queued, then those scheduled for later (soonest first).
+	const later = (r: RunSummary) => scheduled(r, fleet.now);
+	const rank = (r: RunSummary) => (r.pending_approvals ? 0 : r.thread_status === 'running' ? 1 : later(r) ? 3 : 2);
+	const byStart = (a: RunSummary, b: RunSummary) => (later(a) && later(b) ? new Date(a.start_at!).getTime() - new Date(b.start_at!).getTime() : 0);
+	const active = $derived(runs.filter(live).sort((a, b) => rank(a) - rank(b) || byStart(a, b)));
 	const groups = $derived.by(() => {
 		const out: { label: string; runs: RunSummary[] }[] = [];
 		for (const r of runs) {
@@ -109,6 +111,8 @@
 				<span class="tnum truncate text-[11.5px] text-muted-foreground">
 					{#if r.thread_status === 'running'}
 						{r.worker_id ?? 'Starting'} · {duration(r.started_at, null, fleet.now) || 'starting'}
+					{:else if r.start_at && later(r)}
+						Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 					{:else}
 						Waiting for a machine{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 					{/if}

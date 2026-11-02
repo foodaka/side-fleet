@@ -72,6 +72,7 @@ pub async fn thread(pool: &PgPool, org: Uuid, id: Uuid, base: &str) -> sqlx::Res
         "model": latest.model,
         "machine": latest.worker_id.as_deref().or(latest.pinned_worker_id.as_deref()),
         "status": latest.status,
+        "start_at": latest.start_at.filter(|_| latest.status == sidefleet_core::RunStatus::Queued),
         "messages": runs.len(),
         "latest_message": { "id": latest.id, "task": latest.task, "kind": latest.kind, "started_at": latest.started_at, "finished_at": latest.finished_at },
         "reply": reply,

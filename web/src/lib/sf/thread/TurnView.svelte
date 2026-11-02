@@ -9,7 +9,9 @@
 	import GitFork from '@lucide/svelte/icons/git-fork';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import GitMerge from '@lucide/svelte/icons/git-merge';
-	import { agentModel, agentName, clock, effortName, permName, repoLabel } from '../format';
+	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
+	import { fleet } from '../state.svelte';
+	import { agentModel, agentName, clock, effortName, permName, repoLabel, scheduled, startTime, until } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import ToolImages from './ToolImages.svelte';
@@ -25,6 +27,7 @@
 		waiting = false,
 		onsendnow,
 		oncancel,
+		onstartnow,
 		onopendiff,
 		onrestore,
 		ondecide
@@ -38,6 +41,8 @@
 		waiting?: boolean;
 		onsendnow?: () => void;
 		oncancel?: () => void;
+		/** Start a task scheduled for later now; absent when it isn't yours. */
+		onstartnow?: () => void;
 		onopendiff?: (runId: string, path: string | null) => void;
 		/** Put the files back to how they were before this turn; absent when that isn't possible now. */
 		onrestore?: () => Promise<void>;
@@ -153,7 +158,16 @@
 	{/if}
 
 	<div class="flex flex-col gap-1.5">
-		{#if !waiting && !isRestore && !isPr && !isIntegrate && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
+		{#if run.start_at && scheduled(run, fleet.now)}
+			<p class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+				<AlarmClock class="size-3.5 shrink-0" />
+				<span>Scheduled to start <span class="text-foreground/80">{startTime(run.start_at, fleet.now)}</span> ({until(run.start_at, fleet.now)}) on {run.pinned_worker_id ?? `a machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}</span>
+				{#if onstartnow}
+					<button type="button" class="rounded-full bg-primary px-2.5 py-1 font-medium whitespace-nowrap text-primary-foreground hover:opacity-90" onclick={onstartnow}>Start now</button>
+					<button type="button" class="rounded-full px-2 py-1 whitespace-nowrap hover:bg-accent hover:text-foreground" onclick={oncancel}>Cancel</button>
+				{/if}
+			</p>
+		{:else if !waiting && !isRestore && !isPr && !isIntegrate && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-left text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}

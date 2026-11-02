@@ -12,6 +12,7 @@
 	import Moon from '@lucide/svelte/icons/moon';
 	import * as Select from '#lib/components/ui/select';
 	import Switch from '#lib/sf/ui/Switch.svelte';
+	import SnoozePresets from '#lib/sf/ui/SnoozePresets.svelte';
 	import { PERMISSIONS, WORKSPACES } from '#lib/sf/format';
 	import { isMac, prefs, type SendKey, type Workspace } from '#lib/sf/prefs.svelte';
 
@@ -196,6 +197,15 @@
 			{@render row('ws', 'Hide whitespace changes', 'Lines where only indentation or spacing changed show as unchanged, so a reformat doesn’t bury the real edit. Press W in the panel to flip it.', prefs.diffHideWhitespace, (v) => prefs.set({ diffHideWhitespace: v }))}
 			{@render row('fold', 'Open with files collapsed', 'Each file starts folded so you can pick what to read on a big change. A file you open the panel from still opens.', prefs.diffCollapsed, (v) => prefs.set({ diffCollapsed: v }))}
 		</div>
+	</div>
+
+	<!-- Snooze -->
+	<div class="flex flex-col gap-3">
+		<div>
+			<h2 class="text-[15px] font-medium">Snooze</h2>
+			<p class="mt-0.5 text-[12.5px] text-muted-foreground">The choices in a task’s Snooze menu. A snoozed task leaves the list and the bell until its time, or until it finishes, fails or asks you something.</p>
+		</div>
+		<SnoozePresets />
 	</div>
 
 	<!-- Safety -->

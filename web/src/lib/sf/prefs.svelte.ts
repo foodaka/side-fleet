@@ -3,6 +3,7 @@
 // are also kept with your account, so every browser you sign in on starts the same.
 
 import { api } from './api';
+import { cleanPresets, DEFAULT_SNOOZE_PRESETS, type SnoozePreset } from './snooze';
 
 const KEY = 'sidefleet_prefs';
 
@@ -26,6 +27,8 @@ interface Stored {
 	roomPermission: string;
 	/** Where a new task works: its own worktree and branch, or the checkout itself. */
 	workspace: Workspace;
+	/** The choices in a task's Snooze menu. */
+	snoozePresets: SnoozePreset[];
 }
 
 const DEFAULTS: Stored = {
@@ -36,12 +39,13 @@ const DEFAULTS: Stored = {
 	confirmStop: true,
 	permission: 'bypassPermissions',
 	roomPermission: 'acceptEdits',
-	workspace: 'worktree'
+	workspace: 'worktree',
+	snoozePresets: DEFAULT_SNOOZE_PRESETS
 };
 const MODES = ['acceptEdits', 'bypassPermissions', 'plan', 'ask'];
 
 /** What follows you between browsers. How the Changes panel looks (and the theme) suits each screen, so it stays put. */
-const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop'] as const;
+const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop', 'snoozePresets'] as const;
 const synced = (s: Partial<Stored>) =>
 	Object.fromEntries(SYNCED.filter((k) => s[k] !== undefined).map((k) => [k, s[k]])) as Partial<Stored>;
 const savedHere = () => { try { return localStorage.getItem(KEY) !== null; } catch { return false; } };
@@ -72,6 +76,7 @@ class Prefs {
 	permission = $state(DEFAULTS.permission);
 	roomPermission = $state(DEFAULTS.roomPermission);
 	workspace = $state<Workspace>(DEFAULTS.workspace);
+	snoozePresets = $state<SnoozePreset[]>(DEFAULTS.snoozePresets);
 
 	/** Signed in: the synced ones are kept with your account too. */
 	account = $state(false);
@@ -91,6 +96,7 @@ class Prefs {
 		this.permission = MODES.includes(s.permission) ? s.permission : DEFAULTS.permission;
 		this.roomPermission = MODES.includes(s.roomPermission) ? s.roomPermission : DEFAULTS.roomPermission;
 		this.workspace = s.workspace === 'checkout' ? 'checkout' : 'worktree';
+		this.snoozePresets = cleanPresets(s.snoozePresets);
 	}
 
 	#stored(): Stored {
@@ -102,7 +108,8 @@ class Prefs {
 			confirmStop: this.confirmStop,
 			permission: this.permission,
 			roomPermission: this.roomPermission,
-			workspace: this.workspace
+			workspace: this.workspace,
+			snoozePresets: this.snoozePresets
 		};
 	}
 

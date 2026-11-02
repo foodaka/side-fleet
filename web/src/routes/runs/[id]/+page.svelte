@@ -27,6 +27,7 @@
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
+	import ContextMeter from '#lib/sf/thread/ContextMeter.svelte';
 	import { prefs } from '#lib/sf/prefs.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
@@ -259,6 +260,10 @@
 						</a>
 					{/if}
 					{#if thread.runs.length > 1}<span class="tnum max-md:hidden">{thread.runs.length} messages</span>{/if}
+					<!-- On phones the composer has no room for it. -->
+					{#if thread.context && !theirs}
+						<ContextMeter context={thread.context.context} agent={thread.context.agent} class="-my-2 sm:hidden" />
+					{/if}
 					{#if root.forked_from}
 						<a href="#/runs/{root.forked_from}" class="inline-flex items-center gap-1 hover:text-foreground"><GitFork class="size-3" />Forked from <span class="max-w-[16rem] truncate text-foreground/80">{forkSource ?? 'another thread'}</span></a>
 					{/if}
@@ -388,6 +393,9 @@
 						/>
 						<ComposerOptions {agent} perm={replyPerm} onperm={(v) => (perm = v)} defaultPerm="" sameAs={latest?.permission_mode ?? null} size="sm" />
 						<span class="hidden min-w-0 flex-1 basis-0 truncate px-1 text-xs text-faint sm:inline" title={hint}>{hint}</span>
+						{#if thread?.context && thread.context.agent === agent}
+							<ContextMeter context={thread.context.context} agent={agent} class="ml-auto max-sm:hidden" />
+						{/if}
 						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canReply} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
 							<Paperclip class="size-4" />
 						</button>

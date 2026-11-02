@@ -54,13 +54,18 @@ fn parse_line(line: &str) -> Result<Value, MappedLine> {
 }
 
 /// Claude Code's stdout with `--include-partial-messages`: [`map_stream_line`],
-/// plus an [`LIVE_TEXT`] event each time the top-level reply's text grows.
+/// plus an [`LIVE_TEXT`] event each time the top-level reply's text grows, and how
+/// full the context window is on the `result` (its `context`, see [`context_payload`]).
 #[derive(Debug, Default)]
 pub struct ClaudeStream {
     /// The text block being generated, unredacted; None while the block is not text.
     text: Option<String>,
     /// What the last live event showed.
     shown: String,
+    /// The model `system/init` named.
+    model: Option<String>,
+    /// Tokens in the context window after the main agent's latest API call.
+    context_used: Option<u64>,
 }
 
 impl ClaudeStream {
@@ -69,10 +74,26 @@ impl ClaudeStream {
             Ok(v) => v,
             Err(mapped) => return mapped,
         };
-        if v.get("type").and_then(Value::as_str) == Some("stream_event") {
-            return MappedLine::Events(self.on_stream_event(&v).into_iter().collect());
+        match v.get("type").and_then(Value::as_str) {
+            Some("stream_event") => return MappedLine::Events(self.on_stream_event(&v).into_iter().collect()),
+            Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
+                self.model = v.get("model").and_then(Value::as_str).map(str::to_string);
+            }
+            // A subagent's calls have a context of their own.
+            Some("assistant") if v.get("parent_tool_use_id").is_none_or(Value::is_null) => {
+                if let Some(used) = v.pointer("/message/usage").and_then(context_tokens) {
+                    self.context_used = Some(used);
+                }
+            }
+            _ => {}
         }
-        map_value(&v)
+        let mut mapped = map_value(&v);
+        if let (MappedLine::Events(evs), Some(used)) = (&mut mapped, self.context_used) {
+            for e in evs.iter_mut().filter(|e| e.kind == "result") {
+                e.payload["context"] = context_payload(used, context_window(&v, self.model.as_deref()));
+            }
+        }
+        mapped
     }
 
     fn on_stream_event(&mut self, v: &Value) -> Option<NewEvent> {
@@ -112,6 +133,31 @@ impl ClaudeStream {
         self.shown = view.clone();
         Some(NewEvent { kind: LIVE_TEXT.into(), payload: json!({"text": view}) })
     }
+}
+
+/// Tokens in the context window after one Claude API call: all it read (new,
+/// from the cache and written to the cache) plus what it wrote, which the next call reads.
+fn context_tokens(usage: &Value) -> Option<u64> {
+    let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    usage.get("input_tokens")?.as_u64()?;
+    Some(n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") + n("output_tokens"))
+}
+
+/// A `result`'s `context`: `{"used": tokens in the context window, "limit": the window
+/// or null when unknown}`. (Keys with "token" in them would be redacted as secrets.)
+pub fn context_payload(used: u64, limit: Option<u64>) -> Value {
+    json!({ "used": used, "limit": limit })
+}
+
+/// The main model's context window from a `result`'s `modelUsage`, which has an
+/// entry per model the turn used (a subagent may use another): the one `init`
+/// named, else the one that wrote the most.
+fn context_window(result: &Value, model: Option<&str>) -> Option<u64> {
+    let usage = result.get("modelUsage")?.as_object()?;
+    let entry = model.and_then(|m| usage.get(m)).or_else(|| {
+        usage.values().max_by_key(|e| e.get("outputTokens").and_then(Value::as_u64).unwrap_or(0))
+    })?;
+    entry.get("contextWindow").and_then(Value::as_u64)
 }
 
 /// The part of a text block in progress that may be shown: redacted, and without
@@ -442,6 +488,29 @@ mod tests {
 
     fn live(e: &NewEvent) -> &str {
         e.payload["text"].as_str().unwrap()
+    }
+
+    #[test]
+    fn result_says_how_full_the_main_agents_context_is() {
+        let evs = claude_events(concat!(
+            r#"{"type":"system","subtype":"init","model":"claude-opus-5-5","session_id":"s1","tools":[]}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking."}],"usage":{"input_tokens":2,"cache_creation_input_tokens":16483,"cache_read_input_tokens":11382,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":16483},"output_tokens":4,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"s1"}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"sub"}],"usage":{"input_tokens":900000,"output_tokens":1}},"parent_tool_use_id":"toolu_1","session_id":"s1"}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":5,"cache_creation_input_tokens":300,"cache_read_input_tokens":27865,"output_tokens":40}},"parent_tool_use_id":null,"session_id":"s1"}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"s1","total_cost_usd":0.01,"usage":{"input_tokens":7,"cache_read_input_tokens":39247,"output_tokens":72},"modelUsage":{"claude-haiku-5-5":{"outputTokens":900,"contextWindow":200000},"claude-opus-5-5":{"inputTokens":7,"outputTokens":72,"cacheReadInputTokens":39247,"contextWindow":1000000,"maxOutputTokens":128000}}}"#,
+        ));
+        let r = evs.iter().find(|e| e.kind == "result").unwrap();
+        assert_eq!(r.payload["context"], json!({"used": 5 + 300 + 27865 + 40, "limit": 1000000}));
+        assert_eq!(redact_json(&r.payload["context"]), r.payload["context"], "survives the control plane's redaction");
+
+        // Without init, the model that wrote the most; without any usage, no context at all.
+        let evs = claude_events(concat!(
+            r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":10,"output_tokens":5}},"parent_tool_use_id":null}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","modelUsage":{"a":{"outputTokens":1,"contextWindow":1},"b":{"outputTokens":9,"contextWindow":200000}}}"#,
+        ));
+        assert_eq!(evs.last().unwrap().payload["context"], json!({"used": 15, "limit": 200000}));
+        let evs = claude_events(r#"{"type":"result","subtype":"success","is_error":false,"result":""}"#);
+        assert!(evs[0].payload.get("context").is_none());
     }
 
     #[test]

@@ -325,6 +325,34 @@ async fn stop_while_running_kills_the_agent_and_marks_stopped() {
     h.teardown().await;
 }
 
+#[tokio::test]
+async fn stop_while_git_hangs_after_the_agent_finishes_reports_the_run() {
+    let h = Harness::start(1).await;
+    let id = h.create("jam the snapshot", "demo").await;
+
+    // The agent finishes, then snapshotting its changes hangs in git.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap().iter().any(|e| e.kind == "result") {
+        assert!(tokio::time::Instant::now() < deadline, "agent never finished");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(h.dev_get::<Run>(&format!("/v1/runs/{id}")).await.status, RunStatus::Running);
+
+    let t0 = std::time::Instant::now();
+    let r = h.http.post(format!("{}/v1/runs/{id}/stop", h.env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let run = h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(10)).await;
+    assert!(t0.elapsed() < Duration::from_secs(5), "stop took {:?}", t0.elapsed());
+    assert_eq!(run.result.unwrap()["subtype"], "success", "the agent's own outcome is kept");
+
+    let evs = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
+    assert!(!evs.iter().any(|e| e.kind == "diff"), "no diff from an abandoned snapshot");
+    let note = evs.iter().find(|e| e.kind == "error").expect("the page is told why there is no diff");
+    assert_eq!(note.payload["message"], "This turn's changes were not recorded: the run was stopped.");
+
+    h.teardown().await;
+}
 
 #[tokio::test]
 async fn parallel_tasks_on_one_repo_run_side_by_side_in_separate_worktrees() {

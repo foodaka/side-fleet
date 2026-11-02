@@ -90,8 +90,8 @@ what it can call; anything else answers `403`:
 
 | Scope | Can |
 |---|---|
-| `read` | `GET` runs, threads, events, approvals, images, workers and repos; `GET /v1/me` shows the token's name and scope |
-| `tasks` | also start runs, send messages, stop, restore, fork, open PRs and archive; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
+| `read` | `GET` runs, threads, events, approvals, dev servers, images, workers and repos; `GET /v1/me` shows the token's name and scope |
+| `tasks` | also start runs, send messages, stop (runs and dev servers), restore, fork, open PRs and archive; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
 | `full` | also approve or deny tool calls, and use full access |
 
 No token manages orgs, members, worker or API tokens, enrollments or machines, or reads
@@ -171,6 +171,8 @@ go into a path.
 | `POST` | `/v1/runs/:id/approvals/:approval/approve` | `200` with the approval, now `approved`: the agent's tool call goes ahead. `409` when it was already decided, expired or cancelled, or the run is no longer running; `410` when its time ran out first (it is now `expired`) |
 | `POST` | `/v1/runs/:id/approvals/:approval/deny` `{message?}` | `200` with the approval, now `denied`; the agent is told `message`, or that the user denied it. Same `409`/`410` as approve |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
+| `GET` | `/v1/runs/:id/dev-servers` | servers the thread's agent left running on its machine, while that machine is online: `[{pid, ports, command, started_at, worker_id, stopping}]`. A dev server is a process listening on TCP whose working directory is inside the thread's worktree; in-place (`checkout`) threads have none. The machine reports them with each heartbeat |
+| `POST` | `/v1/runs/:id/dev-servers/stop` `{pid}` | ask the machine to stop one, with what it started (SIGTERM, then SIGKILL after 5 s); answers with the list, that server now `stopping`. The thread's creator or an org owner (`403` otherwise); `404` when it is no longer reported. Reaches the machine with its next heartbeat, and is passed on for 2 minutes |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `DELETE` | `/v1/workers/:id` | forget a machine (frees a plan slot); `409` while it runs a task |
 | `GET` | `/v1/setup` | control URL and, in the default org, the first static worker token, for the page's connect command |
@@ -242,7 +244,10 @@ on the way, such as the control plane being unreachable, denies the tool call.
 Bearer one of `SIDEFLEET_WORKER_TOKENS` (comma-separated, one per machine if you want to revoke
 individually; compared as SHA-256 digests in constant time and never logged), acting in the
 default org, or a per-org token, acting in its org:
-`POST /v1/worker/register`, `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (sends the
+`POST /v1/worker/register`, `POST /v1/worker/heartbeat` (with `dev_servers: [{thread, pid, ports,
+command, started_at}]`, every server in the machine's task worktrees, replacing the last report;
+its answer lists the ones to stop in `stop_dev_servers: [{thread, pid, started_at}]`, and the
+worker checks each is still that process in that worktree before stopping it), `POST /v1/worker/claim` (sends the
 agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
 only get `claude` runs, workers that send no slots are not load balanced, and workers that send
 no `kinds` (`agent`, `restore`, `fork`) only get plain agent runs),

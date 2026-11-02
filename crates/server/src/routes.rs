@@ -8,7 +8,7 @@ use std::time::Duration;
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
+    RunStatus, RunSummary, StopDevServerRequest, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -70,6 +70,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/pr", post(open_pr))
         .route("/v1/runs/{id}/archive", post(archive_run))
+        .route("/v1/runs/{id}/dev-servers", get(list_dev_servers))
+        .route("/v1/runs/{id}/dev-servers/stop", post(stop_dev_server))
         .route("/v1/runs/{id}/approvals", get(list_approvals))
         .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
         .route("/v1/runs/{id}/approvals/{approval}/deny", post(deny_tool))
@@ -721,6 +723,41 @@ async fn stop_run(
     Ok(Json(run))
 }
 
+/// The thread's root run, for any run of it.
+async fn thread_root(state: &AppState, caller: &Caller, id: Uuid) -> Result<Run, ApiError> {
+    let run = db::get_run(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
+    match run.parent_id {
+        Some(p) => db::get_run(&state.pool, caller.org_id(), p).await?.ok_or_else(not_found),
+        None => Ok(run),
+    }
+}
+
+/// Servers the thread's agent left running on its machine (while the machine is online).
+async fn list_dev_servers(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::devservers::DevServerView>>, ApiError> {
+    let root = thread_root(&state, &caller, id).await?;
+    Ok(Json(crate::devservers::list(&state.pool, caller.org_id(), root.id).await?))
+}
+
+/// Stop one of them: its machine is told with its next heartbeat. Like Stop: the thread's
+/// creator, or an org owner.
+async fn stop_dev_server(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<StopDevServerRequest>,
+) -> Result<Json<Vec<crate::devservers::DevServerView>>, ApiError> {
+    let root = if caller.is_owner() { thread_root(&state, &caller, id).await? } else { own_thread(&state, &caller, id).await? };
+    if !crate::devservers::request_stop(&state.pool, root.id, req.pid).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "that server is no longer running".into()));
+    }
+    tracing::info!(run_id = %root.id, pid = req.pid, "dev server stop requested");
+    Ok(Json(crate::devservers::list(&state.pool, caller.org_id(), root.id).await?))
+}
+
 /// What the page needs to show a copy-paste "connect a machine" command. In
 /// the default org it hands out the first static worker token; other orgs
 /// connect machines by approving them on the page or with a token they create.
@@ -1113,6 +1150,9 @@ async fn heartbeat(
     if db::heartbeat(&state.pool, auth.org, &req.id, &auth.token_hash, &req.capabilities).await? {
         // Its owner's other orgs see it too (and pick it up in an org they've just joined).
         db::sync_worker(&state.pool, auth.org, &auth.orgs, &req.id, &auth.token_hash, false).await?;
+        if let Some(servers) = &req.dev_servers {
+            crate::devservers::report(&state.pool, &auth.orgs, &req.id, servers).await?;
+        }
         for org in &auth.orgs {
             for ev in db::reconcile_worker_runs(&state.pool, *org, &req.id, &req.active_runs).await? {
                 tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run no longer executing on its worker; marked finished");
@@ -1129,6 +1169,7 @@ async fn heartbeat(
                 }
                 prs
             },
+            stop_dev_servers: if req.dev_servers.is_some() { crate::devservers::stops_for(&state.pool, &auth.orgs, &req.id).await? } else { Vec::new() },
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.

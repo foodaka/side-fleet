@@ -43,6 +43,10 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   If the machine stops responding (a laptop going to sleep), the task moves to another machine with
   the repo and continues from the last pushed commit, with a digest of the thread so far. Off by
   default, because it pushes; only the task's own `sidefleet/...` branch is ever pushed.
+- **Dev servers**: a server the agent started and left running (`npm run dev`, say) shows on the
+  task's page with its port, command and uptime, and a Stop button, so they don't pile up on a
+  machine you can't reach from your phone. Only processes running inside the task's own worktree
+  are listed or stopped, never anything else on the machine.
 - **Restore**: every message's files are snapshotted before and after it, so "Restore to before"
   puts the worktree back to how it was before any message. The conversation carries on, and a
   restore can itself be undone.

@@ -27,6 +27,7 @@
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
+	import DevServers from '#lib/sf/thread/DevServers.svelte';
 	import { prefs } from '#lib/sf/prefs.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
@@ -338,6 +339,8 @@
 	{#if diffScopes.length}
 		<DiffViewer bind:open={diffOpen} scopes={diffScopes} bind:scope={diffScope} focus={diffFocus} />
 	{/if}
+
+	{#if root}<DevServers runId={root.id} canStop={!theirs || fleet.isOwner} />{/if}
 
 	{#if root && theirs}
 		<div class="border-t bg-background">

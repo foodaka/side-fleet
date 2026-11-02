@@ -31,7 +31,7 @@ async fn connect_without_a_token_waits_for_approval_then_registers() {
     let client = ControlClient::new(&env.base_url, &token, "garage-mini").unwrap();
     let w = client.register("Garage mini", &caps, &[]).await.unwrap();
     assert_eq!(w.id, "garage-mini");
-    client.heartbeat(&caps, &[]).await.unwrap();
+    client.heartbeat(&caps, &[], None).await.unwrap();
 
     // Denied requests are reported as such.
     let d = enroll(&env.base_url, "intruder", "intruder", &Capabilities::default()).await.unwrap();

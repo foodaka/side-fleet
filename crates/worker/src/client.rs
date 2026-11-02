@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use sidefleet_core::{
-    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest,
+    Approval, ApprovalRequest, Capabilities, ClaimRequest, DevServer, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest,
     NewEvent, PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
@@ -98,12 +98,12 @@ impl ControlClient {
         Ok(r.json().await?)
     }
 
-    pub async fn heartbeat(&self, caps: &Capabilities, active_runs: &[Uuid]) -> Result<HeartbeatResponse, ClientError> {
+    pub async fn heartbeat(&self, caps: &Capabilities, active_runs: &[Uuid], dev_servers: Option<Vec<DevServer>>) -> Result<HeartbeatResponse, ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/heartbeat"))
             .bearer_auth(&self.token)
-            .json(&HeartbeatRequest { id: self.worker_id.clone(), capabilities: caps.clone(), active_runs: active_runs.to_vec() })
+            .json(&HeartbeatRequest { id: self.worker_id.clone(), capabilities: caps.clone(), active_runs: active_runs.to_vec(), dev_servers })
             .send()
             .await
             .context("heartbeat request failed")?;

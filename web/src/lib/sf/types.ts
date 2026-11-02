@@ -53,6 +53,17 @@ export interface Run {
 	context?: string | null;
 }
 
+/** A server a thread's agent left running on its machine (`GET /v1/runs/:id/dev-servers`). */
+export interface DevServer {
+	pid: number;
+	ports: number[];
+	command: string;
+	started_at: string | null;
+	worker_id: string;
+	/** Asked to stop; the machine hasn't reported it gone yet. */
+	stopping: boolean;
+}
+
 export interface PullRequest {
 	url: string;
 	number: number;

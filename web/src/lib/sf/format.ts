@@ -172,6 +172,19 @@ export function duration(start: string | null | undefined, end?: string | null, 
 	return Math.floor(s / 3600) + 'h ' + String(Math.round((s % 3600) / 60)).padStart(2, '0') + 'm';
 }
 
+/** When a scheduled task starts: `14:30` today, `Tue 07:00` within a week, else `Nov 12, 07:00`. */
+export function startTime(iso: string, now = Date.now()): string {
+	const d = new Date(iso);
+	const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+	if (d.toDateString() === new Date(now).toDateString()) return hm;
+	if (d.getTime() - now < 6 * 86400000) return `${d.toLocaleDateString([], { weekday: 'short' })} ${hm}`;
+	return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${hm}`;
+}
+
+/** A queued run still waiting for its start time. */
+export const scheduled = (r: { status: string; start_at?: string | null }, now = Date.now()) =>
+	r.status === 'queued' && !!r.start_at && new Date(r.start_at).getTime() > now;
+
 export const clock = (iso: string) =>
 	new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 

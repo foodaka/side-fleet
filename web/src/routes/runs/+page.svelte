@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { fleet } from '#lib/sf/state.svelte';
-	import { agentModel, duration, money, rel, repoLabel } from '#lib/sf/format';
+	import { agentModel, duration, money, rel, repoLabel, scheduled, startTime } from '#lib/sf/format';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import type { RunSummary } from '#lib/sf/types';
@@ -97,7 +97,7 @@
 					{#if r.worker_id}<StatusDot status={workerOnline(r.worker_id) ? 'online' : 'offline'} /><span class="truncate">{r.worker_id}</span>
 					{:else}<span class="text-muted-foreground">No machine yet</span>{/if}
 				</span>
-				<span class="justify-self-end md:justify-self-start"><StatusPill status={r.thread_status} /></span>
+				<span class="justify-self-end md:justify-self-start">{#if r.start_at && scheduled(r, fleet.now)}<StatusPill status="queued" label="Scheduled" extra={startTime(r.start_at, fleet.now)} />{:else}<StatusPill status={r.thread_status} />{/if}</span>
 				<span class="tnum hidden text-right text-[13px] text-muted-foreground md:block">{duration(r.started_at, r.thread_status === 'running' ? null : r.finished_at ?? r.last_activity_at, fleet.now) || '–'}</span>
 				<span class="tnum hidden text-right text-[13px] md:block">{cost ? money(cost, 3) : '–'}</span>
 				<span class="tnum hidden text-right text-xs text-muted-foreground md:block">{rel(r.last_activity_at, fleet.now)}</span>

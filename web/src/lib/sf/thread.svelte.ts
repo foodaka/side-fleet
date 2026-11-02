@@ -193,6 +193,13 @@ export class Thread {
 			await api(`/v1/runs/${r.id}/stop`, { method: 'POST' });
 	}
 
+	/** Start a task scheduled for later right away. */
+	async startNow(id: string) {
+		const r = await api<Run>(`/v1/runs/${id}/start-now`, { method: 'POST' });
+		const run = this.runs.find((x) => x.id === id);
+		if (run) run.start_at = r.start_at ?? null;
+	}
+
 	/** Drop one waiting message. */
 	async cancel(id: string) {
 		await api(`/v1/runs/${id}/stop`, { method: 'POST' });
@@ -275,6 +282,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			}
 			if (p.status === 'queued') {
 				t.activity = 'queued';
+				if (p.started_early) run.start_at = null;
 				if (p.moved_from) t.movedFrom = p.lost_worker ?? null;
 			}
 			else if (p.status === 'running') {

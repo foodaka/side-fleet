@@ -133,6 +133,9 @@ pub struct Run {
     /// The room this thread works on (set on every run of the thread).
     #[serde(default)]
     pub room_id: Option<Uuid>,
+    /// A task scheduled to start later: no machine claims it before this time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<DateTime<Utc>>,
 }
 
 /// A GitHub pull request for a thread's branch.
@@ -448,7 +451,14 @@ pub struct CreateRunRequest {
     /// Images for the agent to look at, up to `MAX_ATTACHED_IMAGES`.
     #[serde(default)]
     pub images: Vec<ImageUpload>,
+    /// Start later: no machine picks the task up before this time (at most
+    /// `MAX_START_DELAY_DAYS` ahead). Absent: as soon as a machine can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<DateTime<Utc>>,
 }
+
+/// How far ahead a task can be scheduled to start.
+pub const MAX_START_DELAY_DAYS: i64 = 30;
 
 /// Continue a thread: a new run that resumes the previous session with the same agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]

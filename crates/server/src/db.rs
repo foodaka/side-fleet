@@ -42,6 +42,7 @@ fn row_to_run(r: &PgRow) -> Run {
         pr: r.get::<Option<Value>, _>("pr").and_then(|v| serde_json::from_value(v).ok()),
         created_by: r.get("created_by"),
         room_id: r.get("room_id"),
+        start_at: r.get("start_at"),
     }
 }
 
@@ -82,7 +83,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, pr, created_by, room_id";
+    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, pr, created_by, room_id, start_at";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -137,16 +138,18 @@ pub struct NewRun<'a> {
     pub room_id: Option<Uuid>,
     pub context: Option<&'a str>,
     pub resume_from_branch: Option<&'a str>,
+    /// Start later: no machine claims it before then.
+    pub start_at: Option<DateTime<Utc>>,
 }
 
 pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
-    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images, created_by, room_id, context, resume_from_branch } = new;
+    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images, created_by, room_id, context, resume_from_branch, start_at } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images, org_id, effort,
-                           created_by, room_id, context, resume_from_branch)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING {RUN_COLS}"
+                           created_by, room_id, context, resume_from_branch, start_at)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -164,13 +167,37 @@ pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Resu
     .bind(room_id)
     .bind(context)
     .bind(resume_from_branch)
+    .bind(start_at)
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
     run.images = attach_uploads(&mut tx, id, images).await?;
-    let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": task})).await?;
+    let mut payload = json!({"status": "queued", "task": task});
+    if let Some(at) = start_at {
+        payload["start_at"] = json!(at);
+    }
+    let ev = append_event_locked(&mut tx, id, "status", &payload).await?;
     tx.commit().await?;
     Ok((run, ev))
+}
+
+/// Start a scheduled task now instead of at its time. Returns the run (unchanged
+/// if it is not waiting for its start time) and the event to broadcast, or None
+/// if there is no such run.
+pub async fn start_now(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Result<Option<(Run, Option<RunEvent>)>> {
+    let mut tx = pool.begin().await?;
+    let Some(run) = lock_run(&mut tx, Some(org), run_id).await? else {
+        return Ok(None);
+    };
+    if run.status != RunStatus::Queued || run.start_at.is_none_or(|at| at <= Utc::now()) {
+        tx.commit().await?;
+        return Ok(Some((run, None)));
+    }
+    let row = sqlx::query(&format!("UPDATE runs SET start_at = NULL WHERE id = $1 RETURNING {RUN_COLS}")).bind(run_id).fetch_one(&mut *tx).await?;
+    // A queued status again: the page drops the schedule, and waiting claims look again.
+    let ev = append_event_locked(&mut tx, run_id, "status", &json!({"status": "queued", "started_early": true})).await?;
+    tx.commit().await?;
+    Ok(Some((row_to_run(&row), Some(ev))))
 }
 
 /// Archive or unarchive the thread `run_id` belongs to. Returns its root, or None if there is no such run.
@@ -1026,6 +1053,7 @@ pub async fn claim_run(
              WHERE id = (
                 SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.org_id = $9 AND r.repo = ANY($2)
                   AND NOT (r.repo = ANY($3))
+                  AND (r.start_at IS NULL OR r.start_at <= now())
                   AND r.created_by IS NOT DISTINCT FROM (SELECT o.owner_id FROM workers o WHERE o.org_id = $9 AND o.id = $1)
                   AND COALESCE(r.pinned_worker_id,
                         (SELECT p.worker_id FROM runs p
@@ -1039,17 +1067,17 @@ pub async fn claim_run(
                            AND (p.id = r.parent_id OR p.parent_id = r.parent_id)
                            AND p.id <> r.id AND (p.created_at < r.created_at OR p.moved_from IS NOT NULL)
                            AND p.status IN ('queued', 'running'))
-                  AND (NOT ($1 = ANY(r.excluded_worker_ids)) OR r.created_at < now() - make_interval(secs => $7))
+                  AND (NOT ($1 = ANY(r.excluded_worker_ids)) OR COALESCE(r.start_at, r.created_at) < now() - make_interval(secs => $7))
                   AND r.agent = ANY($4)
                   AND r.kind = ANY($8)
                   AND (r.forked_from IS NULL OR 'fork' = ANY($8))
                   AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.org_id = $9 AND l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
                   AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
                        OR (r.parent_id IS NOT NULL AND r.moved_from IS NULL)
-                       OR r.created_at < now() - make_interval(secs => $6)
+                       OR COALESCE(r.start_at, r.created_at) < now() - make_interval(secs => $6)
                        OR NOT EXISTS (SELECT 1 FROM workers w WHERE w.id <> $1 AND {CAN_RUN}
                                       AND w.slots_parallel - w.slots_active > $5))
-                ORDER BY r.created_at LIMIT 1 FOR UPDATE OF r SKIP LOCKED
+                ORDER BY COALESCE(r.start_at, r.created_at) LIMIT 1 FOR UPDATE OF r SKIP LOCKED
              )
              RETURNING {RUN_COLS}"
         ))
@@ -1648,9 +1676,10 @@ pub async fn delete_worker(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<b
     Ok(res.rows_affected() == 1)
 }
 
-/// Queued plus running runs, for the plan's parallel limit.
+/// Queued plus running runs, for the plan's parallel limit. Tasks scheduled for
+/// later don't count until their time comes (claims still keep to the limit).
 pub async fn count_active_runs(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
-    Ok(sqlx::query("SELECT count(*) AS n FROM runs WHERE org_id = $1 AND status IN ('queued', 'running')")
+    Ok(sqlx::query("SELECT count(*) AS n FROM runs WHERE org_id = $1 AND status IN ('queued', 'running') AND (start_at IS NULL OR start_at <= now())")
         .bind(org)
         .fetch_one(pool)
         .await?

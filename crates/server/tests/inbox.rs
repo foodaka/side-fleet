@@ -545,3 +545,83 @@ async fn push_is_off_without_a_vapid_key() {
     let (s, _) = api.call(Method::POST, "/v1/push/subscriptions", Some(sub)).await;
     assert_eq!(s, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn a_snoozed_task_stays_out_until_its_time_or_until_something_new_happens() {
+    let env = TestEnv::start().await;
+    let api = Api::dev(&env);
+    let m = Machine::start(&env, WORKER_TOKEN, "box").await;
+    let snooze = |id: String, until: Value| {
+        let api = &api;
+        async move { api.call(Method::POST, &format!("/v1/runs/{id}/snooze"), Some(json!({ "until": until }))).await }
+    };
+    let in_secs = |s: i64| json!((chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339());
+    // The thread's snooze as the list shows it, once the inbox has caught up with the thread's events.
+    let snoozed_until = |id: String, want_set: bool| {
+        let api = &api;
+        async move {
+            for _ in 0..50 {
+                let (_, v) = api.call(Method::GET, "/v1/runs", None).await;
+                let row = v.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+                if row["snoozed_until"].is_null() != want_set {
+                    return row["snoozed_until"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("snooze of {id} never became {}", if want_set { "set" } else { "unset" });
+        }
+    };
+
+    // Waiting on you, then snoozed: out of the inbox, still listed with when it comes back.
+    let a = api.create_run("Snooze me", json!({})).await;
+    m.claim().await;
+    m.finish(&a, "succeeded", json!({})).await;
+    assert_eq!(ids(&api.inbox().await), [a.as_str()]);
+    let r = api.req(Method::GET, "/v1/inbox/events").send().await.unwrap();
+    let mut stream = Box::pin(r.bytes_stream());
+    let mut buf = String::new();
+    assert_eq!(next_inbox(&mut stream, &mut buf, Duration::from_secs(5)).await.unwrap()[0]["id"], a.as_str());
+    let (s, v) = snooze(a.clone(), in_secs(2)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["id"], a.as_str());
+    assert!(v["snoozed_until"].is_string());
+    assert!(api.inbox().await.is_empty());
+    assert_eq!(next_inbox(&mut stream, &mut buf, Duration::from_secs(5)).await.unwrap(), json!([]), "it leaves the open page's inbox");
+    assert!(snoozed_until(a.clone(), true).await.is_string());
+    // When the time comes it is back, and open pages hear so with no event in the thread.
+    let items = next_inbox(&mut stream, &mut buf, Duration::from_secs(5)).await.expect("back when the snooze ends");
+    assert_eq!(items[0]["id"], a.as_str());
+    assert_eq!(ids(&api.inbox().await), [a.as_str()]);
+
+    // Snoozed while it works: finishing is news, so it wakes.
+    let b = api.create_run("Tell me when done", json!({"permission_mode": "ask"})).await;
+    m.claim().await;
+    assert_eq!(snooze(b.clone(), in_secs(3600)).await.0, StatusCode::OK);
+    m.finish(&b, "succeeded", json!({})).await;
+    assert!(snoozed_until(b.clone(), false).await.is_null());
+    assert_eq!(ids(&api.inbox().await), [b.as_str(), a.as_str()]);
+
+    // So does a tool call waiting for approval.
+    let reply = api.reply(&b).await;
+    assert_eq!(m.claim().await, reply);
+    assert_eq!(snooze(b.clone(), in_secs(3600)).await.0, StatusCode::OK);
+    snoozed_until(b.clone(), true).await;
+    m.ask(&reply, "Bash", json!({"command": "ls"}), Some(60)).await;
+    assert!(snoozed_until(b.clone(), false).await.is_null());
+    api.call(Method::POST, &format!("/v1/runs/{reply}/stop"), None).await;
+
+    // A reply brings a snoozed thread back at once; so does unsnoozing.
+    assert_eq!(snooze(a.clone(), in_secs(3600)).await.0, StatusCode::OK);
+    let r2 = api.reply(&a).await;
+    assert!(snoozed_until(a.clone(), false).await.is_null());
+    api.call(Method::POST, &format!("/v1/runs/{r2}/stop"), None).await;
+    assert_eq!(snooze(a.clone(), in_secs(3600)).await.0, StatusCode::OK);
+    let (s, v) = snooze(a.clone(), Value::Null).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["snoozed_until"].is_null());
+
+    // Only a time ahead, and not too far ahead.
+    assert_eq!(snooze(a.clone(), in_secs(-60)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(snooze(a.clone(), in_secs(400 * 86400)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(snooze(uuid::Uuid::new_v4().to_string(), in_secs(60)).await.0, StatusCode::NOT_FOUND);
+}

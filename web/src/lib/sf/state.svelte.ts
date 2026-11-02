@@ -3,6 +3,7 @@ import type { AuthMethods, MyMachine, Enrollment, Me, Member, RunSummary, Setup,
 import { telemetry } from './telemetry.svelte';
 import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
+import { wakeLabel } from './snooze';
 
 type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 
@@ -166,6 +167,21 @@ class Fleet {
 		} catch (e) {
 			Object.assign(this, before);
 			toast.error(archived ? 'Could not archive' : 'Could not unarchive', { description: (e as Error).message });
+		}
+		void this.refresh();
+	}
+
+	/** Snooze a thread until `until` (or wake it with null), at once; snoozing offers an undo. */
+	async setSnoozed(r: RunSummary, until: Date | null) {
+		const iso = until?.toISOString() ?? null;
+		const before = this.runs;
+		this.runs = this.runs.map((x) => (x.id === r.id ? { ...x, snoozed_until: iso } : x));
+		try {
+			await api(`/v1/runs/${r.id}/snooze`, { method: 'POST', body: JSON.stringify({ until: iso }) });
+			if (until) toast('Snoozed until ' + wakeLabel(until, Date.now()), { description: r.task.slice(0, 80), action: { label: 'Undo', onClick: () => void this.setSnoozed(r, null) } });
+		} catch (e) {
+			this.runs = before;
+			toast.error(until ? 'Could not snooze' : 'Could not unsnooze', { description: (e as Error).message });
 		}
 		void this.refresh();
 	}

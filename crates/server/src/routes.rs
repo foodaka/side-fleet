@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sidefleet_core::{
-    Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
+    Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, PERMISSION_MODES,
 };
@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/pr", post(open_pr))
         .route("/v1/runs/{id}/archive", post(archive_run))
+        .route("/v1/runs/{id}/snooze", post(snooze_run))
         .route("/v1/runs/{id}/approvals", get(list_approvals))
         .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
         .route("/v1/runs/{id}/approvals/{approval}/deny", post(deny_tool))
@@ -834,6 +835,36 @@ async fn archive_run(
     let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
     state.inbox.signal(caller.org_id()); // archived tasks leave the inbox
+    Ok(Json(root))
+}
+
+/// Snoozes last at most this long.
+const MAX_SNOOZE_DAYS: i64 = 366;
+
+/// Hide a thread from the list and the inbox until a time (or wake it now). Any run
+/// of the thread may be named. A reply, or the thread starting to wait on you after
+/// it was snoozed, wakes it early.
+async fn snooze_run(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SnoozeRequest>,
+) -> Result<Json<Run>, ApiError> {
+    if let Some(until) = req.until {
+        let now = chrono::Utc::now();
+        if until <= now {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "until must be in the future".into()));
+        }
+        if until > now + chrono::Duration::days(MAX_SNOOZE_DAYS) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, format!("a snooze lasts at most {MAX_SNOOZE_DAYS} days")));
+        }
+    }
+    if !caller.is_owner() {
+        own_thread(&state, &caller, id).await?;
+    }
+    let root = db::set_snoozed(&state.pool, caller.org_id(), id, req.until).await?.ok_or_else(not_found)?;
+    tracing::info!(run_id = %root.id, until = ?req.until, "thread snooze set");
+    state.inbox.signal(caller.org_id()); // snoozed tasks leave the inbox until they wake
     Ok(Json(root))
 }
 

@@ -39,6 +39,7 @@ fn row_to_run(r: &PgRow) -> Run {
         fork_commit: r.get("fork_commit"),
         context: r.get("context"),
         archived_at: r.get("archived_at"),
+        snoozed_until: r.get("snoozed_until"),
         pr: r.get::<Option<Value>, _>("pr").and_then(|v| serde_json::from_value(v).ok()),
         created_by: r.get("created_by"),
         room_id: r.get("room_id"),
@@ -82,7 +83,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, pr, created_by, room_id";
+    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pr, created_by, room_id";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -185,6 +186,32 @@ pub async fn set_archived(pool: &PgPool, org: Uuid, run_id: Uuid, archived: bool
     .fetch_optional(pool)
     .await?;
     Ok(row.as_ref().map(row_to_run))
+}
+
+/// Snooze the thread `run_id` belongs to until `until`, or wake it (None). Returns its root,
+/// or None if there is no such run.
+pub async fn set_snoozed(pool: &PgPool, org: Uuid, run_id: Uuid, until: Option<DateTime<Utc>>) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!(
+        "UPDATE runs SET snoozed_until = $2, snoozed_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END
+         WHERE id = (SELECT COALESCE(parent_id, id) FROM runs WHERE id = $1 AND org_id = $3) RETURNING {RUN_COLS}"
+    ))
+    .bind(run_id)
+    .bind(until)
+    .bind(org)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_run))
+}
+
+/// Wake a snoozed thread because it started waiting on you at `since`, after it was snoozed.
+/// Returns whether it was woken.
+pub async fn wake_if_snoozed_before(pool: &PgPool, root: Uuid, since: DateTime<Utc>) -> sqlx::Result<bool> {
+    let r = sqlx::query("UPDATE runs SET snoozed_until = NULL, snoozed_at = NULL WHERE id = $1 AND snoozed_until IS NOT NULL AND snoozed_at < $2")
+        .bind(root)
+        .bind(since)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected() > 0)
 }
 
 pub enum FollowUpOutcome {
@@ -322,8 +349,8 @@ pub async fn create_follow_up(
         payload["switched_from"] = json!(latest.agent);
     }
     let ev = append_event_locked(&mut tx, id, "status", &payload).await?;
-    // Writing in an archived thread brings it back.
-    sqlx::query("UPDATE runs SET archived_at = NULL WHERE id = $1").bind(root_id).execute(&mut *tx).await?;
+    // Writing in an archived or snoozed thread brings it back.
+    sqlx::query("UPDATE runs SET archived_at = NULL, snoozed_until = NULL, snoozed_at = NULL WHERE id = $1").bind(root_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(FollowUpOutcome::Created(run, ev))
 }

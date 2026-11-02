@@ -15,11 +15,33 @@
 	import Archive from '@lucide/svelte/icons/archive';
 	import ArchiveRestore from '@lucide/svelte/icons/archive-restore';
 	import ChevronRight from '@lucide/svelte/icons/chevron-right';
+	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
+	import * as Dialog from '#lib/components/ui/dialog';
+	import { Button } from '#lib/components/ui/button';
+	import { prefs } from '../prefs.svelte';
+	import { isSnoozed, localInput, presetTime, wakeLabel } from '../snooze';
 
 	let { query = '', activeId = null }: { query?: string; activeId?: string | null } = $props();
 
 	let scroller = $state<HTMLElement | null>(null);
 	let showArchived = $state(false);
+	let showSnoozed = $state(false);
+
+	// "Pick a date and time…" for one thread.
+	let picking = $state<RunSummary | null>(null);
+	let pickAt = $state('');
+	function pick(r: RunSummary) {
+		picking = r;
+		pickAt = localInput(presetTime({ label: '', time: '09:00', day: 'tomorrow' }, Date.now()));
+	}
+	const pickedTime = $derived(pickAt ? new Date(pickAt) : null);
+	const pickOk = $derived(!!pickedTime && !isNaN(pickedTime.getTime()) && pickedTime.getTime() > fleet.now);
+	function snoozePicked(e: Event) {
+		e.preventDefault();
+		if (!picking || !pickOk) return;
+		void fleet.setSnoozed(picking, pickedTime);
+		picking = null;
+	}
 
 	function toggleArchived() {
 		showArchived = !showArchived;
@@ -37,8 +59,11 @@
 		try { localStorage.setItem(SCOPE, s); } catch { /* storage blocked */ }
 	}
 	const filtering = $derived(fleet.multi && !!fleet.userId);
-	const runs = $derived(filtering && scope === 'mine' ? fleet.runs.filter((r) => r.created_by === fleet.userId) : fleet.runs);
-	const theirs = $derived(filtering ? fleet.runs.filter((r) => r.created_by !== fleet.userId).length : 0);
+	const scoped = $derived(filtering && scope === 'mine' ? fleet.runs.filter((r) => r.created_by === fleet.userId) : fleet.runs);
+	// Snoozed threads wait in their own section and come back on their own when the time comes.
+	const runs = $derived(scoped.filter((r) => !isSnoozed(r, fleet.now)));
+	const snoozed = $derived(scoped.filter((r) => isSnoozed(r, fleet.now)).sort((a, b) => a.snoozed_until!.localeCompare(b.snoozed_until!)));
+	const theirs = $derived(filtering ? fleet.runs.filter((r) => r.created_by !== fleet.userId && !isSnoozed(r, fleet.now)).length : 0);
 
 	/** The repo most runs are in; rows from any other repo say which one. */
 	const homeRepo = $derived.by(() => {
@@ -75,7 +100,7 @@
 	});
 </script>
 
-{#snippet row(r: RunSummary, detail: boolean)}
+{#snippet row(r: RunSummary, detail: boolean, asleep = false)}
 	{@const on = r.id === activeId}
 	{@const waiting = on ? undefined : inbox.byId.get(r.id)}
 	{@const unread = !on && (!!waiting || seen.unread(r))}
@@ -113,6 +138,8 @@
 						Waiting for a machine{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 					{/if}
 				</span>
+			{:else if asleep}
+				<span class="tnum flex items-center gap-1 truncate text-[11.5px] text-muted-foreground"><AlarmClock class="size-3 shrink-0" />Back {wakeLabel(r.snoozed_until!, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}</span>
 			{:else if other}
 				<span class="truncate font-mono text-[11px] text-faint">{repoLabel(r.repo)}</span>
 			{/if}
@@ -126,7 +153,7 @@
 			<span class="mt-[5px] size-2 shrink-0 rounded-full {reasonTone(waiting.reason)} ring-2 ring-sidebar group-hover/row:invisible" role="img" aria-label="Waiting on you: {waiting.label}" title={waiting.label}></span>
 		{:else if unread}
 			<span class="mt-[6px] size-1.5 shrink-0 rounded-full bg-foreground group-hover/row:invisible" aria-label="New"></span>
-		{:else if !detail}
+		{:else if !detail && !asleep}
 			<span class="tnum shrink-0 text-[11px] text-faint group-hover:text-muted-foreground group-hover/row:invisible">{ago(r.last_activity_at, fleet.now)}</span>
 		{/if}
 	</a>
@@ -144,6 +171,22 @@
 			{#if r.archived_at}
 				<DropdownMenu.Item onclick={() => fleet.setArchived(r, false)}><ArchiveRestore class="size-3.5" />Unarchive</DropdownMenu.Item>
 			{:else}
+				{#if isSnoozed(r, fleet.now)}
+					<DropdownMenu.Item onclick={() => fleet.setSnoozed(r, null)}><AlarmClock class="size-3.5" />Unsnooze</DropdownMenu.Item>
+				{/if}
+				<DropdownMenu.Sub>
+					<DropdownMenu.SubTrigger><AlarmClock class="size-3.5" />{isSnoozed(r, fleet.now) ? 'Snooze until…' : 'Snooze'}</DropdownMenu.SubTrigger>
+					<DropdownMenu.SubContent class="min-w-56">
+						{#each prefs.snoozePresets as p, i (i)}
+							<DropdownMenu.Item onclick={() => fleet.setSnoozed(r, presetTime(p, Date.now()))}>
+								<span class="flex-1 whitespace-nowrap">{p.label}</span><span class="tnum ml-4 text-xs whitespace-nowrap text-muted-foreground">{wakeLabel(presetTime(p, fleet.now), fleet.now)}</span>
+							</DropdownMenu.Item>
+						{/each}
+						<DropdownMenu.Separator />
+						<DropdownMenu.Item onclick={() => pick(r)}>Pick a date and time…</DropdownMenu.Item>
+						<DropdownMenu.Item onclick={() => void goto('#/settings')}><span class="text-muted-foreground">Edit these choices…</span></DropdownMenu.Item>
+					</DropdownMenu.SubContent>
+				</DropdownMenu.Sub>
 				<DropdownMenu.Item onclick={() => fleet.setArchived(r, true)}><Archive class="size-3.5" />Archive</DropdownMenu.Item>
 			{/if}
 		</DropdownMenu.Content>
@@ -212,6 +255,21 @@
 			<p class="px-2.5 pt-4 text-[11px] text-faint">Showing the latest {fleet.runs.length} tasks{filtering ? ' in the team' : ''}.</p>
 		{/if}
 	{/if}
+	{#if fleet.loaded && !q && snoozed.length}
+		<button
+			type="button"
+			aria-expanded={showSnoozed}
+			onclick={() => (showSnoozed = !showSnoozed)}
+			class="mt-3 flex w-full items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium text-faint hover:text-muted-foreground"
+		>
+			<ChevronRight class="size-3 transition-transform {showSnoozed ? 'rotate-90' : ''}" />Snoozed
+			<span class="tnum font-normal">{snoozed.length}</span>
+		</button>
+		{#if showSnoozed}
+			{#each snoozed as r (r.id)}{@render row(r, false, true)}{/each}
+			<p class="px-2.5 pt-1 text-[11px] leading-relaxed text-faint">Each comes back at its time, or sooner if it finishes, fails or asks you something.</p>
+		{/if}
+	{/if}
 	{#if fleet.loaded && !q}
 		<button
 			type="button"
@@ -233,3 +291,25 @@
 		{/if}
 	{/if}
 </div>
+
+<Dialog.Root open={!!picking} onOpenChange={(o) => { if (!o) picking = null; }}>
+	<Dialog.Content class="sm:max-w-[24rem]">
+		<Dialog.Header>
+			<Dialog.Title>Snooze until…</Dialog.Title>
+			<Dialog.Description class="truncate">{picking?.task}</Dialog.Description>
+		</Dialog.Header>
+		<form class="flex flex-col gap-3" onsubmit={snoozePicked}>
+			<input
+				type="datetime-local"
+				bind:value={pickAt}
+				min={localInput(new Date(fleet.now))}
+				aria-label="Snooze until"
+				class="h-9 w-full rounded-lg border border-input bg-card px-3 text-[14px] outline-none focus:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]"
+			/>
+			<p class="text-[12px] text-muted-foreground">
+				{#if pickOk}It comes back {wakeLabel(pickedTime!, fleet.now)}, or sooner if it finishes, fails or asks you something.{:else}Pick a time ahead.{/if}
+			</p>
+			<Button type="submit" class="h-9 rounded-full" disabled={!pickOk}>Snooze</Button>
+		</form>
+	</Dialog.Content>
+</Dialog.Root>

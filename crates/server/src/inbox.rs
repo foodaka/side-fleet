@@ -75,6 +75,17 @@ pub struct InboxItem {
     /// Who started it: a task waits on them, not on the whole team (None: anyone in the org).
     #[serde(skip)]
     pub owner: Option<Uuid>,
+    /// The task is snoozed: until when, and when it was snoozed.
+    #[serde(skip)]
+    pub snoozed: Option<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+impl InboxItem {
+    /// Hidden by a snooze: snoozed until later, and nothing new since it was snoozed.
+    /// Something new wakes the task (see [`touch`]).
+    fn snoozed_now(&self, now: DateTime<Utc>) -> bool {
+        self.snoozed.is_some_and(|(until, at)| until > now && self.since <= at)
+    }
 }
 
 /// Live state: per-org change signals and what was pushed.
@@ -177,7 +188,7 @@ pub async fn pending_approvals(pool: &PgPool, org: Uuid) -> sqlx::Result<HashMap
 /// an approval first, then newest first.
 async fn waiting(pool: &PgPool, org: Uuid, root: Option<Uuid>) -> sqlx::Result<Vec<InboxItem>> {
     let rows = sqlx::query(
-        "SELECT root.id AS root_id, root.task AS title, root.repo, root.created_by, l.id AS run_id, l.agent, l.status, l.kind,
+        "SELECT root.id AS root_id, root.task AS title, root.repo, root.created_by, root.snoozed_until, root.snoozed_at, l.id AS run_id, l.agent, l.status, l.kind,
                 (l.moved_from IS NOT NULL) AS moved,
                 se.payload->>'reason' AS status_reason, coalesce(se.at, l.created_at) AS status_at,
                 ul.payload->>'until' AS limit_until
@@ -232,6 +243,7 @@ async fn waiting(pool: &PgPool, org: Uuid, root: Option<Uuid>) -> sqlx::Result<V
                 detail,
                 since,
                 owner: r.get("created_by"),
+                snoozed: r.get::<Option<DateTime<Utc>>, _>("snoozed_until").zip(r.get::<Option<DateTime<Utc>>, _>("snoozed_at")),
             });
         }
     }
@@ -252,9 +264,16 @@ async fn ensure_viewer(pool: &PgPool, org: Uuid, viewer: Uuid) -> sqlx::Result<(
 
 /// The viewer's inbox in `org`: waiting tasks they have not seen since they started waiting.
 pub async fn list(pool: &PgPool, org: Uuid, viewer: Uuid) -> sqlx::Result<Vec<InboxItem>> {
-    let all = waiting(pool, org, None).await?;
+    Ok(list_and_next_wake(pool, org, viewer).await?.0)
+}
+
+/// [`list`], and when the first task it leaves out because of a snooze comes back.
+async fn list_and_next_wake(pool: &PgPool, org: Uuid, viewer: Uuid) -> sqlx::Result<(Vec<InboxItem>, Option<DateTime<Utc>>)> {
+    let now = Utc::now();
+    let (snoozed, all): (Vec<_>, Vec<_>) = waiting(pool, org, None).await?.into_iter().partition(|i| i.snoozed_now(now));
+    let next_wake = snoozed.iter().filter_map(|i| i.snoozed.map(|(until, _)| until)).min();
     if all.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), next_wake));
     }
     let ids: Vec<Uuid> = all.iter().map(|i| i.id).collect();
     let seen: HashMap<Uuid, DateTime<Utc>> = sqlx::query("SELECT root_id, seen_at FROM inbox_seen WHERE viewer_id = $1 AND root_id = ANY($2)")
@@ -271,14 +290,15 @@ pub async fn list(pool: &PgPool, org: Uuid, viewer: Uuid) -> sqlx::Result<Vec<In
         .fetch_optional(pool)
         .await?
         .map(|r| r.get("cleared_at"));
-    Ok(all
+    let items = all
         .into_iter()
         .filter(|i| i.owner.is_none_or(|o| o == viewer))
         .filter(|i| {
             let a = Attention { reason: i.reason, since: i.since, detail: None };
             attention::unseen(&a, seen.get(&i.id).copied().max(cleared))
         })
-        .collect())
+        .collect();
+    Ok((items, next_wake))
 }
 
 /// Mark a task seen (opened or dismissed). Any run of the thread may be named.
@@ -348,9 +368,16 @@ pub async fn watch(state: AppState) {
 /// just started waiting. Call this after changing state the inbox reads without a
 /// run event (pending approvals, for one).
 pub async fn touch(state: &AppState, org: Uuid, root: Uuid) -> sqlx::Result<()> {
+    let w = waiting(&state.pool, org, Some(root)).await?.pop();
+    // It started waiting on you after it was snoozed: that ends the snooze.
+    if let Some(w) = w.as_ref().filter(|w| w.snoozed.is_some_and(|(_, at)| w.since > at)) {
+        if crate::db::wake_if_snoozed_before(&state.pool, root, w.since).await? {
+            tracing::info!(task = %root, reason = ?w.reason, "snoozed task woke: it is waiting on you");
+        }
+    }
     state.inbox.signal(org);
     let Some(vapid) = state.config.vapid.clone() else { return Ok(()) };
-    let Some(w) = waiting(&state.pool, org, Some(root)).await?.pop() else { return Ok(()) };
+    let Some(w) = w else { return Ok(()) };
     if Utc::now() - w.since > chrono::Duration::seconds(PUSH_FRESH_SECS) {
         return Ok(());
     }
@@ -364,7 +391,7 @@ pub async fn touch(state: &AppState, org: Uuid, root: Uuid) -> sqlx::Result<()> 
             Ok(mut v) => v.pop(),
             Err(e) => return tracing::warn!(error = %e, "push recheck failed"),
         };
-        let Some(item) = now.filter(|i| (i.reason, i.since) == key) else { return };
+        let Some(item) = now.filter(|i| (i.reason, i.since) == key && !i.snoozed_now(Utc::now())) else { return };
         if !state.inbox.mark_pushed(root, key) {
             return;
         }
@@ -430,8 +457,11 @@ async fn inbox_events(State(state): State<AppState>, Extension(caller): Extensio
     let stream = async_stream::stream! {
         let mut last = String::new();
         loop {
-            match list(&pool, org, v).await {
-                Ok(items) => {
+            // A snoozed task comes back when its snooze ends, with no event to say so.
+            let mut wake = None;
+            match list_and_next_wake(&pool, org, v).await {
+                Ok((items, next_wake)) => {
+                    wake = next_wake;
                     let data = json!({ "items": items }).to_string();
                     if data != last {
                         yield Ok(Event::default().event("inbox").data(data.clone()));
@@ -440,9 +470,13 @@ async fn inbox_events(State(state): State<AppState>, Extension(caller): Extensio
                 }
                 Err(e) => tracing::warn!(error = %e, "inbox stream refresh failed"),
             }
-            match rx.recv().await {
-                Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
+            let until_wake = wake.map(|t| (t - Utc::now()).to_std().unwrap_or_default() + Duration::from_millis(50));
+            tokio::select! {
+                r = rx.recv() => match r {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+                _ = tokio::time::sleep(until_wake.unwrap_or(Duration::MAX)), if until_wake.is_some() => {}
             }
             // Let a burst of changes (a finish writes several events) settle into one refresh.
             tokio::time::sleep(Duration::from_millis(150)).await;

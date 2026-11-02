@@ -59,7 +59,9 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   also gets a marker in the sidebar. A task leaves the list when you open it, reply or dismiss it,
   and what you have seen is kept on the control plane, so it is the same on your phone and laptop.
   Turn on "Notify me" for a push notification when a task starts waiting; it carries only the
-  task's title and the reason, never agent output. Browsers only allow push on HTTPS pages or
+  task's title and the reason, never agent output. Snooze a task from its menu ("Tomorrow
+  morning", or any date and time; edit the choices in Settings) and it leaves the list and the bell
+  until then, or until it finishes, fails or asks you something. Browsers only allow push on HTTPS pages or
   `localhost` (on iPhone, add the page to the Home Screen first). `serve` creates the VAPID key for
   it in `~/.sidefleet/server.env`; elsewhere set `SIDEFLEET_VAPID_PRIVATE_KEY`.
 - **Build with your team** (hosted mode): invite people to your org with a link, and everyone sees

@@ -91,7 +91,7 @@ what it can call; anything else answers `403`:
 | Scope | Can |
 |---|---|
 | `read` | `GET` runs, threads, events, approvals, images, workers and repos; `GET /v1/me` shows the token's name and scope |
-| `tasks` | also start runs, send messages, stop, restore, fork, open PRs and archive; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
+| `tasks` | also start runs, send messages, stop, restore, fork, open PRs, archive and snooze; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
 | `full` | also approve or deny tool calls, and use full access |
 
 No token manages orgs, members, worker or API tokens, enrollments or machines, or reads
@@ -171,6 +171,7 @@ go into a path.
 | `POST` | `/v1/runs/:id/approvals/:approval/approve` | `200` with the approval, now `approved`: the agent's tool call goes ahead. `409` when it was already decided, expired or cancelled, or the run is no longer running; `410` when its time ran out first (it is now `expired`) |
 | `POST` | `/v1/runs/:id/approvals/:approval/deny` `{message?}` | `200` with the approval, now `denied`; the agent is told `message`, or that the user denied it. Same `409`/`410` as approve |
 | `POST` | `/v1/runs/:id/stop` | queued → `stopped` at once; running → `stop_requested` until the worker confirms |
+| `POST` | `/v1/runs/:id/snooze` `{until}` | `200` with the thread's root run: its `snoozed_until` is `until` (RFC 3339, in the future, at most 366 days ahead; `400` otherwise), or `null` to wake it now. Any run of the thread may be named. A snoozed thread stays in `GET /v1/runs` (the page lists it apart until `snoozed_until`) and leaves the inbox until then. It wakes early (`snoozed_until` back to `null`) on a reply, or when it starts waiting on you after it was snoozed: it finishes, fails or asks for a tool approval |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `DELETE` | `/v1/workers/:id` | forget a machine (frees a plan slot); `409` while it runs a task |
 | `GET` | `/v1/setup` | control URL and, in the default org, the first static worker token, for the page's connect command |
@@ -194,7 +195,8 @@ go into a path.
 usage limit, or queued again until another machine takes it; `detail` says when it resets),
 `machine_lost` (failed because its machine stopped responding, or moved and waiting for another
 machine) or `approval_needed` (reserved for tool approvals). Running, queued replies, stopped
-tasks, finished restores and archived tasks are not listed. `since` is when it started waiting; it
+tasks, finished restores, archived tasks and snoozed ones (until their time, unless they started
+waiting after they were snoozed) are not listed; the stream sends the list again when a snooze ends. `since` is when it started waiting; it
 stays listed until the caller opens or dismisses it after that, or replies. "Seen" is kept per
 viewer: each signed-in user has their own, and the developer key is one shared viewer. Tasks from
 the last 30 days are considered. With `SIDEFLEET_VAPID_PRIVATE_KEY` set, each subscribed browser

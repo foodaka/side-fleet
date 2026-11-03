@@ -42,6 +42,46 @@ impl std::fmt::Display for ClientError {
     }
 }
 
+/// The control plane, or something in front of it such as a firewall, refused the
+/// request itself: sending the same request again gets the same answer.
+#[derive(Debug)]
+pub struct Rejected {
+    pub status: StatusCode,
+    /// What came back, in brief (see [`brief_body`]).
+    pub detail: String,
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "control plane returned {}: {}", self.status, self.detail)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
+/// An error page in a line: an HTML page's title and request id (a firewall's
+/// "Blocked" page is a couple of hundred kilobytes of inline fonts), or the
+/// start of anything else.
+pub fn brief_body(body: &str) -> String {
+    const MAX: usize = 300;
+    if !body.trim_start().starts_with('<') {
+        let body = body.trim();
+        return match body.char_indices().nth(MAX) {
+            Some((i, _)) => format!("{}…", &body[..i]),
+            None => body.to_string(),
+        };
+    }
+    let between = |open: &str, close: &str| {
+        let start = body.find(open)? + open.len();
+        Some(body[start..].split(close).next()?.trim().to_string())
+    };
+    let title = between("<title>", "</title>").filter(|t| !t.is_empty()).unwrap_or_else(|| "an HTML page".into());
+    match between("Request ID:", "<").filter(|id| !id.is_empty()) {
+        Some(id) => format!("{title} (request id {id})"),
+        None => title,
+    }
+}
+
 impl ControlClient {
     pub fn new(base: &str, token: &str, worker_id: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -68,14 +108,18 @@ impl ControlClient {
             if body.contains("worker not registered") {
                 return Err(ClientError::NotRegistered);
             }
-            return Err(anyhow!("control plane returned 404: {body}").into());
+            return Err(anyhow::Error::new(Rejected { status, detail: brief_body(&body) }).into());
         }
         if status == StatusCode::UNAUTHORIZED {
             return Err(anyhow!("control plane rejected the worker token (401)").into());
         }
         if !status.is_success() {
-            let body = r.text().await.unwrap_or_default();
-            return Err(anyhow!("control plane returned {status}: {body}").into());
+            let detail = brief_body(&r.text().await.unwrap_or_default());
+            // Timeouts and rate limits pass; any other 4xx is about the request itself.
+            if status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT && status != StatusCode::TOO_MANY_REQUESTS {
+                return Err(anyhow::Error::new(Rejected { status, detail }).into());
+            }
+            return Err(anyhow!("control plane returned {status}: {detail}").into());
         }
         Ok(r)
     }
@@ -176,6 +220,7 @@ impl ControlClient {
         Ok(Some(r.json().await.context("claim response")?))
     }
 
+    /// A refused post fails with [`Rejected`] (see `downcast_ref`).
     pub async fn post_events(&self, run_id: Uuid, events: Vec<NewEvent>) -> Result<RunControl> {
         let r = self
             .http
@@ -185,7 +230,10 @@ impl ControlClient {
             .send()
             .await
             .context("post events failed")?;
-        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        let r = Self::check(r).await.map_err(|e| match e {
+            ClientError::Other(e) => e,
+            e => anyhow!("{e}"),
+        })?;
         Ok(r.json().await?)
     }
 
@@ -356,5 +404,24 @@ impl Backoff {
         let d = self.current;
         self.current = (self.current * 2).min(self.max);
         d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::brief_body;
+
+    #[test]
+    fn error_pages_are_summed_up_in_a_line() {
+        let fonts = "x".repeat(200_000);
+        let page = format!(
+            "<!DOCTYPE html><html><head><title>Blocked</title><style>src: url(data:font/woff2;base64,{fonts})</style></head>\
+             <body><p>Request ID: a549e02b6d1418ee</p><p>Your IP address: 192.0.2.1</p></body></html>"
+        );
+        assert_eq!(brief_body(&page), "Blocked (request id a549e02b6d1418ee)");
+        assert_eq!(brief_body("<html><body>nope</body></html>"), "an HTML page");
+        assert_eq!(brief_body("  run not found\n"), "run not found");
+        let long = "é".repeat(400);
+        assert_eq!(brief_body(&long).chars().count(), 301, "300 characters and an ellipsis, cut on a char boundary");
     }
 }

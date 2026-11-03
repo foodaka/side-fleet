@@ -25,6 +25,7 @@ sysinfo.workspace = true
 
 [dev-dependencies]
 sidefleet-server.workspace = true
+axum.workspace = true
 chrono.workspace = true
 futures.workspace = true
 sqlx.workspace = true

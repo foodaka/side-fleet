@@ -37,6 +37,42 @@ fn fake_bin() -> String {
     fixture("fake_claude.sh")
 }
 
+/// What the fake agent prints that [`firewall`] takes for an attack.
+const FIREWALL_BAIT: &str = "../../etc/shadow";
+
+/// A stand-in for a web application firewall in front of the control plane: it
+/// passes requests through to `target`, but answers any whose body holds
+/// [`FIREWALL_BAIT`] with a 403 HTML page, as a hosting provider's would.
+async fn firewall(target: &str) -> String {
+    use axum::{body::Body, extract::{Request, State}, http::StatusCode, response::{IntoResponse, Response}};
+    async fn pass(State(target): State<String>, req: Request) -> Response {
+        let (parts, body) = req.into_parts();
+        let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        if body.windows(FIREWALL_BAIT.len()).any(|w| w == FIREWALL_BAIT.as_bytes()) {
+            let page = "<!DOCTYPE html><html><head><title>Blocked</title></head><body><p>Request ID: test-1234</p></body></html>";
+            return (StatusCode::FORBIDDEN, [("content-type", "text/html")], page).into_response();
+        }
+        let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+        let mut out = Client::new().request(parts.method, format!("{target}{path}")).body(body);
+        for (k, v) in parts.headers.iter().filter(|(k, _)| *k != "host") {
+            out = out.header(k, v);
+        }
+        let r = out.send().await.unwrap();
+        let mut resp = Response::new(Body::from(Vec::new()));
+        *resp.status_mut() = r.status();
+        if let Some(ct) = r.headers().get("content-type") {
+            resp.headers_mut().insert("content-type", ct.clone());
+        }
+        *resp.body_mut() = Body::from(r.bytes().await.unwrap());
+        resp
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().fallback(pass).with_state(target.to_string());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
 struct Harness {
     env: TestEnv,
     http: Client,
@@ -46,6 +82,15 @@ struct Harness {
 
 impl Harness {
     async fn start(max_runs: usize) -> Harness {
+        Self::start_with(max_runs, false).await
+    }
+
+    /// The worker reaches the control plane through [`firewall`].
+    async fn start_behind_firewall(max_runs: usize) -> Harness {
+        Self::start_with(max_runs, true).await
+    }
+
+    async fn start_with(max_runs: usize, behind_firewall: bool) -> Harness {
         let env = TestEnv::start().await;
         let repos = tempfile::tempdir().unwrap();
         // `demo` is a real git repo (worktrees work); `group/other` only looks like one (fallback path).
@@ -53,7 +98,7 @@ impl Harness {
         git_init(&repos.path().join("demo"));
         std::fs::create_dir_all(repos.path().join("group/other/.git")).unwrap();
         let cfg = WorkerConfig {
-            control_url: env.base_url.clone(),
+            control_url: if behind_firewall { firewall(&env.base_url).await } else { env.base_url.clone() },
             token: WORKER_TOKEN.into(),
             worker_id: "test-worker".into(),
             display_name: "Test Worker".into(),
@@ -321,6 +366,28 @@ async fn stop_while_running_kills_the_agent_and_marks_stopped() {
     assert!(kinds.contains(&"stopped".to_string()), "{kinds:?}");
     assert_eq!(kinds.last().unwrap(), "status");
     assert!(!kinds.contains(&"result".to_string()), "no final result after a kill: {kinds:?}");
+
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn output_a_firewall_refuses_is_left_out_and_the_run_still_finishes() {
+    let h = Harness::start_behind_firewall(1).await;
+    let id = h.create("bait the firewall", "demo").await;
+
+    // Before, the worker resent the refused post forever: the run never finished.
+    let run = h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    assert_eq!(run.result.unwrap()["subtype"], "success");
+
+    let evs = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
+    assert!(!evs.iter().any(|e| e.payload.to_string().contains(FIREWALL_BAIT)), "the refused text never got through");
+    let note = evs.iter().find(|e| e.kind == "error").expect("the page says something is missing");
+    assert!(note.payload["message"].as_str().unwrap().contains("the server refused it (403 Forbidden)"), "{}", note.payload);
+    // Only the refused event is missing: what came with it and after it arrived.
+    for kind in ["tool_result", "result", "snapshot"] {
+        assert!(evs.iter().any(|e| e.kind == kind), "{kind} missing: {:?}", evs.iter().map(|e| &e.kind).collect::<Vec<_>>());
+    }
+    assert!(evs.iter().any(|e| e.payload["text"] == "The working tree has one untracked file."));
 
     h.teardown().await;
 }

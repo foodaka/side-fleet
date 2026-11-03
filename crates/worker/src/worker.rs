@@ -1,12 +1,12 @@
 //! The worker loop: register, heartbeat every 15s, long-poll for a claimable run,
 //! execute it, and report back. Backs off on control plane errors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunStatus, Slots, ASK_MODE, LIVE_TEXT};
+use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunControl, RunStatus, Slots, ASK_MODE, LIVE_TEXT};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::agent::{self, AgentSpec, ApprovalHook};
 use crate::approval::{self, Bridge};
 use crate::checkpoint::{self, ChangeTracker};
-use crate::client::{Backoff, ClientError, ControlClient};
+use crate::client::{Backoff, ClientError, ControlClient, Rejected};
 use crate::diff;
 use crate::snapshot;
 use crate::detect::{self, DetectOptions};
@@ -675,16 +675,24 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         tx
     });
 
+    // Watches for a stop on its own, so one is noticed even while the agent is silent
+    // or its output is slow to post.
+    let watcher = {
+        let client = client.clone();
+        let stop_tx = stop_tx.clone();
+        tokio::spawn(async move {
+            stop_requested(&client, run_id).await;
+            let _ = stop_tx.send(true);
+        })
+    };
+
     // Forwarder: sends each event immediately, and the text the agent is writing
-    // every LIVE_TEXT_EVERY; also polls control every second while idle so a stop
-    // is noticed even if the agent is silent.
+    // every LIVE_TEXT_EVERY.
     let forwarder = {
         let client = client.clone();
         let stop_tx = stop_tx.clone();
         tokio::spawn(async move {
             let mut changes = ChangeTracker::default();
-            let mut poll = tokio::time::interval(Duration::from_secs(1));
-            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut backoff = Backoff::new(Duration::from_secs(10));
             let mut live = LiveText::default();
             loop {
@@ -702,31 +710,20 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                         if batch.is_empty() {
                             continue;
                         }
-                        loop {
-                            match client.post_events(run_id, batch.clone()).await {
-                                Ok(ctl) => {
-                                    backoff.reset();
-                                    if ctl.stop_requested || ctl.status != RunStatus::Running {
-                                        let _ = stop_tx.send(true);
-                                    }
-                                    // After the post, so a run moved elsewhere is already stopped here.
-                                    if let Some(tx) = &change_tx {
-                                        // Every event must be observed (tool_use records what a later result closes).
-                                        let mut changed = false;
-                                        for e in &batch {
-                                            changed |= changes.observe(e);
-                                        }
-                                        if changed {
-                                            let _ = tx.send(());
-                                        }
-                                    }
-                                    break;
-                                }
-                                Err(e) => {
-                                    let wait = backoff.next_delay();
-                                    tracing::warn!(error = %e, retry_in = ?wait, "posting events failed");
-                                    tokio::time::sleep(wait).await;
-                                }
+                        if let Some(ctl) = deliver(&client, run_id, batch.clone(), &mut backoff).await {
+                            if ctl.stop_requested || ctl.status != RunStatus::Running {
+                                let _ = stop_tx.send(true);
+                            }
+                        }
+                        // After the post, so a run moved elsewhere is already stopped here.
+                        if let Some(tx) = &change_tx {
+                            // Every event must be observed (tool_use records what a later result closes).
+                            let mut changed = false;
+                            for e in &batch {
+                                changed |= changes.observe(e);
+                            }
+                            if changed {
+                                let _ = tx.send(());
                             }
                         }
                     }
@@ -739,15 +736,6 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
                             }
                         }
                     }
-                    _ = poll.tick() => {
-                        match client.control(run_id).await {
-                            Ok(ctl) if ctl.stop_requested || ctl.status != RunStatus::Running => {
-                                let _ = stop_tx.send(true);
-                            }
-                            Ok(_) => {}
-                            Err(e) => tracing::debug!(error = %e, "control poll failed"),
-                        }
-                    }
                 }
             }
         })
@@ -757,6 +745,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         Ok(o) => o,
         Err(e) => agent::Outcome::new(RunStatus::Failed, json!({"error": format!("executor task panicked: {e}")})),
     };
+    watcher.abort();
     // Executor dropped its sender; forwarder drains the channel and exits.
     let _ = forwarder.await;
     drop(bridge);
@@ -835,6 +824,65 @@ async fn stop_requested(client: &ControlClient, run_id: Uuid) {
             Err(e) => tracing::debug!(error = %e, "control poll failed"),
         }
     }
+}
+
+/// How long a batch of events is retried while the control plane can't be reached.
+/// After that it is given up, so an outage can't hold the agent up for good.
+const DELIVER_FOR: Duration = Duration::from_secs(300);
+
+/// Post `batch`, retrying while the control plane can't be reached. A post refused
+/// as it is ([`Rejected`]: a firewall in front of the server, a size limit) is never
+/// sent again unchanged: its events go one by one, and one still refused is replaced
+/// by a note on the page. The control answer of the last post that went through.
+async fn deliver(client: &ControlClient, run_id: Uuid, batch: Vec<NewEvent>, backoff: &mut Backoff) -> Option<RunControl> {
+    // Events to post, and whether they are the note for a refused event.
+    let mut queue = VecDeque::from([(batch, false)]);
+    let mut ctl = None;
+    while let Some((events, is_note)) = queue.pop_front() {
+        let since = tokio::time::Instant::now();
+        loop {
+            let e = match client.post_events(run_id, events.clone()).await {
+                Ok(c) => {
+                    backoff.reset();
+                    ctl = Some(c);
+                    break;
+                }
+                Err(e) => e,
+            };
+            if let Some(r) = e.downcast_ref::<Rejected>() {
+                if events.len() > 1 {
+                    tracing::warn!(error = %r, events = events.len(), "control plane refused a batch of events; sending them one by one");
+                    // Ahead of whatever is still queued, in their order.
+                    for ev in events.into_iter().rev() {
+                        queue.push_front((vec![ev], false));
+                    }
+                } else {
+                    tracing::warn!(error = %r, kind = %events[0].kind, "control plane refused an event; leaving it out");
+                    if !is_note {
+                        queue.push_front((vec![refused_note(r)], true));
+                    }
+                }
+                break;
+            }
+            if since.elapsed() >= DELIVER_FOR {
+                tracing::warn!(error = %e, events = events.len(), "giving up posting events");
+                break;
+            }
+            let wait = backoff.next_delay();
+            tracing::warn!(error = %e, retry_in = ?wait, "posting events failed");
+            tokio::time::sleep(wait).await;
+        }
+    }
+    ctl
+}
+
+/// What the page shows in place of output the control plane refused.
+fn refused_note(r: &Rejected) -> NewEvent {
+    let msg = format!(
+        "Some of the agent's output isn't shown: the server refused it ({}). A firewall in front of the server can mistake code or logs for an attack.",
+        r.status
+    );
+    NewEvent { kind: "error".into(), payload: json!({"message": msg}) }
 }
 
 /// Listen for the run's permission prompts and relay each to the page.

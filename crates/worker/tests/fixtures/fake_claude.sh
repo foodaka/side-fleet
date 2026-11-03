@@ -6,7 +6,8 @@
 # the Bash tool call when it is not there yet; "edit" changes README.md and adds
 # notes.txt; "rename" moves notes.txt; "ask" asks the worker's "Ask me" socket
 # from --mcp-config about a Bash call, as Claude Code's permission prompt tool would;
-# "jam" leaves a git clean filter that hangs, so snapshotting the tree never ends).
+# "jam" leaves a git clean filter that hangs, so snapshotting the tree never ends;
+# "bait" says something a web application firewall takes for an attack).
 # With --include-partial-messages the last message streams as text deltas first.
 if [ "$1" = "--version" ]; then printf '%s\n' "9.9.9 (Claude Code fake)"; exit 0; fi
 task=""
@@ -61,6 +62,7 @@ case "$task" in
   *edit*) printf 'demo\nedited by the agent\n' > README.md; printf 'one\ntwo\n' > notes.txt;;
   *rename*) git mv -f notes.txt docs-notes.txt 2>/dev/null || mv notes.txt docs-notes.txt;;
   *jam*) git config filter.jam.clean "sleep 30"; printf '* filter=jam\n' > .gitattributes; printf 'x\n' > jammed.txt;;
+  *bait*) printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The test reads ../../etc/shadow to check the path guard."}]}}';;
 esac
 case "$task" in
   *fail*) printf '%s\n' "fatal: simulated crash" >&2; kill $child 2>/dev/null; exit 3;;

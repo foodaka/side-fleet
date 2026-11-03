@@ -501,6 +501,67 @@ async fn a_stop_the_worker_never_acts_on_is_finished_here() {
 }
 
 #[tokio::test]
+async fn the_heartbeat_names_runs_that_are_over_here_so_the_worker_frees_them() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let (_, body) = api.create_run("long task", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    let beat = || async {
+        let r = api.worker(reqwest::Method::POST, "/v1/worker/heartbeat").json(&json!({"id": "w", "capabilities": {}, "active_runs": [id]})).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        r.json::<Value>().await.unwrap()
+    };
+    let b = beat().await;
+    assert_eq!(b["accepts_gzip"], true);
+    assert!(b.get("finished_runs").is_none(), "nothing to end while it runs: {b}");
+
+    // Stopped on the page while the worker was stuck: the server ended it after a minute.
+    api.stop(id).await;
+    sqlx::query("UPDATE runs SET stop_requested_at = now() - interval '2 minutes' WHERE id = $1").bind(id).execute(&env.pool).await.unwrap();
+    sidefleet_server::db::stop_unresponsive_runs(&env.pool, 60).await.unwrap();
+    assert_eq!(beat().await["finished_runs"], json!([id]));
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn worker_posts_may_be_gzipped_and_count_against_the_limit_unzipped() {
+    use std::io::Write;
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let (_, body) = api.create_run("task", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w", &["r"]).await.unwrap();
+    let gzip = |bytes: &[u8]| {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    };
+    let post = |body: Vec<u8>| {
+        api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/events?worker_id=w"))
+            .header("content-type", "application/json")
+            .header("content-encoding", "gzip")
+            .body(body)
+            .send()
+    };
+
+    let events = json!({"events": [{"kind": "assistant_text", "payload": {"text": "it reads ../../etc/shadow"}}]});
+    assert_eq!(post(gzip(events.to_string().as_bytes())).await.unwrap().status(), StatusCode::OK);
+    let evs = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
+    assert_eq!(evs.last().unwrap().payload["text"], "it reads ../../etc/shadow");
+
+    // A small upload that unzips past the limit is refused, not unpacked.
+    let bomb = gzip(&vec![b' '; sidefleet_server::routes::MAX_EVENTS_BODY_BYTES + 1]);
+    assert!(bomb.len() < 1024 * 1024);
+    assert_eq!(post(bomb).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn control_plane_redacts_secrets_in_stored_payloads() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

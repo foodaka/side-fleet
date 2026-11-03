@@ -39,7 +39,9 @@ export async function followRun(
 						else if (line.startsWith('id:')) id = line.slice(3).trim();
 					}
 					if (name === 'end') return;
-					if (!data || name === 'error') continue;
+					// Each frame is named after its event's kind, so a run's `error` events come as
+					// `event: error` too; the stream's own error frame isn't JSON and falls to the catch.
+					if (!data) continue;
 					try {
 						const ev = JSON.parse(data) as RunEvent;
 						if (id != null) lastSeq = Number(id);

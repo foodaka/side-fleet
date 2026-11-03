@@ -319,7 +319,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 					t.items.push({
 						kind: 'note', key, at: ev.at,
 						tone: p.status === 'succeeded' ? 'ok' : 'err',
-						text: p.status === 'stopped' ? 'Stopped' + (p.reason ? `: ${p.reason}` : '') : p.status === 'failed' ? 'Failed' + (p.reason ? `: ${p.reason}` : '') : 'Done'
+						text: endedNote(p.status, p.reason, t.machine ?? run.worker_id)
 					});
 			}
 			break;
@@ -433,7 +433,31 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			t.items.push({ kind: 'note', key, tone: 'err', text: p.message ?? 'Error', at: ev.at });
 			t.activity = null;
 			break;
+		case 'omitted':
+			// The server refused part of the output (a firewall in front of it, most likely); the turn goes on.
+			t.items.push({
+				kind: 'note', key, tone: 'muted', at: ev.at,
+				text: `Some of the agent's output isn't shown here: the server refused it${p.status ? ` (${p.status})` : ''}. A firewall in front of the server can mistake code or logs for an attack.`
+			});
+			break;
 	}
+}
+
+/** What the thread says when a turn ends on its own terms or the machine's. */
+function endedNote(status: string, reason: string | undefined, machine: string | null | undefined): string {
+	const it = machine ?? 'The machine';
+	switch (reason) {
+		case 'worker unresponsive':
+			return `Stopped. ${it} didn't act on Stop within a minute, so Sidefleet stopped the task here; the machine frees it the next time it checks in.`;
+		case 'worker offline':
+			return `Stopped. ${it} was offline, so the task was stopped here.`;
+		case 'worker lost':
+			return `Failed: ${it} stopped responding while the task ran.`;
+		case 'worker restarted':
+			return status === 'stopped' ? `Stopped. ${it} restarted while the task was stopping.` : `Failed: ${it} restarted while the task ran.`;
+	}
+	const head = status === 'stopped' ? 'Stopped' : status === 'failed' ? 'Failed' : 'Done';
+	return reason ? `${head}: ${reason}` : head;
 }
 
 function contextOf(c: Record<string, any> | null | undefined): Context | null {

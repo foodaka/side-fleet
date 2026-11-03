@@ -29,6 +29,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tower_http::{
     catch_panic::CatchPanicLayer,
     cors::CorsLayer,
+    decompression::RequestDecompressionLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
 };
@@ -120,6 +121,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/images/{id}", get(worker_get_image))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route("/v1/worker/prs", post(report_prs))
+        // Workers gzip what they post (see HeartbeatResponse::accepts_gzip): smaller, and a
+        // firewall in front of the server can't mistake agent output for an attack. Inside the
+        // token check, and the body limits above count the decompressed bytes.
+        .route_layer(RequestDecompressionLayer::new().gzip(true).no_br().no_deflate().no_zstd())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_worker));
 
     Router::new()
@@ -1197,6 +1202,8 @@ async fn heartbeat(
                 }
                 prs
             },
+            finished_runs: db::finished_runs(&state.pool, &auth.orgs, &req.id, &req.active_runs).await?,
+            accepts_gzip: true,
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.

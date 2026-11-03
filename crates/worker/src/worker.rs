@@ -10,7 +10,7 @@ use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunC
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
-use tokio::sync::{mpsc, watch, Mutex, Semaphore};
+use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::agent::{self, AgentSpec, ApprovalHook};
@@ -25,6 +25,70 @@ use crate::detect::{self, DetectOptions};
 /// How often to look again for agents that were not installed at start-up.
 const AGENT_RECHECK: Duration = Duration::from_secs(300);
 const CLAIM_WAIT: Duration = Duration::from_secs(25);
+/// How long a run the control plane already ended gets to stop before it is cut off.
+const END_GRACE: Duration = Duration::from_secs(20);
+
+/// A run this worker is executing, by id.
+type RunningMap = Arc<std::sync::Mutex<HashMap<Uuid, Running>>>;
+
+struct Running {
+    /// Stops the agent, as the Stop button does.
+    stop: watch::Sender<bool>,
+    task: tokio::task::AbortHandle,
+    /// `end_finished_run` is already on it.
+    ending: bool,
+}
+
+/// A run's slot here, freed when its task ends: normally, or cut off.
+struct Slot {
+    id: Uuid,
+    active_count: Arc<AtomicUsize>,
+    done_tx: mpsc::UnboundedSender<Uuid>,
+    running: RunningMap,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.active_count.fetch_sub(1, Ordering::Relaxed);
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        let _ = self.done_tx.send(self.id);
+    }
+}
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The control plane already ended run `id` (stopped on the page while it was stuck
+/// here): stop it, and cut it off if it hasn't ended after `grace`, so its slot frees.
+fn end_finished_run(running: &RunningMap, id: Uuid, grace: Duration) {
+    let stop = {
+        let mut map = running.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get_mut(&id) {
+            Some(r) if !r.ending => {
+                r.ending = true;
+                r.stop.clone()
+            }
+            _ => return,
+        }
+    };
+    tracing::warn!(run_id = %id, "the control plane already ended this run; stopping it here");
+    let _ = stop.send(true);
+    let running = running.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        let task = running.lock().unwrap_or_else(|e| e.into_inner()).get(&id).map(|r| r.task.clone());
+        if let Some(task) = task {
+            tracing::warn!(run_id = %id, "run did not stop; cutting it off to free its slot");
+            task.abort();
+        }
+    });
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -81,8 +145,15 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     // Active runs: run id -> (repo, isolation). Reported on every heartbeat so the
     // control plane can fail runs we no longer execute; also keeps in-place runs one per repo.
     let active: Arc<Mutex<HashMap<Uuid, (String, String)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let running: RunningMap = Arc::default();
 
     register_with_backoff(&client, &cfg, &caps, &active).await;
+    // What the control plane takes, before the first run posts anything (the heartbeat
+    // task's first beat is an interval away).
+    match client.heartbeat(&caps.lock().await.clone(), &[]).await {
+        Ok(resp) => client.set_gzip(resp.accepts_gzip),
+        Err(e) => tracing::debug!(error = %e, "first heartbeat failed"),
+    }
 
     // Heartbeat task: re-scans repos each time so new checkouts show up.
     {
@@ -96,6 +167,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let parallel = cfg.parallel.max(1);
         let active_count = active_count.clone();
         let active = active.clone();
+        let running = running.clone();
         tokio::spawn(async move {
             let mut agents_checked = Instant::now();
             loop {
@@ -121,6 +193,10 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
                 match client.heartbeat(&snapshot, &ids).await {
                     Ok(resp) => {
+                        client.set_gzip(resp.accepts_gzip);
+                        for id in resp.finished_runs {
+                            end_finished_run(&running, id, END_GRACE);
+                        }
                         if !resp.check_prs.is_empty() {
                             tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
                         }
@@ -213,17 +289,19 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
                 active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone()));
                 active_count.fetch_add(1, Ordering::Relaxed);
+                let id = run.id;
+                let (stop_tx, _) = watch::channel(false);
+                let slot = Slot { id, active_count: active_count.clone(), done_tx: done_tx.clone(), running: running.clone(), _permit: permit };
                 let client = client.clone();
                 let cfg = cfg.clone();
-                let done_tx = done_tx.clone();
-                let active_count = active_count.clone();
-                tokio::spawn(async move {
-                    let id = run.id;
-                    execute_run(&client, &cfg, run, repo_path).await;
-                    active_count.fetch_sub(1, Ordering::Relaxed);
-                    drop(permit);
-                    let _ = done_tx.send(id);
+                let stop = stop_tx.clone();
+                // Held across the spawn, so a run that ends at once is removed after it is added.
+                let mut map = running.lock().unwrap_or_else(|e| e.into_inner());
+                let task = tokio::spawn(async move {
+                    let _slot = slot;
+                    execute_run(&client, &cfg, run, repo_path, stop).await;
                 });
+                map.insert(id, Running { stop: stop_tx, task: task.abort_handle(), ending: false });
             }
             Ok(None) => {
                 drop(permit);
@@ -471,7 +549,8 @@ async fn fetch_images(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Ve
 }
 
 /// Execute one claimed run: forward events as they arrive, poll for stop, report the outcome.
-async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_path: Option<PathBuf>) {
+/// `stop_tx` stops the agent; the heartbeat sends on it for a run the control plane already ended.
+async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_path: Option<PathBuf>, stop_tx: watch::Sender<bool>) {
     let run_id = run.id;
     tracing::info!(run_id = %run_id, repo = %run.repo, agent = %run.agent, model = %run.model, isolation = %run.isolation, "executing run");
     let claimed_at = std::time::Instant::now();
@@ -625,7 +704,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         Agent::Opencode => &cfg.opencode_bin,
     };
     let permission_mode = run.permission_mode.clone().unwrap_or_else(|| cfg.permission_mode.clone());
-    let (stop_tx, stop_rx) = watch::channel(false);
+    let stop_rx = stop_tx.subscribe();
 
     // "Ask me": Claude Code's permission prompts come to us over a socket and go to the page.
     let mut bridge = None;
@@ -666,6 +745,8 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);
 
     let exec = tokio::spawn(agent::execute(spec, event_tx, stop_rx));
+    // A run cut off by `end_finished_run` takes its agent with it.
+    let _exec_guard = AbortOnDrop(exec.abort_handle());
 
     // Failover runs push a checkpoint of their branch after file changes. Never
     // for other runs: pushing is outward-facing and opt-in.
@@ -876,13 +957,14 @@ async fn deliver(client: &ControlClient, run_id: Uuid, batch: Vec<NewEvent>, bac
     ctl
 }
 
-/// What the page shows in place of output the control plane refused.
+/// What the page shows in place of output the control plane refused. `message` is
+/// for pages that predate the `omitted` kind.
 fn refused_note(r: &Rejected) -> NewEvent {
     let msg = format!(
         "Some of the agent's output isn't shown: the server refused it ({}). A firewall in front of the server can mistake code or logs for an attack.",
         r.status
     );
-    NewEvent { kind: "error".into(), payload: json!({"message": msg}) }
+    NewEvent { kind: "omitted".into(), payload: json!({"message": msg, "status": r.status.as_u16()}) }
 }
 
 /// Listen for the run's permission prompts and relay each to the page.
@@ -1048,6 +1130,40 @@ mod tests {
 
     fn live(text: &str) -> NewEvent {
         NewEvent { kind: LIVE_TEXT.into(), payload: json!({"text": text}) }
+    }
+
+    /// A run the control plane already ended, that ignores Stop the way one stuck
+    /// before its agent starts does, or one whose agent is: it is cut off, freeing its slot.
+    #[tokio::test]
+    async fn a_run_the_control_plane_ended_is_cut_off_when_it_ignores_stop() {
+        use super::{end_finished_run, Running, RunningMap, Slot};
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+        use std::time::Duration;
+        use tokio::sync::{mpsc, watch, Semaphore};
+
+        let permits = Arc::new(Semaphore::new(1));
+        let active = Arc::new(AtomicUsize::new(1));
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+        let running: RunningMap = Arc::default();
+        let id = uuid::Uuid::new_v4();
+        let slot = Slot { id, active_count: active.clone(), done_tx, running: running.clone(), _permit: permits.clone().try_acquire_owned().unwrap() };
+        let (stop, mut stopped) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _slot = slot;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        running.lock().unwrap().insert(id, Running { stop, task: task.abort_handle(), ending: false });
+
+        end_finished_run(&running, id, Duration::from_millis(50));
+        end_finished_run(&running, id, Duration::from_millis(50));
+        stopped.changed().await.unwrap();
+        assert!(*stopped.borrow(), "asked to stop first");
+        assert_eq!(tokio::time::timeout(Duration::from_secs(2), done_rx.recv()).await.unwrap(), Some(id));
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(running.lock().unwrap().is_empty());
+        assert!(permits.try_acquire().is_ok(), "the slot is free again");
+        assert!(done_rx.try_recv().is_err(), "ended once");
     }
 
     #[test]

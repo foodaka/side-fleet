@@ -1,6 +1,9 @@
 //! HTTP client for the control plane. Only outbound calls; the token travels
 //! as a bearer header and is never logged.
 
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sidefleet_core::{
@@ -18,6 +21,8 @@ pub struct ControlClient {
     base: String,
     token: String,
     pub worker_id: String,
+    /// The control plane said it takes gzip bodies; shared by every clone.
+    gzip: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -93,11 +98,31 @@ impl ControlClient {
             base: base.trim_end_matches('/').to_string(),
             token: token.to_string(),
             worker_id: worker_id.to_string(),
+            gzip: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
+    }
+
+    /// Whether to gzip what carries the agent's output, as the control plane said
+    /// on its last heartbeat (an older one takes none).
+    pub fn set_gzip(&self, on: bool) {
+        self.gzip.store(on, Ordering::Relaxed);
+    }
+
+    /// `body` as JSON, gzipped when the control plane takes it: smaller, and a firewall
+    /// in front of it can't mistake the agent's output (paths, code, logs) for an attack.
+    fn body(&self, req: reqwest::RequestBuilder, body: &impl serde::Serialize) -> Result<reqwest::RequestBuilder> {
+        let json = serde_json::to_vec(body)?;
+        let req = req.header(reqwest::header::CONTENT_TYPE, "application/json");
+        if !self.gzip.load(Ordering::Relaxed) {
+            return Ok(req.body(json));
+        }
+        let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(json.len() / 4), flate2::Compression::fast());
+        enc.write_all(&json)?;
+        Ok(req.header(reqwest::header::CONTENT_ENCODING, "gzip").body(enc.finish()?))
     }
 
     async fn check(r: reqwest::Response) -> Result<reqwest::Response, ClientError> {
@@ -222,11 +247,9 @@ impl ControlClient {
 
     /// A refused post fails with [`Rejected`] (see `downcast_ref`).
     pub async fn post_events(&self, run_id: Uuid, events: Vec<NewEvent>) -> Result<RunControl> {
+        let req = self.http.post(self.url(&format!("/v1/worker/runs/{run_id}/events?worker_id={}", self.worker_id))).bearer_auth(&self.token);
         let r = self
-            .http
-            .post(self.url(&format!("/v1/worker/runs/{run_id}/events?worker_id={}", self.worker_id)))
-            .bearer_auth(&self.token)
-            .json(&PostEventsRequest { events })
+            .body(req, &PostEventsRequest { events })?
             .send()
             .await
             .context("post events failed")?;
@@ -240,12 +263,13 @@ impl ControlClient {
     /// Show the text the agent is writing to whoever follows the run. Best effort:
     /// Ok(false) means the control plane takes no live text (it predates it).
     pub async fn post_live(&self, run_id: Uuid, text: &str) -> Result<bool> {
-        let r = self
+        let req = self
             .http
             .post(self.url(&format!("/v1/worker/runs/{run_id}/live?worker_id={}", self.worker_id)))
             .bearer_auth(&self.token)
-            .timeout(Duration::from_secs(5))
-            .json(&LiveTextRequest { text: text.to_string() })
+            .timeout(Duration::from_secs(5));
+        let r = self
+            .body(req, &LiveTextRequest { text: text.to_string() })?
             .send()
             .await
             .context("post live text failed")?;
@@ -270,11 +294,9 @@ impl ControlClient {
 
     /// Ask the person on the page about a tool call ("Ask me").
     pub async fn request_approval(&self, run_id: Uuid, req: &ApprovalRequest) -> Result<Approval> {
+        let post = self.http.post(self.url(&format!("/v1/worker/runs/{run_id}/approvals?worker_id={}", self.worker_id))).bearer_auth(&self.token);
         let r = self
-            .http
-            .post(self.url(&format!("/v1/worker/runs/{run_id}/approvals?worker_id={}", self.worker_id)))
-            .bearer_auth(&self.token)
-            .json(req)
+            .body(post, req)?
             .send()
             .await
             .context("approval request failed")?;
@@ -309,11 +331,9 @@ impl ControlClient {
     }
 
     pub async fn finish(&self, run_id: Uuid, status: RunStatus, result: Option<Value>, usage_limit: Option<UsageLimit>) -> Result<Run> {
+        let req = self.http.post(self.url(&format!("/v1/worker/runs/{run_id}/finish?worker_id={}", self.worker_id))).bearer_auth(&self.token);
         let r = self
-            .http
-            .post(self.url(&format!("/v1/worker/runs/{run_id}/finish?worker_id={}", self.worker_id)))
-            .bearer_auth(&self.token)
-            .json(&FinishRunRequest { status, result, usage_limit })
+            .body(req, &FinishRunRequest { status, result, usage_limit })?
             .send()
             .await
             .context("finish request failed")?;

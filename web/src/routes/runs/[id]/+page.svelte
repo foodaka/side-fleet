@@ -417,7 +417,7 @@
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
 						<!-- While it runs and the box is empty, Stop stands in for Send; a draft only gets Queue. -->
 						{#if live && !reply.trim()}
-							<button type="button" aria-label={stopping || latest?.stop_requested ? 'Stopping' : 'Stop'} title={stopping || latest?.stop_requested ? 'Stopping…' : 'Stop this message and any queued after it'} disabled={stopping || !!latest?.stop_requested} onclick={askStop} class="grid size-8 shrink-0 place-items-center rounded-full text-foreground/80 hover:bg-accent hover:text-foreground disabled:animate-pulse disabled:opacity-50">
+							<button type="button" aria-label={stopping || latest?.stop_requested ? 'Stopping' : 'Stop'} title={stopping || latest?.stop_requested ? 'Stopping…' : 'Stop this message and any queued after it'} disabled={stopping || !!latest?.stop_requested} onclick={askStop} class="grid size-8 shrink-0 place-items-center rounded-full bg-err-soft text-err-ink hover:bg-err/20 disabled:animate-pulse disabled:opacity-50">
 								<CircleStop class="size-[18px]" />
 							</button>
 						{:else}

@@ -674,6 +674,13 @@ pub struct HeartbeatResponse {
     /// Open pull requests this worker opened, due to be checked for a merge or close.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_prs: Vec<PrCheck>,
+    /// Runs the worker reported active that are already over here (stopped on the
+    /// page while the worker was stuck): end them and free their slots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finished_runs: Vec<Uuid>,
+    /// Worker routes take gzip-compressed bodies (`Content-Encoding: gzip`).
+    #[serde(default)]
+    pub accepts_gzip: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

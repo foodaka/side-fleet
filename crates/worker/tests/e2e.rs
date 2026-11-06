@@ -40,15 +40,30 @@ fn fake_bin() -> String {
 /// What the fake agent prints that [`firewall`] takes for an attack.
 const FIREWALL_BAIT: &str = "../../etc/shadow";
 
+/// What a stand-in [`firewall`] reads of a request body.
+#[derive(Clone, Copy, PartialEq)]
+enum Firewall {
+    /// The bytes as sent, as the hosting provider's in front of app.sidefleet.xyz does:
+    /// a gzipped body gets through whatever it holds.
+    RawBody,
+    /// The body unzipped too: what gets through is up to the worker's fallback.
+    Unzipped,
+}
+
 /// A stand-in for a web application firewall in front of the control plane: it
 /// passes requests through to `target`, but answers any whose body holds
 /// [`FIREWALL_BAIT`] with a 403 HTML page, as a hosting provider's would.
-async fn firewall(target: &str) -> String {
+async fn firewall(target: &str, reads: Firewall) -> String {
     use axum::{body::Body, extract::{Request, State}, http::StatusCode, response::{IntoResponse, Response}};
-    async fn pass(State(target): State<String>, req: Request) -> Response {
+    async fn pass(State((target, reads)): State<(String, Firewall)>, req: Request) -> Response {
         let (parts, body) = req.into_parts();
         let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-        if body.windows(FIREWALL_BAIT.len()).any(|w| w == FIREWALL_BAIT.as_bytes()) {
+        let mut seen = body.to_vec();
+        if reads == Firewall::Unzipped && parts.headers.get("content-encoding").is_some_and(|v| v == "gzip") {
+            seen.clear();
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&body[..]), &mut seen).unwrap();
+        }
+        if seen.windows(FIREWALL_BAIT.len()).any(|w| w == FIREWALL_BAIT.as_bytes()) {
             let page = "<!DOCTYPE html><html><head><title>Blocked</title></head><body><p>Request ID: test-1234</p></body></html>";
             return (StatusCode::FORBIDDEN, [("content-type", "text/html")], page).into_response();
         }
@@ -68,7 +83,7 @@ async fn firewall(target: &str) -> String {
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let app = axum::Router::new().fallback(pass).with_state(target.to_string());
+    let app = axum::Router::new().fallback(pass).with_state((target.to_string(), reads));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
 }
@@ -82,15 +97,15 @@ struct Harness {
 
 impl Harness {
     async fn start(max_runs: usize) -> Harness {
-        Self::start_with(max_runs, false).await
+        Self::start_with(max_runs, None).await
     }
 
     /// The worker reaches the control plane through [`firewall`].
-    async fn start_behind_firewall(max_runs: usize) -> Harness {
-        Self::start_with(max_runs, true).await
+    async fn start_behind_firewall(max_runs: usize, reads: Firewall) -> Harness {
+        Self::start_with(max_runs, Some(reads)).await
     }
 
-    async fn start_with(max_runs: usize, behind_firewall: bool) -> Harness {
+    async fn start_with(max_runs: usize, behind: Option<Firewall>) -> Harness {
         let env = TestEnv::start().await;
         let repos = tempfile::tempdir().unwrap();
         // `demo` is a real git repo (worktrees work); `group/other` only looks like one (fallback path).
@@ -98,7 +113,10 @@ impl Harness {
         git_init(&repos.path().join("demo"));
         std::fs::create_dir_all(repos.path().join("group/other/.git")).unwrap();
         let cfg = WorkerConfig {
-            control_url: if behind_firewall { firewall(&env.base_url).await } else { env.base_url.clone() },
+            control_url: match behind {
+                Some(reads) => firewall(&env.base_url, reads).await,
+                None => env.base_url.clone(),
+            },
             token: WORKER_TOKEN.into(),
             worker_id: "test-worker".into(),
             display_name: "Test Worker".into(),
@@ -371,8 +389,21 @@ async fn stop_while_running_kills_the_agent_and_marks_stopped() {
 }
 
 #[tokio::test]
+async fn gzipped_output_gets_past_a_firewall_that_reads_the_raw_body() {
+    let h = Harness::start_behind_firewall(1, Firewall::RawBody).await;
+    let id = h.create("bait the firewall", "demo").await;
+
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    let evs = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
+    assert!(evs.iter().any(|e| e.payload["text"].as_str().is_some_and(|t| t.contains(FIREWALL_BAIT))), "the agent's words arrived as written");
+    assert!(!evs.iter().any(|e| e.kind == "omitted"), "nothing was left out");
+
+    h.teardown().await;
+}
+
+#[tokio::test]
 async fn output_a_firewall_refuses_is_left_out_and_the_run_still_finishes() {
-    let h = Harness::start_behind_firewall(1).await;
+    let h = Harness::start_behind_firewall(1, Firewall::Unzipped).await;
     let id = h.create("bait the firewall", "demo").await;
 
     // Before, the worker resent the refused post forever: the run never finished.
@@ -381,8 +412,9 @@ async fn output_a_firewall_refuses_is_left_out_and_the_run_still_finishes() {
 
     let evs = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
     assert!(!evs.iter().any(|e| e.payload.to_string().contains(FIREWALL_BAIT)), "the refused text never got through");
-    let note = evs.iter().find(|e| e.kind == "error").expect("the page says something is missing");
+    let note = evs.iter().find(|e| e.kind == "omitted").expect("the page says something is missing");
     assert!(note.payload["message"].as_str().unwrap().contains("the server refused it (403 Forbidden)"), "{}", note.payload);
+    assert_eq!(note.payload["status"], 403);
     // Only the refused event is missing: what came with it and after it arrived.
     for kind in ["tool_result", "result", "snapshot"] {
         assert!(evs.iter().any(|e| e.kind == kind), "{kind} missing: {:?}", evs.iter().map(|e| &e.kind).collect::<Vec<_>>());

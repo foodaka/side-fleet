@@ -73,6 +73,23 @@ pub async fn update_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::R
     Ok(row.get::<Option<bool>, _>("u").unwrap_or(false))
 }
 
+/// Of the runs machine `id` says it is executing, those already over here: stopped
+/// on the page while it was stuck, or finished by the reaper. It should end them.
+pub async fn finished_runs(pool: &PgPool, orgs: &[Uuid], id: &str, active: &[Uuid]) -> sqlx::Result<Vec<Uuid>> {
+    if active.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        "SELECT id FROM runs WHERE id = ANY($1) AND org_id = ANY($2) AND worker_id = $3
+           AND status IN ('succeeded', 'failed', 'stopped')",
+    )
+    .bind(active)
+    .bind(orgs)
+    .bind(id)
+    .fetch_all(pool)
+    .await
+}
+
 fn row_to_worker(r: &PgRow) -> Worker {
     let caps: Value = r.get("capabilities");
     Worker {

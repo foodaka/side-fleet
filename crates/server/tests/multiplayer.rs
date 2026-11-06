@@ -202,6 +202,9 @@ async fn machines_only_run_their_owners_tasks() {
     assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
     assert_eq!(bob.call(Method::DELETE, "/v1/workers/alice-mac", None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(bob.call(Method::POST, "/v1/workers/alice-mac/update", None).await.0, StatusCode::FORBIDDEN);
+    // Owning the org doesn't change that for updates: Alice restarts only her own machine.
+    assert_eq!(alice.call(Method::POST, "/v1/workers/bob-linux/update", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(alice.call(Method::POST, "/v1/workers/alice-mac/update", None).await.0, StatusCode::ACCEPTED);
 
     // Alice can read Bob's thread, but not steer it; she continues it on her own machine instead.
     bob_m.finish(&bob_run, json!({"text": "done"})).await;

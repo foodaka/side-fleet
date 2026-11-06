@@ -24,3 +24,30 @@ Other sessions share the stash stack across worktrees, so never use bare `git st
 Never commit `crates/server/web-dist`: change `web/` only, and CI rebuilds and commits web-dist on
 main after merge. If you ran `pnpm build` to try a change, `git checkout crates/server/web-dist`
 before committing.
+
+## Before and after shots for UI changes
+
+A pull request that changes what someone sees in `web/` shows a before and an after screenshot in
+its description. Skip it for changes with nothing visible, like a refactor.
+
+- **Before:** run `origin/main` from its own worktree (`git worktree add`), never by switching or
+  stashing. For a bug fix, capture the bug before writing the fix.
+- **Same conditions:** same page, viewport, theme, data and scroll position in both, cropped to
+  what changed. Add a phone-width pair (375x812) if the layout is affected.
+- **Look at both images** before posting. A shot of a loading state or an error page isn't evidence.
+- **Say what the data is.** If the API was mocked, say so in the description. Mocked or seeded data
+  doesn't test the server, so name anything that only ran that way.
+- **No private data:** this repo is public, so use made-up tasks, machines and logins. No real
+  tokens, emails or customer data, and block avatar requests for made-up logins.
+- **Attach them with `gh`,** so nothing lands in the repo or on a public file host. Reference the
+  files by relative path in the body and `gh` replaces each path with its uploaded URL:
+
+  ```sh
+  # body.md has: | ![Before](./before.png) | ![After](./after.png) |
+  gh pr edit <number> --body-file body.md --attach './before.png#Before' --attach './after.png#After'
+  ```
+
+  `gh pr create` takes `--attach` too. Run it from inside the repo, or pass `-R foodaka/side-fleet`.
+  Afterwards, check the description shows the images.
+
+If you can't capture one of the two, say why in the description instead of leaving it out.

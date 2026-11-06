@@ -415,13 +415,12 @@
 							<Paperclip class="size-4" />
 						</button>
 						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
-						{#if live}
+						<!-- While it runs and the box is empty, Stop stands in for Send; a draft only gets Queue. -->
+						{#if live && !reply.trim()}
 							<button type="button" aria-label={stopping || latest?.stop_requested ? 'Stopping' : 'Stop'} title={stopping || latest?.stop_requested ? 'Stopping…' : 'Stop this message and any queued after it'} disabled={stopping || !!latest?.stop_requested} onclick={askStop} class="grid size-8 shrink-0 place-items-center rounded-full text-foreground/80 hover:bg-accent hover:text-foreground disabled:animate-pulse disabled:opacity-50">
 								<CircleStop class="size-[18px]" />
 							</button>
-						{/if}
-						<!-- While it runs and the box is empty, Stop stands in for Send. -->
-						{#if !live || reply.trim()}
+						{:else}
 							<button type="submit" aria-label={live ? 'Queue' : 'Send'} title={live ? 'Queue: sends when the current message finishes' : 'Send'} disabled={!reply.trim() || sending || !modelValid(agent, model)} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 								<ArrowUp class="size-4" strokeWidth={2.2} />
 							</button>

@@ -69,6 +69,12 @@ export interface RunSummary extends Run {
 	last_activity_at: string;
 	/** Tool calls in the thread waiting for you to approve or deny them ("Ask me"). */
 	pending_approvals?: number;
+	/** What the thread's running message, else its latest, runs with: a follow-up can switch it, so `agent`, `model` and `effort` (the first message's) may be out of date. */
+	latest_agent: AgentId;
+	latest_model: string;
+	latest_effort: string | null;
+	/** The last machine to take a message of the thread. */
+	latest_worker_id: string | null;
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';

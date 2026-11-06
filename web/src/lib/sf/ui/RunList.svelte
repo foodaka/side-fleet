@@ -4,10 +4,11 @@
 	import { fleet } from '../state.svelte';
 	import { seen } from '../seen.svelte';
 	import { inbox, reasonTone } from '../inbox.svelte';
-	import { ago, dayGroup, duration, repoLabel, scheduled, startTime } from '../format';
+	import { agentModel, ago, dayGroup, duration, modelName, repoLabel, scheduled, startTime } from '../format';
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
 	import PrIcon from './PrIcon.svelte';
+	import AgentIcon from './AgentIcon.svelte';
 	import Avatar from './Avatar.svelte';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import Ellipsis from '@lucide/svelte/icons/ellipsis';
@@ -16,6 +17,7 @@
 	import ArchiveRestore from '@lucide/svelte/icons/archive-restore';
 	import ChevronRight from '@lucide/svelte/icons/chevron-right';
 	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
+	import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
 	import * as Dialog from '#lib/components/ui/dialog';
 	import { Button } from '#lib/components/ui/button';
 	import { prefs } from '../prefs.svelte';
@@ -128,38 +130,45 @@
 		<span class="flex min-w-0 flex-1 flex-col">
 			<span class="flex min-w-0 items-center gap-1.5">
 				{#if filtering && fleet.othersRun(r)}<Avatar login={fleet.login(r.created_by)} size={14} class="ring-0" />{/if}
-				<span class="truncate {unread ? 'font-medium text-foreground' : ''}">{r.task}</span>
+				<span class="min-w-0 flex-1 truncate {unread ? 'font-medium text-foreground' : ''}">{r.task}</span>
+				{#if r.pr}
+					<span class="tnum flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground group-hover/row:invisible" title="Pull request #{r.pr.number}: {r.pr.state}">
+						<PrIcon state={r.pr.state} />{r.pr.number}
+					</span>
+				{/if}
+				{#if waiting}
+					<span class="size-2 shrink-0 rounded-full {reasonTone(waiting.reason)} ring-2 ring-sidebar group-hover/row:invisible" role="img" aria-label="Waiting on you: {waiting.label}" title={waiting.label}></span>
+				{:else if unread}
+					<span class="size-1.5 shrink-0 rounded-full bg-foreground group-hover/row:invisible" aria-label="New"></span>
+				{:else if !detail && !asleep}
+					<span class="tnum shrink-0 text-[11px] text-faint group-hover:text-muted-foreground group-hover/row:invisible">{ago(r.last_activity_at, fleet.now)}</span>
+				{/if}
 			</span>
-			{#if asking}
-				<span class="truncate text-[11.5px] font-medium text-queue-ink">Waiting on you{#if r.pending_approvals! > 1}&nbsp;· {r.pending_approvals} tool calls{/if}</span>
-			{:else if detail}
-				<span class="tnum truncate text-[11.5px] text-muted-foreground">
-					{#if r.thread_status === 'running'}
-						{r.worker_id ?? 'Starting'} · {duration(r.started_at, null, fleet.now) || 'starting'}
-					{:else if r.start_at && later(r)}
-						Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+			<span class="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
+				{#if r.isolation === 'checkout'}<span class="shrink-0" title="In the repo's own checkout, not a worktree"><FolderGit2 class="size-3 text-faint" /></span>{/if}
+				<span class="tnum min-w-0 flex-1 truncate">
+					{#if asking}
+						<span class="font-medium text-queue-ink">Waiting on you{#if r.pending_approvals! > 1}&nbsp;· {r.pending_approvals} tool calls{/if}</span>
+					{:else if detail}
+						{#if r.thread_status === 'running'}
+							<span class="flex min-w-0 gap-1"><span class="truncate">{r.latest_worker_id ?? 'Starting'}</span><span class="shrink-0">· {duration(r.started_at, null, fleet.now) || 'starting'}</span></span>
+						{:else if r.start_at && later(r)}
+							Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+						{:else}
+							Waiting for a machine{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+						{/if}
+					{:else if asleep}
+						<AlarmClock class="mr-1 inline size-3 align-[-2px]" />Back {wakeLabel(r.snoozed_until!, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 					{:else}
-						Waiting for a machine{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+						{[other ? repoLabel(r.repo) : null, fleet.workers.length > 1 ? r.latest_worker_id : null].filter(Boolean).join(' · ')}
 					{/if}
 				</span>
-			{:else if asleep}
-				<span class="tnum flex items-center gap-1 truncate text-[11.5px] text-muted-foreground"><AlarmClock class="size-3 shrink-0" />Back {wakeLabel(r.snoozed_until!, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}</span>
-			{:else if other}
-				<span class="truncate font-mono text-[11px] text-faint">{repoLabel(r.repo)}</span>
-			{/if}
-		</span>
-		{#if r.pr}
-			<span class="tnum mt-px flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground group-hover/row:invisible" title="Pull request #{r.pr.number}: {r.pr.state}">
-				<PrIcon state={r.pr.state} />{r.pr.number}
+				<span class="flex max-w-[55%] shrink-0 items-center gap-1 text-faint" title="{agentModel(r.latest_agent, r.latest_model)}{r.latest_effort ? ` · ${r.latest_effort}` : ''}">
+					{#if !asking}<span class="truncate text-[11px]">{r.latest_model ? modelName(r.latest_model, r.latest_agent) : 'default'}{#if r.latest_effort}&nbsp;· {r.latest_effort}{/if}</span>{/if}
+					<AgentIcon agent={r.latest_agent} class="size-3 {r.latest_agent === 'claude' ? 'opacity-80' : ''}" />
+				</span>
 			</span>
-		{/if}
-		{#if waiting}
-			<span class="mt-[5px] size-2 shrink-0 rounded-full {reasonTone(waiting.reason)} ring-2 ring-sidebar group-hover/row:invisible" role="img" aria-label="Waiting on you: {waiting.label}" title={waiting.label}></span>
-		{:else if unread}
-			<span class="mt-[6px] size-1.5 shrink-0 rounded-full bg-foreground group-hover/row:invisible" aria-label="New"></span>
-		{:else if !detail && !asleep}
-			<span class="tnum shrink-0 text-[11px] text-faint group-hover:text-muted-foreground group-hover/row:invisible">{ago(r.last_activity_at, fleet.now)}</span>
-		{/if}
+		</span>
 	</a>
 	<DropdownMenu.Root>
 		<DropdownMenu.Trigger

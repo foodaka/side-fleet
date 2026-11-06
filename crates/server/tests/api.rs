@@ -586,6 +586,41 @@ async fn control_plane_redacts_secrets_in_stored_payloads() {
 
 
 #[tokio::test]
+async fn the_runs_list_says_what_a_thread_runs_with_now() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+
+    let r = api
+        .dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": "first", "model": "claude-haiku-5-5", "repo": "r", "effort": "high"}))
+        .send()
+        .await
+        .unwrap();
+    let root: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    api.claim("w1", &["r"]).await.unwrap();
+    api.post_events("w1", root, json!([{"kind": "agent_init", "payload": {"model": "claude-haiku-5-5", "session_id": "sess-abc"}}])).await;
+    api.finish("w1", root, "succeeded", json!({"result": "ok"})).await;
+
+    let r = api
+        .dev(reqwest::Method::POST, &format!("/v1/runs/{root}/messages"))
+        .json(&json!({"task": "again", "model": "claude-sonnet-5-5", "effort": ""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+
+    let list: Vec<RunSummary> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    let thread = list.iter().find(|s| s.run.id == root).unwrap();
+    assert_eq!(thread.run.model, "claude-haiku-5-5", "the summary's own fields stay the first message's");
+    assert_eq!(thread.latest_model, "claude-sonnet-5-5");
+    assert_eq!(thread.latest_effort, None);
+    assert_eq!(thread.latest_worker_id.as_deref(), Some("w1"), "a queued message keeps the last machine");
+
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn follow_ups_resume_the_session_on_the_same_worker() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

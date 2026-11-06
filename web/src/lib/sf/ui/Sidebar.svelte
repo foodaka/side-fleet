@@ -8,6 +8,7 @@
 	import MessagesSquare from '@lucide/svelte/icons/messages-square';
 	import UsersRound from '@lucide/svelte/icons/users-round';
 	import Boxes from '@lucide/svelte/icons/boxes';
+	import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, Settings, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
@@ -38,6 +39,7 @@
 		fleet.conn === 'unreachable' ? 'Control plane unreachable'
 		: !fleet.loaded ? 'Connecting…'
 		: `${fleet.online.length} of ${fleet.workers.length} machine${fleet.workers.length === 1 ? '' : 's'} online`
+			+ (fleet.updatable.length ? `, ${fleet.updatable.length} can update` : '')
 	);
 	const nav = $derived([
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
@@ -124,6 +126,7 @@
 						{#if fleet.conn === 'unreachable'}
 							<StatusDot status="failed" /><span class="text-err-ink">Unreachable</span>
 						{:else if fleet.loaded}
+							{#if fleet.updatable.length}<CircleArrowUp class="size-3.5 text-queue-ink" aria-label="{fleet.updatable.length} can update" />{/if}
 							<StatusDot status={fleet.online.length ? 'online' : 'offline'} />{fleet.online.length}/{fleet.workers.length}
 						{/if}
 					</span>

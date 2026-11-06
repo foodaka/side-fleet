@@ -13,7 +13,8 @@
 	} = $props();
 
 	let open = $state(false);
-	const count = $derived(inbox.items.length);
+	const count = $derived(inbox.items.length + (fleet.updateNotice ? 1 : 0));
+	const updates = $derived(fleet.updatable.length === 1 ? `${fleet.updatable[0].display_name} can update` : `${fleet.updatable.length} machines can update`);
 	const pushHint: Record<string, string> = {
 		unsupported: 'This browser can’t show notifications. On iPhone, add Sidefleet to the Home Screen first.',
 		insecure: 'Notifications need the page on HTTPS (or localhost).',
@@ -25,6 +26,17 @@
 		open = false;
 		void inbox.dismiss(id);
 		void goto('#/runs/' + id);
+	}
+
+	function openMachines() {
+		open = false;
+		fleet.clearUpdateNotice();
+		void goto('#/machines');
+	}
+
+	function clearAll() {
+		fleet.clearUpdateNotice();
+		void inbox.clearAll();
 	}
 
 	function detail(d?: string) {
@@ -43,7 +55,7 @@
 	>
 		<Bell size={14} />
 		{#if count}
-			<span class="tnum absolute -top-0.5 -right-0.5 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-err px-[3px] text-[9.5px] leading-none font-semibold text-white">
+			<span class="tnum absolute -top-0.5 -right-0.5 grid h-3.5 min-w-3.5 place-items-center rounded-full {inbox.items.length ? 'bg-err' : 'bg-queue'} px-[3px] text-[9.5px] leading-none font-semibold text-white">
 				{count > 99 ? '99+' : count}
 			</span>
 		{/if}
@@ -52,12 +64,21 @@
 		<div class="flex items-center justify-between gap-2 border-b px-3 py-2">
 			<span class="text-[13px] font-medium">Waiting on you</span>
 			{#if count}
-				<button type="button" class="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground" onclick={() => void inbox.clearAll()}>
+				<button type="button" class="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground" onclick={clearAll}>
 					Clear all
 				</button>
 			{/if}
 		</div>
 		<div class="max-h-[min(60vh,420px)] overflow-y-auto p-1 [scrollbar-width:thin]">
+			{#if fleet.updateNotice}
+				<DropdownMenu.Item class="flex items-start gap-2.5 px-2 py-2" onclick={openMachines}>
+					<span class="mt-[5px] size-2 shrink-0 rounded-full bg-queue" aria-hidden="true"></span>
+					<span class="flex min-w-0 flex-1 flex-col gap-0.5">
+						<span class="truncate text-[13px] text-foreground">{updates}</span>
+						<span class="truncate text-[11.5px] text-muted-foreground">Open Machines to update</span>
+					</span>
+				</DropdownMenu.Item>
+			{/if}
 			{#each inbox.items as i (i.id)}
 				<DropdownMenu.Item class="flex items-start gap-2.5 px-2 py-2" onclick={() => openTask(i.id)}>
 					<span class="mt-[5px] size-2 shrink-0 rounded-full {reasonTone(i.reason)}" aria-hidden="true"></span>
@@ -71,9 +92,11 @@
 					<span class="tnum shrink-0 text-[11px] text-faint" title="Waiting since {new Date(i.since).toLocaleString()}">{ago(i.since, fleet.now)}</span>
 				</DropdownMenu.Item>
 			{:else}
-				<p class="px-3 py-6 text-center text-xs text-muted-foreground">
-					{inbox.loaded ? 'Nothing is waiting on you.' : 'Loading…'}
-				</p>
+				{#if !fleet.updateNotice}
+					<p class="px-3 py-6 text-center text-xs text-muted-foreground">
+						{inbox.loaded ? 'Nothing is waiting on you.' : 'Loading…'}
+					</p>
+				{/if}
 			{/each}
 		</div>
 		<div class="border-t p-1">

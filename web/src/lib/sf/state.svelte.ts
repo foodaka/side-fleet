@@ -7,6 +7,8 @@ import { wakeLabel } from './snooze';
 
 type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 
+const UPDATES_CLEARED = 'sf.updatesCleared';
+
 /** Everything the pages share, refreshed from the control plane every 5 seconds. */
 class Fleet {
 	workers = $state<Worker[]>([]);
@@ -42,6 +44,8 @@ class Fleet {
 	members = $state<Member[]>([]);
 	#membersFor = '';
 	#membersAt = 0;
+	/** The control plane build whose update notice was cleared on this device. */
+	#updatesCleared = $state('');
 
 	online = $derived(this.workers.filter((w) => w.online));
 	/** Machines that run your tasks: each machine only runs its owner's. */
@@ -56,12 +60,17 @@ class Fleet {
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
 	isOwner = $derived(this.org?.role === 'owner');
+	/** Online machines on an older build that you may update (see MachineCard) and haven't asked to yet. */
+	updatable = $derived(this.workers.filter((w) => w.online && w.outdated && !w.update_requested && (w.mine !== false || this.isOwner)));
+	/** The inbox's notice about them, until cleared; a newer control plane build brings it back. */
+	updateNotice = $derived(this.updatable.length > 0 && this.#updatesCleared !== (this.setup?.build ?? ''));
 
 	#timer: ReturnType<typeof setInterval> | undefined;
 	#asked = false;
 
 	start() {
 		if (this.#timer) return;
+		try { this.#updatesCleared = localStorage.getItem(UPDATES_CLEARED) ?? ''; } catch { /* storage blocked */ }
 		void fetch('/v1/auth')
 			.then((r) => (r.ok ? r.json() : null))
 			.then((m) => (this.methods = m ?? { github: false, dev_key: true, hosted: false }))
@@ -113,6 +122,11 @@ class Fleet {
 			}
 			this.conn = e instanceof Unauthorized ? 'unauthorized' : 'unreachable';
 		}
+	}
+
+	clearUpdateNotice() {
+		this.#updatesCleared = this.setup?.build ?? '';
+		try { localStorage.setItem(UPDATES_CLEARED, this.#updatesCleared); } catch { /* storage blocked: lasts until reload */ }
 	}
 
 	/** The org's members, refreshed when the org changes and every minute or so. */

@@ -31,6 +31,8 @@ class Inbox {
 	byId = $derived(new Map(this.items.flatMap((i) => [[i.id, i] as const, [i.run_id, i] as const])));
 
 	#abort: AbortController | null = null;
+	/** Dismissed here but maybe not yet on the control plane: task id -> the `since` it was dismissed at. */
+	#dismissed = new Map<string, string>();
 	#key = '';
 	#wired = false;
 
@@ -40,6 +42,7 @@ class Inbox {
 		const abort = (this.#abort = new AbortController());
 		this.items = [];
 		this.loaded = false;
+		this.#dismissed.clear();
 		void this.#follow(abort.signal);
 		if (!this.#wired) {
 			this.#wired = true;
@@ -78,7 +81,7 @@ class Inbox {
 						if (!frame.split('\n').includes('event: inbox')) continue;
 						const data = frame.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
 						try {
-							this.items = (JSON.parse(data) as { items: InboxItem[] }).items;
+							this.items = this.#settle((JSON.parse(data) as { items: InboxItem[] }).items);
 							this.loaded = true;
 						} catch {
 							/* ignore a malformed frame */
@@ -92,14 +95,28 @@ class Inbox {
 		}
 	}
 
+	// A frame the control plane sent before it saw a dismissal still lists that task:
+	// keep it hidden so it doesn't flash back (and get dismissed again) until a frame
+	// without it arrives, or it starts waiting anew.
+	#settle(items: InboxItem[]): InboxItem[] {
+		for (const [id, since] of this.#dismissed) {
+			if (!items.some((i) => i.id === id && i.since === since)) this.#dismissed.delete(id);
+		}
+		return items.filter((i) => this.#dismissed.get(i.id) !== i.since);
+	}
+
 	/** Seen: out of your inbox until it needs you again. Any run id of the task works. */
 	async dismiss(id: string) {
 		const item = this.byId.get(id);
-		if (item) this.items = this.items.filter((i) => i !== item);
+		if (item) {
+			this.#dismissed.set(item.id, item.since);
+			this.items = this.items.filter((i) => i !== item);
+		}
 		try {
 			await api(`/v1/inbox/${item?.id ?? id}/dismiss`, { method: 'POST' });
 		} catch {
-			/* the stream puts it back if it did not stick */
+			// Didn't stick: let the stream show it again.
+			if (item && this.#dismissed.get(item.id) === item.since) this.#dismissed.delete(item.id);
 		}
 	}
 

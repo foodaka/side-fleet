@@ -217,6 +217,18 @@ pub struct RunSummary {
     /// Tool calls in the thread waiting for someone to approve or deny them ("Ask me").
     #[serde(default)]
     pub pending_approvals: i64,
+    /// The agent of the thread's running message, else its latest; a follow-up can switch it.
+    #[serde(default = "default_agent")]
+    pub latest_agent: Agent,
+    /// That message's model; empty means the machine's default.
+    #[serde(default)]
+    pub latest_model: String,
+    /// That message's reasoning effort; None means the agent's default.
+    #[serde(default)]
+    pub latest_effort: Option<String>,
+    /// The last machine to take a message of the thread; a moved thread has changed machines.
+    #[serde(default)]
+    pub latest_worker_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

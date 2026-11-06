@@ -764,7 +764,7 @@ pub async fn get_run(pool: &PgPool, org: Uuid, id: Uuid) -> sqlx::Result<Option<
 }
 
 /// Root runs (threads), newest activity first, with thread status (the running
-/// message if any, else the latest) and follow-up count.
+/// message if any, else the latest), follow-up count, and what that message runs with.
 pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> sqlx::Result<Vec<RunSummary>> {
     let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
     let rows = sqlx::query(&format!(
@@ -773,8 +773,18 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
                 (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1) AS thread_status,
                 (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at,
                 (SELECT count(*) FROM approvals a JOIN runs l ON l.id = a.run_id
-                 WHERE (l.id = r.id OR l.parent_id = r.id) AND l.status = 'running' AND a.status = 'pending') AS pending_approvals
-         FROM runs r WHERE r.parent_id IS NULL AND r.org_id = $3 AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
+                 WHERE (l.id = r.id OR l.parent_id = r.id) AND l.status = 'running' AND a.status = 'pending') AS pending_approvals,
+                coalesce(latest.agent, r.agent) AS latest_agent,
+                coalesce(latest.model, r.model) AS latest_model,
+                latest.effort AS latest_effort,
+                (SELECT l.worker_id FROM runs l WHERE (l.id = r.id OR l.parent_id = r.id) AND l.worker_id IS NOT NULL ORDER BY l.created_at DESC LIMIT 1) AS latest_worker_id
+         FROM runs r
+         LEFT JOIN LATERAL (
+             SELECT l.agent, l.model, l.effort FROM runs l
+             WHERE (l.id = r.id OR l.parent_id = r.id) AND l.kind = 'agent'
+             ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1
+         ) latest ON true
+         WHERE r.parent_id IS NULL AND r.org_id = $3 AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
     ))
     .bind(limit)
     .bind(archived)
@@ -794,6 +804,10 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
                 thread_status: RunStatus::parse(&ts).unwrap_or(RunStatus::Failed),
                 last_activity_at: r.get("last_activity_at"),
                 pending_approvals: r.get("pending_approvals"),
+                latest_agent: Agent::parse(r.get::<&str, _>("latest_agent")).unwrap_or(Agent::Claude),
+                latest_model: r.get("latest_model"),
+                latest_effort: r.get("latest_effort"),
+                latest_worker_id: r.get("latest_worker_id"),
             }
         })
         .collect())

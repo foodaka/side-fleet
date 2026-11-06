@@ -115,9 +115,9 @@ The composer's machine picker lists **only your machines**. Grouping by owner on
 ### API
 
 `GET /v1/workers` gains `owner: {id, login} | null` and `mine: bool`. For machines that aren't
-yours, the `repos` field is reduced to a count. `DELETE /v1/workers/:id` and `POST
-/v1/workers/:id/update` are limited to the owner and org admins (for cleaning up a departed member's
-machines).
+yours, the `repos` field is reduced to a count. `DELETE /v1/workers/:id` is limited to the owner and
+org admins (for cleaning up a departed member's machines). `POST /v1/workers/:id/update` is limited
+to the owner, or org admins if the machine has none.
 
 ## 5. A member leaves or is removed
 

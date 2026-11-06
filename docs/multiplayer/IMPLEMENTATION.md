@@ -40,8 +40,8 @@ here (presence, mentions, suggestions, the board, search, the GitHub App) come l
 ### Machines
 - `GET /v1/workers` entries gain `owner: {id, login} | null` and `mine: boolean`.
   `mine` is true for your own machines, and also for owner-less machines when the caller has no user (the developer key).
-- `DELETE /v1/workers/:id` and `POST /v1/workers/:id/update` are limited to the machine's owner and
-  org owners (403 otherwise).
+- `DELETE /v1/workers/:id` is limited to the machine's owner and org owners (403 otherwise).
+- `POST /v1/workers/:id/update` is limited to the machine's owner, or org owners if it has none (403 otherwise).
 - Enrollment approval: any member may approve, and **the approver becomes the machine's owner**.
 
 ### Rooms

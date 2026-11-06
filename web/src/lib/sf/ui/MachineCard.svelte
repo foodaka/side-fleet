@@ -18,8 +18,9 @@
 	let { w, hot = false, onhover }: { w: Worker; hot?: boolean; onhover?: (id: string | null) => void } = $props();
 	const c = $derived(w.capabilities);
 	const yours = $derived(w.mine !== false);
-	/** Its owner, or an org owner (to clean up after someone who left), may update or remove it. */
-	const canManage = $derived(yours || fleet.isOwner);
+	/** Its owner, or an org owner (to clean up after someone who left), may remove it. */
+	const canRemove = $derived(yours || fleet.isOwner);
+	const canUpdate = $derived(fleet.canUpdate(w));
 	const sys = $derived(c.system);
 	const slots = $derived(c.slots);
 	const build = $derived(parseBuild(c.version));
@@ -198,10 +199,10 @@
 		<span class="min-w-0 truncate text-muted-foreground" title={c.version}>
 			{#if build.sha}Sidefleet {build.version}, build <span class="font-mono">{build.sha}</span>{:else}Version unknown{/if}
 		</span>
-		{#if !canManage}
-			<span class="shrink-0 text-muted-foreground">Runs only {w.owner ? `@${w.owner.login}'s` : 'its owner\'s'} tasks</span>
-		{:else if !w.online}
+		{#if !w.online && canRemove}
 			<button type="button" class="shrink-0 text-muted-foreground hover:text-err-ink" onclick={remove}>Remove</button>
+		{:else if !canUpdate}
+			<span class="shrink-0 text-muted-foreground">Runs only {w.owner ? `@${w.owner.login}'s` : 'its owner\'s'} tasks</span>
 		{:else if w.update_requested}
 			<span class="flex shrink-0 items-center gap-1.5 text-run-ink"><RefreshCw class="size-3.5 animate-spin [animation-duration:2.5s]" />Updating when idle</span>
 		{:else if w.outdated && w.online}

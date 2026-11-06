@@ -813,7 +813,12 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
 
 /// Ask a machine to update itself and restart when it is idle.
 async fn request_update(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
-    own_or_org_owner(&state, &caller, &id).await?;
+    // A restart is the owner's call; org owners only step in for a machine nobody owns.
+    match db::worker_owner(&state.pool, caller.org_id(), &id).await? {
+        Some(owner) if Some(owner) == caller.user_id() => {}
+        None if caller.is_owner() => {}
+        _ => return Err(forbidden("only the machine's owner can update it")),
+    }
     if db::set_update_requested(&state.pool, caller.org_id(), &id, true).await? {
         tracing::info!(worker = %id, "update requested");
         Ok(StatusCode::ACCEPTED)
@@ -853,7 +858,7 @@ async fn delete_worker(State(state): State<AppState>, Extension(caller): Extensi
     }
 }
 
-/// Managing a machine (update, remove) is for its owner, or an owner of the org.
+/// Removing a machine is for its owner, or an owner of the org (to clean up after someone who left).
 async fn own_or_org_owner(state: &AppState, caller: &Caller, worker: &str) -> Result<(), ApiError> {
     if caller.is_owner() {
         return Ok(());

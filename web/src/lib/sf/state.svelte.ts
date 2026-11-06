@@ -60,8 +60,12 @@ class Fleet {
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
 	isOwner = $derived(this.org?.role === 'owner');
-	/** Online machines on an older build that you may update (see MachineCard) and haven't asked to yet. */
-	updatable = $derived(this.workers.filter((w) => w.online && w.outdated && !w.update_requested && (w.mine !== false || this.isOwner)));
+	/** A machine is updated by its owner; org owners only step in for one nobody owns. */
+	canUpdate(w: Worker) {
+		return w.mine !== false || (!w.owner && this.isOwner);
+	}
+	/** Online machines on an older build that you may update and haven't asked to yet. */
+	updatable = $derived(this.workers.filter((w) => w.online && w.outdated && !w.update_requested && this.canUpdate(w)));
 	/** The inbox's notice about them, until cleared; a newer control plane build brings it back. */
 	updateNotice = $derived(this.updatable.length > 0 && this.#updatesCleared !== (this.setup?.build ?? ''));
 

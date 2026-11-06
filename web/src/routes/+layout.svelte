@@ -161,12 +161,12 @@
 									>
 										<n.icon size={14} />
 										{#if n.href === '#/machines'}
-											<StatusDot status={fleet.conn === 'unreachable' ? 'failed' : fleet.online.length ? 'online' : 'offline'} class="absolute top-1.5 right-1.5" />
+											<StatusDot status={fleet.conn === 'unreachable' ? 'failed' : fleet.updatable.length ? 'queued' : fleet.online.length ? 'online' : 'offline'} class="absolute top-1.5 right-1.5" />
 										{/if}
 									</a>
 								{/snippet}
 							</Tooltip.Trigger>
-							<Tooltip.Content side="right">{n.label}</Tooltip.Content>
+							<Tooltip.Content side="right">{n.label}{#if n.href === '#/machines' && fleet.updatable.length}: {fleet.updatable.length} can update{/if}</Tooltip.Content>
 						</Tooltip.Root>
 					{/each}
 				</nav>

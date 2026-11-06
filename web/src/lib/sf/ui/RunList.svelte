@@ -151,7 +151,7 @@
 						<span class="font-medium text-queue-ink">Waiting on you{#if r.pending_approvals! > 1}&nbsp;· {r.pending_approvals} tool calls{/if}</span>
 					{:else if detail}
 						{#if r.thread_status === 'running'}
-							{r.latest_worker_id ?? 'Starting'} · {duration(r.started_at, null, fleet.now) || 'starting'}
+							<span class="flex min-w-0 gap-1"><span class="truncate">{r.latest_worker_id ?? 'Starting'}</span><span class="shrink-0">· {duration(r.started_at, null, fleet.now) || 'starting'}</span></span>
 						{:else if r.start_at && later(r)}
 							Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 						{:else}

@@ -7,12 +7,13 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '../api';
 	import { fleet } from '../state.svelte';
-	import { parseBuild, pct, rel, repoKey, uptime } from '../format';
+	import { fileSize, parseBuild, pct, rel, repoKey, uptime } from '../format';
 	import Gauge from './Gauge.svelte';
 	import { telemetry } from '../telemetry.svelte';
 	import { duration } from '../format';
 	import StatusDot from './StatusDot.svelte';
 	import Avatar from './Avatar.svelte';
+	import CleanupDialog from './CleanupDialog.svelte';
 	import type { Worker } from '../types';
 
 	let { w, hot = false, onhover }: { w: Worker; hot?: boolean; onhover?: (id: string | null) => void } = $props();
@@ -64,6 +65,20 @@
 			toast.error('Could not request the update', { description: (e as Error).message });
 		}
 		requesting = false;
+	}
+
+	const cleanup = $derived(w.worktree_cleanup);
+	const canClean = $derived(canUpdate && w.online && !!c.can_clean_worktrees);
+	const cleanupNote = $derived.by(() => {
+		if (!cleanup) return 'Worktrees of finished tasks stay on this machine until cleaned up';
+		const changed = cleanup.kept_in_use + cleanup.kept_changes + cleanup.kept_unmerged + cleanup.failed;
+		return `Cleaned up ${rel(cleanup.at, fleet.now)}: removed ${cleanup.removed}, freed ${fileSize(cleanup.freed_bytes)}${changed ? `, kept ${changed} that changed` : ''}`;
+	});
+	let cleanupOpen = $state(false);
+	let cleanupView = $state<'preview' | 'removed'>('preview');
+	function showCleanup(view: 'preview' | 'removed') {
+		cleanupView = view;
+		cleanupOpen = true;
 	}
 
 	/** Forget an offline machine (frees a slot on the plan). It comes back if it connects again with a valid token. */
@@ -194,6 +209,21 @@
 			<span class="tnum">{repos} repos{fleet.added?.size ? `, ${chosen} chosen` : ''}</span>
 		</button>
 	</div>
+
+	{#if canClean || cleanup}
+		<div class="flex items-center justify-between gap-3 text-xs">
+			<span class="min-w-0 text-muted-foreground">
+				{cleanupNote}
+				{#if cleanup?.removed && canUpdate}<button type="button" class="underline underline-offset-2 hover:text-foreground" onclick={() => showCleanup('removed')}>View</button>{/if}
+			</span>
+			{#if w.worktree_cleanup_pending === 'remove'}
+				<span class="flex shrink-0 items-center gap-1.5 text-run-ink"><RefreshCw class="size-3.5 animate-spin [animation-duration:2.5s]" />Cleaning up</span>
+			{:else if canClean}
+				<Button size="sm" variant="outline" class="h-7 shrink-0 rounded-full" onclick={() => showCleanup('preview')}>Clean up</Button>
+			{/if}
+		</div>
+		<CleanupDialog {w} view={cleanupView} bind:open={cleanupOpen} />
+	{/if}
 
 	<footer class="mt-auto flex items-center justify-between gap-3 border-t pt-3.5 text-xs">
 		<span class="min-w-0 truncate text-muted-foreground" title={c.version}>

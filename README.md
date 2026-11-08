@@ -296,8 +296,17 @@ crates/server/web-dist` before committing. Tagging
 - Only Claude Code can relay its permission prompts to the page ("Ask me"). For Codex and opencode,
   whatever the mode does not allow is denied.
 - Worktrees start from the repo's `HEAD` without untracked or ignored files (`node_modules`,
-  `.env`), and are kept until you remove them (`git worktree remove`, or delete the folder under
-  `~/.sidefleet/worktrees` and run `git worktree prune`).
+  `.env`) unless the repo's `.sidefleet/worktree.json` brings them along:
+  `{"copy": [".env.local"], "setup": "pnpm install --frozen-lockfile"}`. It is read from the
+  checkout on each machine, so it can be committed or kept local; `copy` only takes paths git
+  ignores, setup runs once per worktree, and an agent can read anything copied, so list secrets
+  deliberately.
+  Without APFS, btrfs or XFS, every copy is a full copy: prefer `setup` for large folders.
+- Worktrees are kept until you press **Clean up** on the Machines page, which lists what would go
+  and what would stay before anything is removed. Only those with no uncommitted or untracked
+  files whose commits are on the default branch or were merged as their pull request can go (`gh`
+  must be signed in to see squash merges). Ignored files go too; the branch and snapshots stay, and
+  a follow-up rebuilds the worktree.
 - A follow-up runs only on the machine that holds the session, and waits while it is offline.
 - Redaction is pattern-based: a safety net, not a guarantee.
 - Windows is not supported.

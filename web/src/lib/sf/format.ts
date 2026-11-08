@@ -133,6 +133,13 @@ export function rel(iso: string | null | undefined, now = Date.now()): string {
 	return Math.round(s / 86400) + 'd ago';
 }
 
+/** Disk space in the units people read it in. */
+export function fileSize(bytes: number): string {
+	if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
+	if (bytes >= 1e6) return Math.round(bytes / 1e6) + ' MB';
+	return 'under 1 MB';
+}
+
 /** A time ahead: `in 7 days`, `in 5 hours`, `in 20 minutes`, `soon`. */
 export function until(iso: string | null | undefined, now = Date.now()): string {
 	if (!iso) return '';

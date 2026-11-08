@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Sidefleet</string>
+	<key>CFBundleDisplayName</key>
+	<string>Sidefleet</string>
+	<key>CFBundleIdentifier</key>
+	<string>xyz.sidefleet.mac</string>
+	<key>CFBundleExecutable</key>
+	<string>Sidefleet</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BUILD__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Sidefleet. MIT licensed.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>xyz.sidefleet.mac</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>sidefleet</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Self-hosted control planes are often plain HTTP on a tailnet or at home, at any address.
+	     Sign-in warns when plain HTTP is going to a public address. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

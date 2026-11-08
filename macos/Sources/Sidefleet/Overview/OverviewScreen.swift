@@ -68,14 +68,21 @@ struct OverviewScreen: View {
         let spend = fleet.runs.reduce(0) { $0 + ($1.run.result?["total_cost_usd"]?.double ?? 0) }
         return HStack(spacing: 0) {
             Stat(title: "Running now", value: "\(count(.running))", note: busy > 0 ? "on \(busy) machine\(busy == 1 ? "" : "s")" : "all machines idle")
-            Divider()
             Stat(title: "Waiting", value: "\(count(.queued))", note: count(.queued) > 0 ? "for a machine with the repo" : "nothing in the queue")
-            Divider()
             Stat(title: "Done today", value: "\(doneToday)", note: "\(count(.problems)) failed or stopped in total")
-            Divider()
             Stat(title: "Agent spend", value: Format.money(spend), note: "as reported by the agents (Codex reports none)")
         }
-        .fixedSize(horizontal: false, vertical: true)
+        // The lines are an overlay so they take the row's height: Dividers in the row would need
+        // `fixedSize`, which grows the whole split view past the top and bottom of the window.
+        .overlay {
+            HStack(spacing: 0) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Color.clear
+                    Rectangle().fill(SF.border).frame(width: 1)
+                }
+                Color.clear
+            }
+        }
         .card()
     }
 

@@ -165,12 +165,22 @@ private struct MainView: View {
 
 struct MenuBarLabel: View {
     var session: AppSession
+    @Environment(\.openWindow) private var openWindow
+    private static var launched = false
 
     var body: some View {
         // The count is only what needs you, not everything going on.
         let n = session.stores.map { $0.inbox.items.count + $0.fleet.waitingApprovals } ?? 0
         Image(nsImage: MenuBarMark.image)
             .accessibilityLabel("Sidefleet")
+            .task {
+                // SwiftUI doesn't present the main window at launch with this set of scenes, and this
+                // label is the one view that exists by then.
+                guard !Self.launched else { return }
+                Self.launched = true
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+            }
         if n > 0 {
             Text("\(n)").monospacedDigit()
         }

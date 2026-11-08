@@ -619,6 +619,75 @@ fn machine(env: &TestEnv, id: &str, root: &std::path::Path, heartbeat: Duration)
     }
 }
 
+/// A repo's setup runs before the agent, once per worktree, and Clean up on the page
+/// removes the finished worktree and reports back.
+#[tokio::test]
+async fn a_new_worktree_is_set_up_and_clean_up_removes_it_when_finished() {
+    let env = TestEnv::start().await;
+    let http = Client::new();
+    let root = tempfile::tempdir().unwrap();
+    let (origin, demo) = (root.path().join("origin.git"), root.path().join("demo"));
+    git_out(root.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    std::fs::create_dir_all(&demo).unwrap();
+    git_init(&demo);
+    git_out(&demo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git_out(&demo, &["push", "-q", "origin", "main"]);
+    git_out(&demo, &["remote", "set-head", "origin", "main"]);
+    std::fs::write(demo.join(".git/info/exclude"), ".env\nready.txt\n").unwrap();
+    std::fs::write(demo.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::create_dir_all(demo.join(".sidefleet")).unwrap();
+    std::fs::write(demo.join(".sidefleet/worktree.json"), r#"{"copy": [".env"], "setup": "cat .env > ready.txt"}"#).unwrap();
+
+    let worker = tokio::spawn(run_worker(machine(&env, "box", root.path(), Duration::from_millis(200))));
+    let create = |http: Client, url: String| async move {
+        for _ in 0..100 {
+            let r = http.post(format!("{url}/v1/runs")).bearer_auth(DEV_KEY).json(&json!({"task": "hello", "model": "claude-haiku-5-5", "repo": "demo"})).send().await.unwrap();
+            if r.status() == 202 {
+                return r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("the machine never came up");
+    };
+    let id = create(http.clone(), env.base_url.clone()).await;
+    let mut done = false;
+    for _ in 0..150 {
+        let run: Run = http.get(format!("{}/v1/runs/{id}", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if run.status.is_terminal() {
+            assert_eq!(run.status, RunStatus::Succeeded);
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(done, "the task never finished");
+
+    let events = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
+    let path = events.iter().find(|e| e.kind == "workspace").unwrap().payload["path"].as_str().unwrap().to_string();
+    let path = std::path::Path::new(&path);
+    assert_eq!(std::fs::read_to_string(path.join("ready.txt")).unwrap(), "SECRET=1\n", "the command ran after the copy");
+    let setup = events.iter().find(|e| e.kind == "worktree_setup" && e.payload["state"] == "done").unwrap();
+    assert_eq!(setup.payload["copied"], json!([".env"]));
+    let started = events.iter().position(|e| e.kind == "started").unwrap();
+    assert!(events.iter().position(|e| e.kind == "worktree_setup" && e.payload["state"] == "done").unwrap() < started, "before the agent");
+
+    let r = http.post(format!("{}/v1/workers/box/clean-worktrees", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    let mut report = serde_json::Value::Null;
+    for _ in 0..100 {
+        let ws: Vec<serde_json::Value> = http.get(format!("{}/v1/workers", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if ws[0]["clean_worktrees_requested"] == false && !ws[0]["worktree_cleanup"].is_null() {
+            report = ws[0]["worktree_cleanup"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(report["removed"], 1, "{report}");
+    assert!(!path.exists());
+    worker.abort();
+    env.teardown().await;
+}
+
 #[tokio::test]
 async fn a_failover_run_pushes_checkpoints_and_continues_on_another_machine_when_its_machine_drops() {
     let env = TestEnv::start().await;

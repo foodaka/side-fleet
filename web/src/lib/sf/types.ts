@@ -99,6 +99,8 @@ export interface SystemStats {
 }
 
 export interface Capabilities {
+	/** This worker's build answers Clean up. */
+	can_clean_worktrees?: boolean;
 	agents: {
 		claude?: { version: string; signed_in: boolean; sign_in_error?: string };
 		codex?: { version: string; signed_in?: boolean; models?: string[] };
@@ -123,6 +125,10 @@ export interface Worker {
 	online: boolean;
 	update_requested: boolean;
 	outdated: boolean;
+	/** Asked to clean up its finished worktrees and hasn't reported back yet. */
+	clean_worktrees_requested?: boolean;
+	/** What the last cleanup did. */
+	worktree_cleanup?: { removed: number; freed_bytes: number; kept_in_use: number; kept_changes: number; kept_unmerged: number; failed: number; at: string } | null;
 	/** Agents whose usage limit this machine's account hit, with when it resets; it takes none of their tasks until then. */
 	limited_until?: Partial<Record<'claude' | 'codex' | 'opencode', string>>;
 	/** Whose machine it is; null for machines connected with a static token. */

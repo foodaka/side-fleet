@@ -828,6 +828,25 @@ async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
     api.register("w", &["r"]).await;
     assert_eq!(hb("test").await["update_requested"], false);
 
+    // A worktree cleanup is asked for the same way, and the worker's report ends it.
+    assert_eq!(hb("test").await["clean_worktrees"], false);
+    let r = api.dev(reqwest::Method::POST, "/v1/workers/w/clean-worktrees").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = api.dev(reqwest::Method::POST, "/v1/workers/ghost/clean-worktrees").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(hb("test").await["clean_worktrees"], true);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["clean_worktrees_requested"], true);
+    assert_eq!(ws[0]["worktree_cleanup"], Value::Null);
+    let report = json!({"removed": 2, "freed_bytes": 2048, "kept_in_use": 1, "kept_changes": 0, "kept_unmerged": 3, "failed": 0});
+    let r = api.worker(reqwest::Method::POST, "/v1/worker/worktree-cleanup").json(&json!({"id": "w", "report": report})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(hb("test").await["clean_worktrees"], false);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["clean_worktrees_requested"], false);
+    assert_eq!(ws[0]["worktree_cleanup"]["removed"], 2);
+    assert!(ws[0]["worktree_cleanup"]["at"].is_string());
+
     env.teardown().await;
 }
 

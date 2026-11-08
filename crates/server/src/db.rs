@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker};
+use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanup};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -71,6 +71,37 @@ pub async fn set_update_requested(pool: &PgPool, org: Uuid, id: &str, value: boo
 pub async fn update_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<bool> {
     let row = sqlx::query("SELECT bool_or(update_requested) AS u FROM workers WHERE id = $1 AND org_id = ANY($2)").bind(id).bind(orgs).fetch_one(pool).await?;
     Ok(row.get::<Option<bool>, _>("u").unwrap_or(false))
+}
+
+pub async fn set_clean_worktrees_requested(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
+    let res = sqlx::query("UPDATE workers SET clean_worktrees_requested = true WHERE id = $1 AND org_id = $2").bind(id).bind(org).execute(pool).await?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Whether someone asked machine `id` to clean up its worktrees, from any of the orgs it serves.
+pub async fn clean_worktrees_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query("SELECT bool_or(clean_worktrees_requested) AS c FROM workers WHERE id = $1 AND org_id = ANY($2)").bind(id).bind(orgs).fetch_one(pool).await?;
+    Ok(row.get::<Option<bool>, _>("c").unwrap_or(false))
+}
+
+/// Whether a cleanup is pending on machine `id`, and what the last one did.
+pub async fn worktree_cleanup(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<(bool, Option<Value>)> {
+    let row = sqlx::query("SELECT clean_worktrees_requested, worktree_cleanup FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_one(pool).await?;
+    Ok((row.get("clean_worktrees_requested"), row.get("worktree_cleanup")))
+}
+
+/// Record a finished cleanup in every org the machine serves, since any of them may have asked.
+pub async fn finish_worktree_cleanup(pool: &PgPool, orgs: &[Uuid], id: &str, token_hash: &str, report: &WorktreeCleanup) -> sqlx::Result<()> {
+    let mut stored = json!(report);
+    stored["at"] = json!(Utc::now());
+    sqlx::query("UPDATE workers SET clean_worktrees_requested = false, worktree_cleanup = $1 WHERE id = $2 AND token_hash = $3 AND org_id = ANY($4)")
+        .bind(stored)
+        .bind(id)
+        .bind(token_hash)
+        .bind(orgs)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Of the runs machine `id` says it is executing, those already over here: stopped

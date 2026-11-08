@@ -5,11 +5,13 @@
 pub mod agent;
 pub mod approval;
 pub mod checkpoint;
+pub mod cleanup;
 pub mod client;
 pub mod detect;
 pub mod diff;
 pub mod integrate;
 pub mod pr;
+pub mod setup;
 pub mod snapshot;
 pub mod updater;
 pub mod worker;

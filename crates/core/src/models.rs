@@ -268,6 +268,23 @@ pub struct Capabilities {
     /// Task slots: how many may run at once and how many are busy right now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<Slots>,
+    /// This worker's build answers "Clean up" on the Machines page.
+    #[serde(default)]
+    pub can_clean_worktrees: bool,
+}
+
+/// What a worktree cleanup did on a machine.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeCleanup {
+    pub removed: usize,
+    pub freed_bytes: u64,
+    /// A task is running in it, or it is locked.
+    pub kept_in_use: usize,
+    /// Uncommitted or untracked files.
+    pub kept_changes: usize,
+    /// Commits that aren't merged, or another branch checked out.
+    pub kept_unmerged: usize,
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -683,6 +700,9 @@ pub struct HeartbeatResponse {
     /// Someone pressed Update on the Machines page: update when idle, then restart.
     #[serde(default)]
     pub update_requested: bool,
+    /// Someone pressed Clean up on the Machines page: remove finished worktrees.
+    #[serde(default)]
+    pub clean_worktrees: bool,
     /// Open pull requests this worker opened, due to be checked for a merge or close.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_prs: Vec<PrCheck>,

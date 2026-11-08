@@ -61,6 +61,14 @@ fn resolve_in(bin: &str, path: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf
     user_bin_dirs(home).into_iter().map(|d| d.join(bin)).find(|p| is_executable(p)).unwrap_or_else(|| PathBuf::from(bin))
 }
 
+/// PATH with the usual user install folders after it, for commands a repo asks for by
+/// name (`pnpm`) when this runs as a background service.
+pub fn path_with_user_bins() -> Option<std::ffi::OsString> {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::env::split_paths(&current).chain(user_bin_dirs(&home_dir())).collect::<Vec<_>>();
+    std::env::join_paths(dirs).ok()
+}
+
 /// A command for an agent CLI, found even when it is not on PATH. Its folder is
 /// put first on the child's PATH: npm-installed CLIs start with
 /// `#!/usr/bin/env node`, and the right `node` lives next to them.
@@ -389,6 +397,7 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
         detect_ollama()
     );
     Capabilities {
+        can_clean_worktrees: true,
         agents: Agents { claude, codex, opencode, ollama },
         repos: scan_repos(&opts.repos_root, opts.scan_depth),
         hostname: gethostname::gethostname().to_string_lossy().to_string(),

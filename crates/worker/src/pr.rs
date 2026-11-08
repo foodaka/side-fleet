@@ -71,6 +71,21 @@ pub async fn view(dir: &Path, branch_or_url: &str) -> Result<Option<PullRequest>
     }
 }
 
+/// Whether `branch`'s pull request was merged with `head` as its last commit. Anything
+/// but a clear yes (no `gh`, offline, commits added since) is a no.
+pub async fn merged_at(dir: &Path, branch: &str, head: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Merged {
+        state: String,
+        #[serde(rename = "headRefOid")]
+        head: String,
+    }
+    let Ok(out) = gh(dir, &["pr", "view", branch, "--json", "state,headRefOid"]).await else {
+        return false;
+    };
+    serde_json::from_str::<Merged>(&out).is_ok_and(|p| p.state.eq_ignore_ascii_case("merged") && p.head == head)
+}
+
 /// `gh args` in `dir`, never prompting.
 async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
     let cmd = tokio::process::Command::new("gh")

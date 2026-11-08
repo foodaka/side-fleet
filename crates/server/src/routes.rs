@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
-    HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, WorktreeCleanup, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
 use axum::{
@@ -81,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}", axum::routing::delete(delete_worker))
         .route("/v1/workers/{id}/update", post(request_update))
+        .route("/v1/workers/{id}/clean-worktrees", post(request_worktree_cleanup))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
         // Chat agents (Hermes, OpenClaw, Claude) drive the fleet through MCP with an API token.
@@ -111,6 +112,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/register", post(register_worker))
         .route("/v1/worker/heartbeat", post(heartbeat))
         .route("/v1/worker/update-ack", post(update_ack))
+        .route("/v1/worker/worktree-cleanup", post(worktree_cleanup_done))
         .route("/v1/worker/claim", post(claim_run))
         // Events can carry screenshots (base64), well past axum's 2 MB default.
         .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
@@ -805,20 +807,38 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
         // Connected to another org of its owner's; doesn't count against this org's plan.
         v["guest"] = json!(guests.contains(&w.id));
         v["update_requested"] = json!(db::update_requested(&state.pool, &[org], &w.id).await?);
+        let (cleaning, cleanup) = db::worktree_cleanup(&state.pool, org, &w.id).await?;
+        v["clean_worktrees_requested"] = json!(cleaning);
+        v["worktree_cleanup"] = json!(cleanup);
         v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
         out.push(v);
     }
     Ok(Json(json!(out)))
 }
 
+/// Changing what's on a machine is the owner's call; org owners only step in for one nobody owns.
+async fn may_look_after(state: &AppState, caller: &Caller, id: &str, action: &str) -> Result<(), ApiError> {
+    match db::worker_owner(&state.pool, caller.org_id(), id).await? {
+        Some(owner) if Some(owner) == caller.user_id() => Ok(()),
+        None if caller.is_owner() => Ok(()),
+        _ => Err(ApiError(StatusCode::FORBIDDEN, format!("only the machine's owner can {action} it"))),
+    }
+}
+
+/// Ask a machine to remove the worktrees of finished tasks that have nothing left to lose.
+async fn request_worktree_cleanup(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    may_look_after(&state, &caller, &id, "clean up").await?;
+    if db::set_clean_worktrees_requested(&state.pool, caller.org_id(), &id).await? {
+        tracing::info!(worker = %id, "worktree cleanup requested");
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()))
+    }
+}
+
 /// Ask a machine to update itself and restart when it is idle.
 async fn request_update(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
-    // A restart is the owner's call; org owners only step in for a machine nobody owns.
-    match db::worker_owner(&state.pool, caller.org_id(), &id).await? {
-        Some(owner) if Some(owner) == caller.user_id() => {}
-        None if caller.is_owner() => {}
-        _ => return Err(forbidden("only the machine's owner can update it")),
-    }
+    may_look_after(&state, &caller, &id, "update").await?;
     if db::set_update_requested(&state.pool, caller.org_id(), &id, true).await? {
         tracing::info!(worker = %id, "update requested");
         Ok(StatusCode::ACCEPTED)
@@ -991,6 +1011,25 @@ async fn update_ack(
         .bind(&w.orgs)
         .execute(&state.pool)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct WorktreeCleanupDone {
+    id: String,
+    report: WorktreeCleanup,
+}
+
+/// The worker finished a worktree cleanup: keep what it did and stop asking.
+async fn worktree_cleanup_done(
+    State(state): State<AppState>,
+    Extension(w): Extension<WorkerAuth>,
+    Json(req): Json<WorktreeCleanupDone>,
+) -> Result<StatusCode, ApiError> {
+    if !db::worker_owns_token(&state.pool, w.org, &req.id, &w.token_hash).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    }
+    db::finish_worktree_cleanup(&state.pool, &w.orgs, &req.id, &w.token_hash, &req.report).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1200,6 +1239,7 @@ async fn heartbeat(
         Ok(Json(HeartbeatResponse {
             server_version: state.config.build.clone(),
             update_requested: db::update_requested(&state.pool, &auth.orgs, &req.id).await?,
+            clean_worktrees: db::clean_worktrees_requested(&state.pool, &auth.orgs, &req.id).await?,
             check_prs: {
                 let mut prs = Vec::new();
                 for org in &auth.orgs {

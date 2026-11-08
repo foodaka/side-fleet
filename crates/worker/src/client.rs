@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sidefleet_core::{
-    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest,
+    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest, WorktreeCleanup,
     NewEvent, PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
@@ -193,6 +193,19 @@ impl ControlClient {
             .send()
             .await
             .context("pull request report failed")?;
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(())
+    }
+
+    pub async fn worktree_cleanup_done(&self, report: &WorktreeCleanup) -> Result<()> {
+        let r = self
+            .http
+            .post(self.url("/v1/worker/worktree-cleanup"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({"id": self.worker_id, "report": report}))
+            .send()
+            .await
+            .context("worktree-cleanup failed")?;
         Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
         Ok(())
     }

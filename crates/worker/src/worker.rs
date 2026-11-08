@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunControl, RunStatus, Slots, ASK_MODE, LIVE_TEXT};
+use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunControl, RunStatus, Slots, WorktreeCleanupRequest, WorktreeCleanupResult, ASK_MODE, LIVE_TEXT};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -216,12 +216,14 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                         if !resp.check_prs.is_empty() {
                             tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
                         }
-                        if resp.clean_worktrees && !cleaning.swap(true, Ordering::SeqCst) {
+                        if let Some(request) = resp.worktree_cleanup.filter(|_| !cleaning.swap(true, Ordering::SeqCst)) {
                             let (dir, active, cleaned) = (cfg2.worktrees_dir.clone(), active.clone(), cleaned.clone());
                             tokio::spawn(async move {
-                                let report = cleanup::clean(&dir, &active).await;
-                                tracing::info!(?report, "cleaned up worktrees");
-                                *cleaned.lock().await = Some(report);
+                                let result = match request {
+                                    WorktreeCleanupRequest::Preview => WorktreeCleanupResult::Preview(cleanup::preview(&dir, &active).await),
+                                    WorktreeCleanupRequest::Remove { ids } => WorktreeCleanupResult::Removed(cleanup::remove(&dir, &active, &ids).await),
+                                };
+                                *cleaned.lock().await = Some(result);
                             });
                         }
                         if resp.update_requested && cfg2.allow_remote_update {

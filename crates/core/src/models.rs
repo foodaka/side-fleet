@@ -273,6 +273,51 @@ pub struct Capabilities {
     pub can_clean_worktrees: bool,
 }
 
+/// What the Machines page asks of a machine's worktrees.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WorktreeCleanupRequest {
+    /// List what a cleanup would do, deleting nothing.
+    Preview,
+    /// Remove these threads' worktrees (root run ids), if they are still safe to.
+    Remove { ids: Vec<Uuid> },
+}
+
+/// Why a worktree would go or stay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeState {
+    Merged,
+    OnDefault,
+    InUse,
+    Changes,
+    Unmerged,
+    OtherBranch,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeItem {
+    pub root_id: Uuid,
+    pub repo: String,
+    pub branch: String,
+    pub state: WorktreeState,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorktreePreview {
+    pub items: Vec<WorktreeItem>,
+}
+
+/// What a worker reports back for a [`WorktreeCleanupRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeCleanupResult {
+    Preview(WorktreePreview),
+    Removed(WorktreeCleanup),
+}
+
 /// What a worktree cleanup did on a machine.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeCleanup {
@@ -285,6 +330,9 @@ pub struct WorktreeCleanup {
     /// Commits that aren't merged, or another branch checked out.
     pub kept_unmerged: usize,
     pub failed: usize,
+    /// The worktrees removed.
+    #[serde(default)]
+    pub items: Vec<WorktreeItem>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -700,9 +748,9 @@ pub struct HeartbeatResponse {
     /// Someone pressed Update on the Machines page: update when idle, then restart.
     #[serde(default)]
     pub update_requested: bool,
-    /// Someone pressed Clean up on the Machines page: remove finished worktrees.
-    #[serde(default)]
-    pub clean_worktrees: bool,
+    /// Someone is cleaning up this machine's worktrees from the Machines page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_cleanup: Option<WorktreeCleanupRequest>,
     /// Open pull requests this worker opened, due to be checked for a merge or close.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_prs: Vec<PrCheck>,

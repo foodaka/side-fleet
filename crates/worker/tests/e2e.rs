@@ -671,13 +671,29 @@ async fn a_new_worktree_is_set_up_and_clean_up_removes_it_when_finished() {
     let started = events.iter().position(|e| e.kind == "started").unwrap();
     assert!(events.iter().position(|e| e.kind == "worktree_setup" && e.payload["state"] == "done").unwrap() < started, "before the agent");
 
-    let r = http.post(format!("{}/v1/workers/box/clean-worktrees", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap();
+    let url = format!("{}/v1/workers/box/clean-worktrees", env.base_url);
+    let r = http.post(&url).bearer_auth(DEV_KEY).json(&json!({"mode": "preview"})).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    let mut preview = serde_json::Value::Null;
+    for _ in 0..100 {
+        let s: serde_json::Value = http.get(&url).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if !s["preview"].is_null() {
+            preview = s["preview"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(preview["items"][0]["state"], "on_default", "{preview}");
+    assert_eq!(preview["items"][0]["task"], "hello", "named by its task: {preview}");
+    assert!(path.exists(), "a preview deletes nothing");
+
+    let r = http.post(&url).bearer_auth(DEV_KEY).json(&json!({"mode": "remove", "ids": [id]})).send().await.unwrap();
     assert_eq!(r.status(), 202);
     let mut report = serde_json::Value::Null;
     for _ in 0..100 {
-        let ws: Vec<serde_json::Value> = http.get(format!("{}/v1/workers", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
-        if ws[0]["clean_worktrees_requested"] == false && !ws[0]["worktree_cleanup"].is_null() {
-            report = ws[0]["worktree_cleanup"].clone();
+        let s: serde_json::Value = http.get(&url).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+        if s["pending"].is_null() && !s["cleanup"].is_null() {
+            report = s["cleanup"].clone();
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

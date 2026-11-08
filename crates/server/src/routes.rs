@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
-    HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, WorktreeCleanup, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, WorktreeCleanupRequest, WorktreeCleanupResult, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
 use axum::{
@@ -81,7 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}", axum::routing::delete(delete_worker))
         .route("/v1/workers/{id}/update", post(request_update))
-        .route("/v1/workers/{id}/clean-worktrees", post(request_worktree_cleanup))
+        .route("/v1/workers/{id}/clean-worktrees", post(request_worktree_cleanup).get(worktree_cleanup_status))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
         // Chat agents (Hermes, OpenClaw, Claude) drive the fleet through MCP with an API token.
@@ -807,9 +807,15 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
         // Connected to another org of its owner's; doesn't count against this org's plan.
         v["guest"] = json!(guests.contains(&w.id));
         v["update_requested"] = json!(db::update_requested(&state.pool, &[org], &w.id).await?);
-        let (cleaning, cleanup) = db::worktree_cleanup(&state.pool, org, &w.id).await?;
-        v["clean_worktrees_requested"] = json!(cleaning);
-        v["worktree_cleanup"] = json!(cleanup);
+        let (pending, _, cleanup) = db::worktree_cleanup(&state.pool, org, &w.id).await?.unwrap_or_default();
+        v["worktree_cleanup_pending"] = json!(pending);
+        // The list is the machine owner's; everyone polling this gets the totals.
+        v["worktree_cleanup"] = cleanup.map_or(json!(null), |mut c| {
+            if let Some(o) = c.as_object_mut() {
+                o.remove("items");
+            }
+            c
+        });
         v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
         out.push(v);
     }
@@ -825,15 +831,44 @@ async fn may_look_after(state: &AppState, caller: &Caller, id: &str, action: &st
     }
 }
 
-/// Ask a machine to remove the worktrees of finished tasks that have nothing left to lose.
-async fn request_worktree_cleanup(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+/// Ask a machine to list what a cleanup would do, or to remove the worktrees that were listed.
+async fn request_worktree_cleanup(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    Json(request): Json<WorktreeCleanupRequest>,
+) -> Result<StatusCode, ApiError> {
     may_look_after(&state, &caller, &id, "clean up").await?;
-    if db::set_clean_worktrees_requested(&state.pool, caller.org_id(), &id).await? {
-        tracing::info!(worker = %id, "worktree cleanup requested");
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()))
+    if matches!(&request, WorktreeCleanupRequest::Remove { ids } if ids.is_empty()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "no worktrees to remove".into()));
     }
+    if db::request_worktree_cleanup(&state.pool, caller.org_id(), &id, &request).await? {
+        tracing::info!(worker = %id, "worktree cleanup requested");
+        return Ok(StatusCode::ACCEPTED);
+    }
+    match db::worktree_cleanup(&state.pool, caller.org_id(), &id).await? {
+        Some(_) => Err(ApiError(StatusCode::CONFLICT, "this machine is already cleaning up".into())),
+        None => Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into())),
+    }
+}
+
+/// The latest preview and cleanup, each worktree named by its task where this org knows it.
+async fn worktree_cleanup_status(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    may_look_after(&state, &caller, &id, "clean up").await?;
+    let Some((pending, mut preview, mut cleanup)) = db::worktree_cleanup(&state.pool, caller.org_id(), &id).await? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()));
+    };
+    for list in [&mut preview, &mut cleanup].into_iter().flatten() {
+        let Some(items) = list["items"].as_array_mut() else { continue };
+        let ids: Vec<Uuid> = items.iter().filter_map(|i| i["root_id"].as_str()?.parse().ok()).collect();
+        let titles = db::task_titles(&state.pool, caller.org_id(), &ids).await?;
+        for item in items {
+            if let Some(title) = item["root_id"].as_str().and_then(|r| r.parse().ok()).and_then(|r: Uuid| titles.get(&r)) {
+                item["task"] = json!(title);
+            }
+        }
+    }
+    Ok(Json(json!({ "pending": pending, "preview": preview, "cleanup": cleanup })))
 }
 
 /// Ask a machine to update itself and restart when it is idle.
@@ -1017,10 +1052,10 @@ async fn update_ack(
 #[derive(Deserialize)]
 struct WorktreeCleanupDone {
     id: String,
-    report: WorktreeCleanup,
+    result: WorktreeCleanupResult,
 }
 
-/// The worker finished a worktree cleanup: keep what it did and stop asking.
+/// The worker finished a preview or a cleanup: keep what it found and stop asking.
 async fn worktree_cleanup_done(
     State(state): State<AppState>,
     Extension(w): Extension<WorkerAuth>,
@@ -1029,7 +1064,7 @@ async fn worktree_cleanup_done(
     if !db::worker_owns_token(&state.pool, w.org, &req.id, &w.token_hash).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
     }
-    db::finish_worktree_cleanup(&state.pool, &w.orgs, &req.id, &w.token_hash, &req.report).await?;
+    db::finish_worktree_cleanup(&state.pool, &w.orgs, &req.id, &w.token_hash, &req.result).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1239,7 +1274,7 @@ async fn heartbeat(
         Ok(Json(HeartbeatResponse {
             server_version: state.config.build.clone(),
             update_requested: db::update_requested(&state.pool, &auth.orgs, &req.id).await?,
-            clean_worktrees: db::clean_worktrees_requested(&state.pool, &auth.orgs, &req.id).await?,
+            worktree_cleanup: db::pending_worktree_cleanup(&state.pool, &auth.orgs, &req.id).await?,
             check_prs: {
                 let mut prs = Vec::new();
                 for org in &auth.orgs {

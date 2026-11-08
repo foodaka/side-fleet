@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanup};
+use sidefleet_core::{Agent, Capabilities, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -73,35 +73,77 @@ pub async fn update_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::R
     Ok(row.get::<Option<bool>, _>("u").unwrap_or(false))
 }
 
-pub async fn set_clean_worktrees_requested(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<bool> {
-    let res = sqlx::query("UPDATE workers SET clean_worktrees_requested = true WHERE id = $1 AND org_id = $2").bind(id).bind(org).execute(pool).await?;
+/// Ask machine `id` for a preview or a removal; a new request drops the old preview. False
+/// when there is no such machine or it is in the middle of removing.
+pub async fn request_worktree_cleanup(pool: &PgPool, org: Uuid, id: &str, request: &WorktreeCleanupRequest) -> sqlx::Result<bool> {
+    let res = sqlx::query(
+        "UPDATE workers SET worktree_cleanup_request = $1, worktree_preview = NULL
+         WHERE id = $2 AND org_id = $3 AND (worktree_cleanup_request IS NULL OR worktree_cleanup_request->>'mode' <> 'remove')",
+    )
+    .bind(json!(request))
+    .bind(id)
+    .bind(org)
+    .execute(pool)
+    .await?;
     Ok(res.rows_affected() == 1)
 }
 
-/// Whether someone asked machine `id` to clean up its worktrees, from any of the orgs it serves.
-pub async fn clean_worktrees_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<bool> {
-    let row = sqlx::query("SELECT bool_or(clean_worktrees_requested) AS c FROM workers WHERE id = $1 AND org_id = ANY($2)").bind(id).bind(orgs).fetch_one(pool).await?;
-    Ok(row.get::<Option<bool>, _>("c").unwrap_or(false))
+/// What machine `id` has been asked to do with its worktrees, from any of the orgs it
+/// serves. A removal first, so a preview from another org can't delay it.
+pub async fn pending_worktree_cleanup(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<Option<WorktreeCleanupRequest>> {
+    let row: Option<Value> = sqlx::query_scalar(
+        "SELECT worktree_cleanup_request FROM workers WHERE id = $1 AND org_id = ANY($2) AND worktree_cleanup_request IS NOT NULL
+         ORDER BY (worktree_cleanup_request->>'mode' = 'remove') DESC LIMIT 1",
+    )
+    .bind(id)
+    .bind(orgs)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|v| serde_json::from_value(v).ok()))
 }
 
-/// Whether a cleanup is pending on machine `id`, and what the last one did.
-pub async fn worktree_cleanup(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<(bool, Option<Value>)> {
-    let row = sqlx::query("SELECT clean_worktrees_requested, worktree_cleanup FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_one(pool).await?;
-    Ok((row.get("clean_worktrees_requested"), row.get("worktree_cleanup")))
-}
-
-/// Record a finished cleanup in every org the machine serves, since any of them may have asked.
-pub async fn finish_worktree_cleanup(pool: &PgPool, orgs: &[Uuid], id: &str, token_hash: &str, report: &WorktreeCleanup) -> sqlx::Result<()> {
-    let mut stored = json!(report);
-    stored["at"] = json!(Utc::now());
-    sqlx::query("UPDATE workers SET clean_worktrees_requested = false, worktree_cleanup = $1 WHERE id = $2 AND token_hash = $3 AND org_id = ANY($4)")
-        .bind(stored)
+/// Machine `id`'s pending mode, latest preview and latest cleanup; `None` if it isn't in this org.
+pub async fn worktree_cleanup(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<Option<(Option<String>, Option<Value>, Option<Value>)>> {
+    let row = sqlx::query("SELECT worktree_cleanup_request->>'mode' AS pending, worktree_preview, worktree_cleanup FROM workers WHERE id = $1 AND org_id = $2")
         .bind(id)
-        .bind(token_hash)
-        .bind(orgs)
-        .execute(pool)
+        .bind(org)
+        .fetch_optional(pool)
         .await?;
+    Ok(row.map(|r| (r.get("pending"), r.get("worktree_preview"), r.get("worktree_cleanup"))))
+}
+
+/// Record what the machine found in every org it serves, since any of them may have asked.
+/// A preview only clears a preview request, so it can't swallow a removal asked for meanwhile.
+pub async fn finish_worktree_cleanup(pool: &PgPool, orgs: &[Uuid], id: &str, token_hash: &str, result: &WorktreeCleanupResult) -> sqlx::Result<()> {
+    let sql = match result {
+        WorktreeCleanupResult::Preview(_) => {
+            "UPDATE workers SET worktree_preview = $1,
+                 worktree_cleanup_request = CASE WHEN worktree_cleanup_request->>'mode' = 'preview' THEN NULL ELSE worktree_cleanup_request END
+             WHERE id = $2 AND token_hash = $3 AND org_id = ANY($4)"
+        }
+        WorktreeCleanupResult::Removed(_) => {
+            "UPDATE workers SET worktree_cleanup = $1, worktree_cleanup_request = NULL WHERE id = $2 AND token_hash = $3 AND org_id = ANY($4)"
+        }
+    };
+    let mut stored = match result {
+        WorktreeCleanupResult::Preview(p) => json!(p),
+        WorktreeCleanupResult::Removed(r) => json!(r),
+    };
+    stored["at"] = json!(Utc::now());
+    sqlx::query(sql).bind(stored).bind(id).bind(token_hash).bind(orgs).execute(pool).await?;
     Ok(())
+}
+
+/// The first line of each of these runs' tasks, in this org.
+pub async fn task_titles(pool: &PgPool, org: Uuid, ids: &[Uuid]) -> sqlx::Result<std::collections::HashMap<Uuid, String>> {
+    let rows = sqlx::query("SELECT id, task FROM runs WHERE org_id = $1 AND id = ANY($2)").bind(org).bind(ids).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let task: String = r.get("task");
+            (r.get("id"), task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(120).collect())
+        })
+        .collect())
 }
 
 /// Of the runs machine `id` says it is executing, those already over here: stopped

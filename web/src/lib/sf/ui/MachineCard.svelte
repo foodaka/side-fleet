@@ -7,12 +7,13 @@
 	import { toast } from 'svelte-sonner';
 	import { api } from '../api';
 	import { fleet } from '../state.svelte';
-	import { parseBuild, pct, rel, repoKey, uptime } from '../format';
+	import { fileSize, parseBuild, pct, rel, repoKey, uptime } from '../format';
 	import Gauge from './Gauge.svelte';
 	import { telemetry } from '../telemetry.svelte';
 	import { duration } from '../format';
 	import StatusDot from './StatusDot.svelte';
 	import Avatar from './Avatar.svelte';
+	import CleanupDialog from './CleanupDialog.svelte';
 	import type { Worker } from '../types';
 
 	let { w, hot = false, onhover }: { w: Worker; hot?: boolean; onhover?: (id: string | null) => void } = $props();
@@ -70,22 +71,14 @@
 	const canClean = $derived(canUpdate && w.online && !!c.can_clean_worktrees);
 	const cleanupNote = $derived.by(() => {
 		if (!cleanup) return 'Worktrees of finished tasks stay on this machine until cleaned up';
-		const kept = cleanup.kept_in_use + cleanup.kept_changes + cleanup.kept_unmerged + cleanup.failed;
-		const gb = cleanup.freed_bytes / 1e9;
-		const freed = gb >= 0.1 ? `, freed ${gb.toFixed(1)} GB` : '';
-		return `Cleaned up ${rel(cleanup.at, fleet.now)}: removed ${cleanup.removed}${freed}, kept ${kept}`;
+		const changed = cleanup.kept_in_use + cleanup.kept_changes + cleanup.kept_unmerged + cleanup.failed;
+		return `Cleaned up ${rel(cleanup.at, fleet.now)}: removed ${cleanup.removed}, freed ${fileSize(cleanup.freed_bytes)}${changed ? `, kept ${changed} that changed` : ''}`;
 	});
-
-	async function cleanWorktrees() {
-		if (!confirm(`Clean up worktrees on ${w.display_name}? Only ones whose work is merged or empty go. Anything with uncommitted files or unmerged commits stays, and a follow-up rebuilds a removed worktree.`)) return;
-		requesting = true;
-		try {
-			await api(`/v1/workers/${encodeURIComponent(w.id)}/clean-worktrees`, { method: 'POST' });
-			await fleet.refresh();
-		} catch (e) {
-			toast.error('Could not start the cleanup', { description: (e as Error).message });
-		}
-		requesting = false;
+	let cleanupOpen = $state(false);
+	let cleanupView = $state<'preview' | 'removed'>('preview');
+	function showCleanup(view: 'preview' | 'removed') {
+		cleanupView = view;
+		cleanupOpen = true;
 	}
 
 	/** Forget an offline machine (frees a slot on the plan). It comes back if it connects again with a valid token. */
@@ -219,13 +212,17 @@
 
 	{#if canClean || cleanup}
 		<div class="flex items-center justify-between gap-3 text-xs">
-			<span class="min-w-0 text-muted-foreground" title={cleanup ? `${cleanup.kept_unmerged} unmerged, ${cleanup.kept_changes} with uncommitted files, ${cleanup.kept_in_use} in use, ${cleanup.failed} could not be removed` : undefined}>{cleanupNote}</span>
-			{#if w.clean_worktrees_requested}
+			<span class="min-w-0 text-muted-foreground">
+				{cleanupNote}
+				{#if cleanup?.removed && canUpdate}<button type="button" class="underline underline-offset-2 hover:text-foreground" onclick={() => showCleanup('removed')}>View</button>{/if}
+			</span>
+			{#if w.worktree_cleanup_pending === 'remove'}
 				<span class="flex shrink-0 items-center gap-1.5 text-run-ink"><RefreshCw class="size-3.5 animate-spin [animation-duration:2.5s]" />Cleaning up</span>
 			{:else if canClean}
-				<Button size="sm" variant="outline" class="h-7 shrink-0 rounded-full" onclick={cleanWorktrees} disabled={requesting}>Clean up</Button>
+				<Button size="sm" variant="outline" class="h-7 shrink-0 rounded-full" onclick={() => showCleanup('preview')}>Clean up</Button>
 			{/if}
 		</div>
+		<CleanupDialog {w} view={cleanupView} bind:open={cleanupOpen} />
 	{/if}
 
 	<footer class="mt-auto flex items-center justify-between gap-3 border-t pt-3.5 text-xs">

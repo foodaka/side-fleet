@@ -117,6 +117,33 @@ export interface Capabilities {
 	slots?: { parallel: number; active: number };
 }
 
+export interface WorktreeItem {
+	root_id: string;
+	repo: string;
+	branch: string;
+	state: 'merged' | 'on_default' | 'in_use' | 'changes' | 'unmerged' | 'other_branch' | 'failed';
+	bytes: number;
+	/** The thread's first message, when this org has it. */
+	task?: string;
+}
+
+export interface WorktreeCleanupTotals {
+	removed: number;
+	freed_bytes: number;
+	kept_in_use: number;
+	kept_changes: number;
+	kept_unmerged: number;
+	failed: number;
+	at: string;
+}
+
+/** `GET /v1/workers/:id/clean-worktrees`: only the machine's owner sees the lists. */
+export interface WorktreeCleanupStatus {
+	pending: 'preview' | 'remove' | null;
+	preview: { items: WorktreeItem[]; at: string } | null;
+	cleanup: (WorktreeCleanupTotals & { items: WorktreeItem[] }) | null;
+}
+
 export interface Worker {
 	id: string;
 	display_name: string;
@@ -125,10 +152,10 @@ export interface Worker {
 	online: boolean;
 	update_requested: boolean;
 	outdated: boolean;
-	/** Asked to clean up its finished worktrees and hasn't reported back yet. */
-	clean_worktrees_requested?: boolean;
+	/** What it's been asked to do with its worktrees and hasn't reported back on. */
+	worktree_cleanup_pending?: 'preview' | 'remove' | null;
 	/** What the last cleanup did. */
-	worktree_cleanup?: { removed: number; freed_bytes: number; kept_in_use: number; kept_changes: number; kept_unmerged: number; failed: number; at: string } | null;
+	worktree_cleanup?: WorktreeCleanupTotals | null;
 	/** Agents whose usage limit this machine's account hit, with when it resets; it takes none of their tasks until then. */
 	limited_until?: Partial<Record<'claude' | 'codex' | 'opencode', string>>;
 	/** Whose machine it is; null for machines connected with a static token. */

@@ -335,6 +335,16 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			}
 			else t.workspaceNote = p.note ?? 'in the checkout';
 			break;
+		case 'worktree_setup': {
+			if (p.state === 'running') {
+				t.activity = 'Setting up the worktree';
+				break;
+			}
+			const did = [p.copied?.length ? `copied ${p.copied.join(', ')}` : '', p.ran ? `ran ${p.ran}` : ''].filter(Boolean).join(' and ');
+			if (did) t.items.push({ kind: 'note', key, tone: 'muted', text: `Set up the worktree: ${did}`, at: ev.at });
+			(p.problems ?? []).forEach((text: string, i: number) => t.items.push({ kind: 'note', key: `${key}-${i}`, tone: 'err', text: `Worktree setup: ${text}`, at: ev.at }));
+			break;
+		}
 		case 'started':
 			t.command = p.command;
 			t.activity = 'Waiting for the first message';

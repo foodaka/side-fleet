@@ -828,6 +828,43 @@ async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
     api.register("w", &["r"]).await;
     assert_eq!(hb("test").await["update_requested"], false);
 
+    // A preview is asked for the same way and the worker's answer ends it; the list stays with the owner's view.
+    assert_eq!(hb("test").await["worktree_cleanup"], Value::Null);
+    let post = |body: Value| api.dev(reqwest::Method::POST, "/v1/workers/w/clean-worktrees").json(&body).send();
+    assert_eq!(post(json!({"mode": "preview"})).await.unwrap().status(), StatusCode::ACCEPTED);
+    let r = api.dev(reqwest::Method::POST, "/v1/workers/ghost/clean-worktrees").json(&json!({"mode": "preview"})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(hb("test").await["worktree_cleanup"], json!({"mode": "preview"}));
+    let status = || async {
+        api.dev(reqwest::Method::GET, "/v1/workers/w/clean-worktrees").send().await.unwrap().json::<Value>().await.unwrap()
+    };
+    assert_eq!(status().await["pending"], "preview");
+    assert_eq!(status().await["preview"], Value::Null);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let item = json!({"root_id": id, "repo": "r", "branch": "sidefleet/11111111", "state": "merged", "bytes": 2048});
+    let done = |result: Value| api.worker(reqwest::Method::POST, "/v1/worker/worktree-cleanup").json(&json!({"id": "w", "result": result})).send();
+    assert_eq!(done(json!({"preview": {"items": [item]}})).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(hb("test").await["worktree_cleanup"], Value::Null);
+    assert_eq!(status().await["preview"]["items"][0]["state"], "merged");
+
+    // Removing names the worktrees; nothing else can be asked until the machine reports back.
+    assert_eq!(post(json!({"mode": "remove", "ids": []})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(post(json!({"mode": "remove", "ids": [id]})).await.unwrap().status(), StatusCode::ACCEPTED);
+    assert_eq!(hb("test").await["worktree_cleanup"]["ids"], json!([id]));
+    assert_eq!(post(json!({"mode": "preview"})).await.unwrap().status(), StatusCode::CONFLICT);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["worktree_cleanup_pending"], "remove");
+    assert_eq!(ws[0]["worktree_cleanup"], Value::Null);
+    let report = json!({"removed": 1, "freed_bytes": 2048, "kept_in_use": 0, "kept_changes": 0, "kept_unmerged": 0, "failed": 0, "items": [item]});
+    assert_eq!(done(json!({"removed": report})).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(hb("test").await["worktree_cleanup"], Value::Null);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["worktree_cleanup_pending"], Value::Null);
+    assert_eq!(ws[0]["worktree_cleanup"]["removed"], 1);
+    assert!(ws[0]["worktree_cleanup"]["at"].is_string());
+    assert!(ws[0]["worktree_cleanup"].get("items").is_none(), "the list isn't in what everyone polls");
+    assert_eq!(status().await["cleanup"]["items"][0]["root_id"], id);
+
     env.teardown().await;
 }
 

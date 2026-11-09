@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -268,6 +270,71 @@ pub struct Capabilities {
     /// Task slots: how many may run at once and how many are busy right now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<Slots>,
+    /// This worker's build answers "Clean up" on the Machines page.
+    #[serde(default)]
+    pub can_clean_worktrees: bool,
+}
+
+/// What the Machines page asks of a machine's worktrees.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WorktreeCleanupRequest {
+    /// List what a cleanup would do, deleting nothing.
+    Preview,
+    /// Remove these threads' worktrees (root run ids), if they are still safe to.
+    Remove { ids: Vec<Uuid> },
+}
+
+/// Why a worktree would go or stay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeState {
+    Merged,
+    OnDefault,
+    InUse,
+    Changes,
+    Unmerged,
+    OtherBranch,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeItem {
+    pub root_id: Uuid,
+    pub repo: String,
+    pub branch: String,
+    pub state: WorktreeState,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorktreePreview {
+    pub items: Vec<WorktreeItem>,
+}
+
+/// What a worker reports back for a [`WorktreeCleanupRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeCleanupResult {
+    Preview(WorktreePreview),
+    Removed(WorktreeCleanup),
+}
+
+/// What a worktree cleanup did on a machine.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeCleanup {
+    pub removed: usize,
+    pub freed_bytes: u64,
+    /// A task is running in it, or it is locked.
+    pub kept_in_use: usize,
+    /// Uncommitted or untracked files.
+    pub kept_changes: usize,
+    /// Commits that aren't merged, or another branch checked out.
+    pub kept_unmerged: usize,
+    pub failed: usize,
+    /// The worktrees removed.
+    #[serde(default)]
+    pub items: Vec<WorktreeItem>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -327,6 +394,10 @@ pub struct ClaudeAgent {
     pub signed_in: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_error: Option<String>,
+    /// What each alias runs here, `fable` to `claude-fable-5-2`. Empty from
+    /// older workers, and when Claude Code wouldn't say.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -683,6 +754,9 @@ pub struct HeartbeatResponse {
     /// Someone pressed Update on the Machines page: update when idle, then restart.
     #[serde(default)]
     pub update_requested: bool,
+    /// Someone is cleaning up this machine's worktrees from the Machines page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_cleanup: Option<WorktreeCleanupRequest>,
     /// Open pull requests this worker opened, due to be checked for a merge or close.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_prs: Vec<PrCheck>,

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunControl, RunStatus, Slots, ASK_MODE, LIVE_TEXT};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use sidefleet_core::{Agent, Capabilities, NewEvent, PrCheck, PrReport, Run, RunControl, RunStatus, Slots, WorktreeCleanupRequest, WorktreeCleanupResult, ASK_MODE, LIVE_TEXT};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
@@ -16,8 +16,10 @@ use uuid::Uuid;
 use crate::agent::{self, AgentSpec, ApprovalHook};
 use crate::approval::{self, Bridge};
 use crate::checkpoint::{self, ChangeTracker};
+use crate::cleanup::{self, ActiveRuns};
 use crate::client::{Backoff, ClientError, ControlClient, Rejected};
 use crate::diff;
+use crate::setup;
 use crate::snapshot;
 use crate::detect::{self, DetectOptions};
 
@@ -142,9 +144,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
     log_caps(&caps);
     let caps = Arc::new(Mutex::new(caps));
     let active_count = Arc::new(AtomicUsize::new(0));
-    // Active runs: run id -> (repo, isolation). Reported on every heartbeat so the
+    // Active runs: run id -> (repo, isolation, thread root). Reported on every heartbeat so the
     // control plane can fail runs we no longer execute; also keeps in-place runs one per repo.
-    let active: Arc<Mutex<HashMap<Uuid, (String, String)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let active: ActiveRuns = Arc::new(Mutex::new(HashMap::new()));
     let running: RunningMap = Arc::default();
 
     register_with_backoff(&client, &cfg, &caps, &active).await;
@@ -168,6 +170,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let active_count = active_count.clone();
         let active = active.clone();
         let running = running.clone();
+        // A worktree cleanup in progress, and its report until the control plane has it.
+        let cleaning = Arc::new(AtomicBool::new(false));
+        let cleaned = Arc::new(Mutex::new(None));
         tokio::spawn(async move {
             let mut agents_checked = Instant::now();
             loop {
@@ -182,6 +187,13 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                         tracing::info!("found a newly installed agent");
                         log_caps(&c);
                     }
+                    if let Some(claude) = current.claude.as_ref() {
+                        if let Some(updated) = detect::claude_updated(claude, &detect_opts.claude_bin).await {
+                            let mut c = caps.lock().await;
+                            c.agents.claude = Some(updated);
+                            log_caps(&c);
+                        }
+                    }
                 }
                 {
                     let mut c = caps.lock().await;
@@ -191,6 +203,17 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 }
                 let snapshot = caps.lock().await.clone();
                 let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
+                // Ahead of the heartbeat, so its answer can't still ask for the cleanup reported here.
+                let report = cleaned.lock().await.take();
+                if let Some(report) = report {
+                    match client.worktree_cleanup_done(&report).await {
+                        Ok(()) => cleaning.store(false, Ordering::SeqCst),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "reporting the worktree cleanup failed; trying again");
+                            *cleaned.lock().await = Some(report);
+                        }
+                    }
+                }
                 match client.heartbeat(&snapshot, &ids).await {
                     Ok(resp) => {
                         client.set_gzip(resp.accepts_gzip);
@@ -199,6 +222,16 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                         }
                         if !resp.check_prs.is_empty() {
                             tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
+                        }
+                        if let Some(request) = resp.worktree_cleanup.filter(|_| !cleaning.swap(true, Ordering::SeqCst)) {
+                            let (dir, active, cleaned) = (cfg2.worktrees_dir.clone(), active.clone(), cleaned.clone());
+                            tokio::spawn(async move {
+                                let result = match request {
+                                    WorktreeCleanupRequest::Preview => WorktreeCleanupResult::Preview(cleanup::preview(&dir, &active).await),
+                                    WorktreeCleanupRequest::Remove { ids } => WorktreeCleanupResult::Removed(cleanup::remove(&dir, &active, &ids).await),
+                                };
+                                *cleaned.lock().await = Some(result);
+                            });
                         }
                         if resp.update_requested && cfg2.allow_remote_update {
                             if !ids.is_empty() {
@@ -273,8 +306,8 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             .lock()
             .await
             .values()
-            .filter(|(_, iso)| iso == "checkout")
-            .map(|(repo, _)| repo.clone())
+            .filter(|(_, iso, _)| iso == "checkout")
+            .map(|(repo, _, _)| repo.clone())
             .collect();
         // Our load, so the control plane can prefer a machine with more free slots.
         let slots = Slots { parallel: cfg.parallel.max(1), active: active_count.load(Ordering::Relaxed) };
@@ -287,7 +320,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
             Ok(Some(run)) => {
                 backoff.reset();
                 let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
-                active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone()));
+                active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone(), run.parent_id.unwrap_or(run.id)));
                 active_count.fetch_add(1, Ordering::Relaxed);
                 let id = run.id;
                 let (stop_tx, _) = watch::channel(false);
@@ -346,7 +379,7 @@ async fn register_with_backoff(
     client: &ControlClient,
     cfg: &WorkerConfig,
     caps: &Arc<Mutex<Capabilities>>,
-    active: &Arc<Mutex<HashMap<Uuid, (String, String)>>>,
+    active: &ActiveRuns,
 ) {
     let mut backoff = Backoff::new(Duration::from_secs(30));
     loop {
@@ -460,10 +493,15 @@ async fn copy_local_settings(repo: &Path, worktree: &Path) {
     }
 }
 
+/// The branch of a thread's worktree.
+pub fn task_branch(root_id: Uuid) -> String {
+    format!("sidefleet/{}", &root_id.simple().to_string()[..8])
+}
+
 async fn add_worktree(repo: &Path, repo_name: &str, root_id: Uuid, worktrees_dir: &Path, resume_from: Option<&str>, start: Option<&str>) -> Result<Worktree> {
     let slug: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let path = worktrees_dir.join(slug).join(root_id.to_string());
-    let branch = format!("sidefleet/{}", &root_id.simple().to_string()[..8]);
+    let branch = task_branch(root_id);
     if path.join(".git").exists() {
         return Ok(Worktree { path, branch, from: None });
     }
@@ -659,6 +697,10 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         };
         report_finish(client, run_id, status, result, None).await;
         return;
+    }
+
+    if in_worktree {
+        set_up_worktree(client, run_id, &repo_dir, &cwd).await;
     }
 
     // The tree before the agent starts, and the one the thread started from, to diff against afterwards.
@@ -904,6 +946,27 @@ async fn stop_requested(client: &ControlClient, run_id: Uuid) {
             Ok(_) => {}
             Err(e) => tracing::debug!(error = %e, "control poll failed"),
         }
+    }
+}
+
+/// Run the repo's worktree setup if this worktree hasn't had it, telling the page.
+/// Goes ahead with the task whatever happens; a stop ends the setup and the agent's
+/// own stop watcher then ends the run.
+async fn set_up_worktree(client: &ControlClient, run_id: Uuid, repo: &Path, worktree: &Path) {
+    let post = |payload| async move {
+        if let Err(e) = client.post_events(run_id, vec![NewEvent { kind: "worktree_setup".into(), payload }]).await {
+            tracing::warn!(error = %e, "posting the worktree setup failed");
+        }
+    };
+    let plan = match setup::plan(repo, worktree).await {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return,
+        Err(problem) => return post(json!({"state": "done", "copied": [], "problems": [problem]})).await,
+    };
+    post(json!({"state": "running"})).await;
+    tokio::select! {
+        out = setup::run(repo, worktree, plan) => post(json!({"state": "done", "copied": out.copied, "ran": out.ran, "problems": out.problems})).await,
+        () = stop_requested(client, run_id) => {}
     }
 }
 

@@ -102,7 +102,7 @@ export interface Capabilities {
 	/** This worker's build answers Clean up. */
 	can_clean_worktrees?: boolean;
 	agents: {
-		claude?: { version: string; signed_in: boolean; sign_in_error?: string };
+		claude?: { version: string; signed_in: boolean; sign_in_error?: string; models?: Record<string, string> };
 		codex?: { version: string; signed_in?: boolean; models?: string[] };
 		/** `models` is capped; `models_total` is how many opencode reported. */
 		opencode?: { version: string; models: string[]; models_total: number };

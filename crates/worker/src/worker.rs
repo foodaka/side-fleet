@@ -187,6 +187,13 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                         tracing::info!("found a newly installed agent");
                         log_caps(&c);
                     }
+                    if let Some(claude) = current.claude.as_ref() {
+                        if let Some(updated) = detect::claude_updated(claude, &detect_opts.claude_bin).await {
+                            let mut c = caps.lock().await;
+                            c.agents.claude = Some(updated);
+                            log_caps(&c);
+                        }
+                    }
                 }
                 {
                     let mut c = caps.lock().await;

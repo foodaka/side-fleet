@@ -9,18 +9,21 @@ export const AGENTS: { id: AgentId; name: string; hint: string }[] = [
 export const agentName = (id: string | null | undefined) => AGENTS.find((a) => a.id === id)?.name ?? 'Claude Code';
 
 /** Claude Code's model aliases, each the latest version the machine's Claude Code knows; Codex and opencode offer whatever each machine reports.
- * `version` is what each alias currently resolves to, shown in the picker: bump it when a new model ships. */
+ * Which version an alias runs comes from the machine: see {@link pickerModelName}. */
 export const MODELS = [
-	{ id: 'sonnet', name: 'Sonnet', version: '5.5', hint: 'Balanced' },
-	{ id: 'opus', name: 'Opus', version: '5.5', hint: 'Most capable' },
-	{ id: 'fable', name: 'Fable', version: '5.1', hint: 'Newest family' },
-	{ id: 'haiku', name: 'Haiku', version: '5.5', hint: 'Fastest' }
+	{ id: 'sonnet', name: 'Sonnet', hint: 'Balanced' },
+	{ id: 'opus', name: 'Opus', hint: 'Most capable' },
+	{ id: 'fable', name: 'Fable', hint: 'Newest family' },
+	{ id: 'haiku', name: 'Haiku', hint: 'Fastest' }
 ] as const;
 
-/** A Claude alias as the picker shows it, `Opus 5.5`; anything else as {@link modelName} reads it. */
-export function pickerModelName(id: string) {
+/** A Claude alias as the picker shows it: `Opus 5.5` when the machines in `models` ({@link machineModels}) agree on what it runs, plain `Opus` when they don't or haven't said; anything else as {@link modelName} reads it. */
+export function pickerModelName(id: string, models: string[] = []) {
 	const m = MODELS.find((x) => x.id === id);
-	return m ? `${m.name} ${m.version}` : modelName(id);
+	if (!m) return modelName(id);
+	const running = models.filter((x) => x.startsWith(`claude-${id}-`));
+	const version = running.length === 1 ? /^claude-[a-z]+-(\d+(?:-\d{1,2}(?!\d))?)/.exec(running[0])?.[1] : undefined;
+	return version ? `${m.name} ${version.replace('-', '.')}` : m.name;
 }
 
 /** A full Claude model id (`claude-sonnet-5-5`): what Claude Code reports running, and what tasks from before the aliases stored. */
@@ -82,7 +85,7 @@ export function machineModels(workers: Worker[], agent: AgentId): string[] {
 	const count = new Map<string, number>();
 	workers.forEach((w) => {
 		const a = w.capabilities.agents;
-		const list = agent === 'codex' ? a.codex?.models : agent === 'opencode' ? a.opencode?.models : undefined;
+		const list = agent === 'claude' ? Object.values(a.claude?.models ?? {}) : agent === 'codex' ? a.codex?.models : a.opencode?.models;
 		(list ?? []).forEach((m) => count.set(m, (count.get(m) ?? 0) + 1));
 	});
 	return [...count.keys()].sort((x, y) => count.get(y)! - count.get(x)! || 0);

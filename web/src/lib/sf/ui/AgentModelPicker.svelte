@@ -24,7 +24,7 @@
 		model: string;
 		/** Reasoning effort; '' is the agent's default. */
 		effort?: string;
-		/** Models the target machines offer for the agent (Codex, opencode). */
+		/** Models the target machines offer for the agent; for Claude, what its aliases run. */
 		models: string[];
 		/** Why an agent can't be picked, or '' when it can. */
 		unavailable?: (a: AgentId) => string;
@@ -74,9 +74,9 @@
 
 {#if agent === 'claude'}
 	<Select.Root type="single" value={model} onValueChange={pickModel}>
-		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Model">{pickerModelName(model)}</Select.Trigger>
+		<Select.Trigger size="sm" class="{pill} {text}" aria-label="Model">{pickerModelName(model, models)}</Select.Trigger>
 		<Select.Content>
-			{#each MODELS as m (m.id)}<Select.Item value={m.id} label={pickerModelName(m.id)}><span class="flex flex-col"><span>{pickerModelName(m.id)}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
+			{#each MODELS as m (m.id)}<Select.Item value={m.id} label={pickerModelName(m.id, models)}><span class="flex flex-col"><span>{pickerModelName(m.id, models)}</span><span class="text-xs text-muted-foreground">{m.hint}</span></span></Select.Item>{/each}
 		</Select.Content>
 	</Select.Root>
 {:else if agent === 'codex' && (models.length || !model)}

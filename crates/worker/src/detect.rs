@@ -1,11 +1,14 @@
 //! Capability detection: which agents are installed (whether they are signed
 //! in, which models they offer) and which git checkouts live under the repos root.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
-use sidefleet_core::{repo_identity, Agents, Capabilities, ClaudeAgent, CodexAgent, OllamaAgent, OpencodeAgent, RepoInfo, SystemStats};
+use sidefleet_core::{repo_identity, Agents, Capabilities, ClaudeAgent, CLAUDE_MODELS, CodexAgent, OllamaAgent, OpencodeAgent, RepoInfo, SystemStats};
 use std::sync::Mutex;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 /// Environment variables stripped from every child process so a nested
@@ -109,15 +112,32 @@ fn version_from(s: &str) -> String {
 }
 
 pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent> {
+    let version = claude_version(bin).await?;
+    let (models, (signed_in, sign_in_error)) = tokio::join!(claude_aliases(bin), claude_sign_in(bin, check_sign_in));
+    Some(ClaudeAgent { version, signed_in, sign_in_error, models })
+}
+
+/// Claude Code again when it changed since `current` was detected, as its
+/// auto-update does under a running worker: a new version can move the aliases.
+/// Also retries aliases that came back empty.
+pub async fn claude_updated(current: &ClaudeAgent, bin: &str) -> Option<ClaudeAgent> {
+    let version = claude_version(bin).await?;
+    if version == current.version && !current.models.is_empty() {
+        return None;
+    }
+    Some(ClaudeAgent { version, models: claude_aliases(bin).await, ..current.clone() })
+}
+
+async fn claude_version(bin: &str) -> Option<String> {
     let mut cmd = agent_command(bin);
     cmd.arg("--version");
     let (ok, out, _) = run_with_timeout(cmd, Duration::from_secs(15)).await?;
-    if !ok {
-        return None;
-    }
-    let version = version_from(&out);
+    ok.then(|| version_from(&out))
+}
+
+async fn claude_sign_in(bin: &str, check_sign_in: bool) -> (bool, Option<String>) {
     if !check_sign_in {
-        return Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some("not checked".into()) });
+        return (false, Some("not checked".into()));
     }
     // A trivial prompt: succeeds only when the CLI has valid credentials.
     let mut cmd = agent_command(bin);
@@ -129,14 +149,55 @@ pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent
                 .ok()
                 .and_then(|v| v.get("is_error").and_then(|b| b.as_bool()))
                 .unwrap_or(false);
-            Some(ClaudeAgent { version, signed_in: !is_error, sign_in_error: is_error.then(|| sidefleet_core::redact(&out)) })
+            (!is_error, is_error.then(|| sidefleet_core::redact(&out)))
         }
         Some((false, out, err)) => {
             let msg = if err.is_empty() { out } else { err };
-            Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some(sidefleet_core::stream::truncate_bytes(&sidefleet_core::redact(&msg), 400)) })
+            (false, Some(sidefleet_core::stream::truncate_bytes(&sidefleet_core::redact(&msg), 400)))
         }
-        None => Some(ClaudeAgent { version, signed_in: false, sign_in_error: Some("sign-in check timed out".into()) }),
+        None => (false, Some("sign-in check timed out".into())),
     }
+}
+
+/// What each of Claude Code's aliases runs on this machine.
+async fn claude_aliases(bin: &str) -> BTreeMap<String, String> {
+    let mut probes = tokio::task::JoinSet::new();
+    for alias in CLAUDE_MODELS {
+        let bin = bin.to_string();
+        probes.spawn(async move { Some((alias.to_string(), claude_alias_model(&bin, alias).await?)) });
+    }
+    probes.join_all().await.into_iter().flatten().collect()
+}
+
+/// Starts Claude Code on `alias` only to read its `init` event, then kills it:
+/// the event comes first, so no turn gets to run.
+async fn claude_alias_model(bin: &str, alias: &str) -> Option<String> {
+    let mut cmd = agent_command(bin);
+    cmd.args(["-p", "x", "--bare", "--model", alias, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]);
+    for k in STRIPPED_ENV {
+        cmd.env_remove(k);
+    }
+    cmd.current_dir(std::env::temp_dir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    let mut child = cmd.spawn().ok()?;
+    let mut lines = BufReader::new(child.stdout.take()?).lines();
+    let read = async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(model) = init_model(&line) {
+                return Some(model);
+            }
+        }
+        None
+    };
+    tokio::time::timeout(Duration::from_secs(30), read).await.ok().flatten()
+}
+
+/// The full Claude model id in a stream-json `init` line.
+fn init_model(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != "init" {
+        return None;
+    }
+    v.get("model")?.as_str().filter(|m| m.starts_with("claude-")).map(str::to_string)
 }
 
 /// Codex: version, sign-in (`codex login status`, no model call) and the models
@@ -429,6 +490,15 @@ pub async fn detect_missing(current: &Agents, opts: &DetectOptions) -> Option<Ag
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reads_the_model_from_the_init_event_only() {
+        use super::init_model;
+        assert_eq!(init_model(r#"{"type":"system","subtype":"init","model":"claude-fable-5-2"}"#).as_deref(), Some("claude-fable-5-2"));
+        assert_eq!(init_model(r#"{"type":"system","subtype":"hook_started","model":"claude-fable-5-2"}"#), None);
+        assert_eq!(init_model(r#"{"type":"system","subtype":"init","model":"us.anthropic.fable"}"#), None);
+        assert_eq!(init_model("not json"), None);
+    }
 
     #[test]
     fn finds_agents_outside_path() {

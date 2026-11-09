@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -392,6 +394,10 @@ pub struct ClaudeAgent {
     pub signed_in: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_error: Option<String>,
+    /// What each alias runs here, `fable` to `claude-fable-5-2`. Empty from
+    /// older workers, and when Claude Code wouldn't say.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

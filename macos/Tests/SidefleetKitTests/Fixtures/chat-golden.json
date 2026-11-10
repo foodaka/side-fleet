@@ -1,0 +1,115 @@
+{
+ "snippet": {
+  "hermes": "mcp_servers:\n  sidefleet:\n    url: \"https://fleet.example.com/mcp\"\n    headers:\n      Authorization: \"Bearer sfa_\"q\\uo'te\"",
+  "openclaw": "openclaw mcp set sidefleet '{\"url\":\"https://fleet.example.com/mcp\",\"transport\":\"streamable-http\",\"headers\":{\"Authorization\":\"Bearer sfa_\\\"q\\\\uo'te\"}}'",
+  "claude": "claude mcp add --transport http --scope user sidefleet https://fleet.example.com/mcp --header \"Authorization: Bearer sfa_\"q\\uo'te\"",
+  "other": "URL: https://fleet.example.com/mcp\nHeader: Authorization: Bearer sfa_\"q\\uo'te"
+ },
+ "message": {
+  "hermes": "Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.\n\nAdd this MCP server to your config in ~/.hermes/config.yaml (under mcp_servers), then reload your MCP servers:\n\nmcp_servers:\n  sidefleet:\n    url: \"https://fleet.example.com/mcp\"\n    headers:\n      Authorization: \"Bearer sfa_\"q\\uo'te\"\n\nWhen it's connected, use Sidefleet's fleet_overview tool and tell me which machines you can see.",
+  "openclaw": "Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.\n\nRun this command to add the Sidefleet MCP server:\n\nopenclaw mcp set sidefleet '{\"url\":\"https://fleet.example.com/mcp\",\"transport\":\"streamable-http\",\"headers\":{\"Authorization\":\"Bearer sfa_\\\"q\\\\uo'te\"}}'\n\nWhen it's connected, use Sidefleet's fleet_overview tool and tell me which machines you can see.",
+  "claude": "Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.\n\nRun this command to add the Sidefleet MCP server for all my projects:\n\nclaude mcp add --transport http --scope user sidefleet https://fleet.example.com/mcp --header \"Authorization: Bearer sfa_\"q\\uo'te\"\n\nWhen it's connected, use Sidefleet's fleet_overview tool and tell me which machines you can see.",
+  "other": "URL: https://fleet.example.com/mcp\nHeader: Authorization: Bearer sfa_\"q\\uo'te"
+ },
+ "steps": {
+  "hermes": {
+   "before": "On the computer where Hermes runs, add this to ~/.hermes/config.yaml (if the file already has an mcp_servers: line, add the sidefleet part under it):",
+   "after": "Then send /reload-mcp to Hermes, or wait a minute: it picks the change up on its own."
+  },
+  "openclaw": {
+   "before": "On the computer where OpenClaw runs, run this in a terminal:",
+   "after": "OpenClaw picks it up with your next message."
+  },
+  "claude": {
+   "before": "Run this in a terminal:",
+   "after": "Then start Claude Code (or a new session). Sidefleet shows up in /mcp."
+  },
+  "other": {
+   "before": "Add an MCP server to your app with this address and header (Streamable HTTP). A script can call the API at the same address with the same header.",
+   "after": ""
+  }
+ },
+ "updatesSetup": {
+  "hermes": {
+   "before": "On the computer where Hermes runs, turn on its webhooks if they are off (add WEBHOOK_ENABLED=true to ~/.hermes/.env and restart Hermes). Then run:",
+   "snippet": "hermes webhook subscribe sidefleet --prompt \"{text}\" --deliver discord --mirror-to-session --secret sec --description \"Sidefleet task updates\"",
+   "after": "Then press Send a test update below."
+  },
+  "openclaw": {
+   "before": "On the computer where OpenClaw runs, add this to ~/.openclaw/openclaw.json (inside the outer { }), then run openclaw gateway restart:",
+   "snippet": "hooks: {\n  enabled: true,\n  token: \"sec\",\n  path: \"/hooks\",\n},",
+   "after": "Then press Send a test update below."
+  },
+  "claude": {
+   "before": "Sidefleet POSTs JSON (event_type, text, task) to your address. To check it came from Sidefleet: X-Webhook-Signature-V2 is the hex HMAC-SHA256 of \"<X-Webhook-Timestamp>.<body>\" with this secret:",
+   "snippet": "sec",
+   "after": ""
+  },
+  "other": {
+   "before": "Sidefleet POSTs JSON (event_type, text, task) to your address. To check it came from Sidefleet: X-Webhook-Signature-V2 is the hex HMAC-SHA256 of \"<X-Webhook-Timestamp>.<body>\" with this secret:",
+   "snippet": "sec",
+   "after": ""
+  }
+ },
+ "updatesMessage": {
+  "hermes": "Please set yourself up so Sidefleet can tell you about my coding tasks, and you can tell me here.\n\n1. Make sure your webhook server is on: WEBHOOK_ENABLED=true in ~/.hermes/.env (port 8644). If you have to change it, restart your gateway.\n\n2. Run this command. If you know this chat's id, add --deliver-chat-id with it so updates come to this chat:\n\nhermes webhook subscribe sidefleet --prompt \"{text}\" --deliver slack --mirror-to-session --secret sec --description \"Sidefleet task updates\"\n\nWhen a Sidefleet update arrives, tell me about it in a short message and help me act on it with the Sidefleet tools.",
+  "openclaw": "Please set yourself up so Sidefleet can tell you about my coding tasks, and you can tell me here.\n\nTurn on your webhooks: in your config (~/.openclaw/openclaw.json) set\n\nhooks: {\n  enabled: true,\n  token: \"sec\",\n  path: \"/hooks\",\n},\n\nthen restart your gateway (openclaw gateway restart).\n\nWhen a Sidefleet update arrives, tell me about it in a short message and help me act on it with the Sidefleet tools."
+ },
+ "url": {
+  "hermes": [
+   "https://h.example.com:8644/webhooks/sidefleet",
+   "https://h.example.com/webhooks/x",
+   "https://h.example.com/hooks/y/webhooks/sidefleet"
+  ],
+  "openclaw": [
+   "https://h.example.com:8644/hooks/agent",
+   "https://h.example.com/webhooks/x/hooks/agent",
+   "https://h.example.com/hooks/y"
+  ],
+  "claude": [
+   "https://h.example.com:8644",
+   "https://h.example.com/webhooks/x",
+   "https://h.example.com/hooks/y"
+  ],
+  "other": [
+   "https://h.example.com:8644",
+   "https://h.example.com/webhooks/x",
+   "https://h.example.com/hooks/y"
+  ]
+ },
+ "address": {
+  "hermes": [
+   "https://h.example.com",
+   "https://h.example.com/hooks/agent",
+   "https://h.example.com"
+  ],
+  "openclaw": [
+   "https://h.example.com/webhooks/sidefleet",
+   "https://h.example.com",
+   "https://h.example.com"
+  ],
+  "claude": [
+   "https://h.example.com/webhooks/sidefleet",
+   "https://h.example.com/hooks/agent",
+   "https://h.example.com"
+  ],
+  "other": [
+   "https://h.example.com/webhooks/sidefleet",
+   "https://h.example.com/hooks/agent",
+   "https://h.example.com"
+  ]
+ },
+ "kind": {
+  "hermes": "hermes",
+  "openclaw": "openclaw",
+  "claude": "webhook",
+  "other": "webhook"
+ },
+ "appOf": {
+  "Hermes": "hermes",
+  "openclaw": "openclaw",
+  "Claude Code": "claude",
+  "Other app": "other",
+  "Something else": "other"
+ }
+}

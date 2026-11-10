@@ -8,6 +8,12 @@ enum Route: Hashable {
     case newTask
     case overview
     case machines
+    case rooms
+    case room(String)
+    case team
+    case chatApps
+    /// An invite link, opened in the app.
+    case join(String)
     case thread(String)
 }
 
@@ -34,6 +40,13 @@ final class Stores {
     /// Asks the repo picker or Add machine to open, from wherever.
     var repoPickerOpen = false
     var addMachineOpen = false
+    /// The same for the sheets the org switcher and the Settings menu open.
+    var machinesOpen = false
+    var renameOrgOpen = false
+    var newOrgOpen = false
+    var feedbackOpen = false
+    /// Signing out ends the session this belongs to, so the session does it.
+    @ObservationIgnored var onSignOut: (@MainActor () -> Void)?
     /// A thread whose screen should open its fork sheet (asked from the sidebar).
     var forkThread: String?
     /// The app is in front, so what's on screen counts as seen.
@@ -48,6 +61,9 @@ final class Stores {
         fleet = FleetStore(api: api, toasts: toasts)
         inbox = InboxStore(api: api)
         newTask = NewTaskModel(fleet: fleet, prefs: prefs)
+        rooms = RoomsStore(fleet: fleet)
+        team = TeamStore(fleet: fleet)
+        chatApps = ChatAppsStore(fleet: fleet)
         self.controlURL = controlURL
         self.isDemo = isDemo
     }
@@ -127,19 +143,21 @@ final class Stores {
         if inboxConnected { inbox.connect() }
     }
 
-    func switchOrg(_ id: String) {
-        route = .newTask
+    func switchOrg(_ id: String, to next: Route = .newTask) {
+        route = next
+        rooms.reset()
+        team.reset()
+        chatApps.reset()
         fleet.switchOrg(id)
         inbox.connect()
     }
 
     func open(_ thread: String) { route = .thread(thread) }
 
-    /// For Rooms, Team and Chat apps, which live on the page for now.
-    func openOnWeb(_ path: String) {
-        guard let controlURL, let url = URL(string: "/#\(path)", relativeTo: controlURL) else { return }
-        NSWorkspace.shared.open(url)
-    }
+    /// The list of rooms outlives the screen, so coming back to it shows what was there.
+    let rooms: RoomsStore
+    let team: TeamStore
+    let chatApps: ChatAppsStore
 }
 
 /// Signed in or out, and to where.
@@ -163,11 +181,15 @@ final class AppSession {
 
     private func activate(_ s: Stores) {
         stores = s
+        s.onSignOut = { [weak self] in Task { await self?.signOut() } }
         s.start()
     }
 
     /// Signed out because the control plane said so (a revoked key, an ended session).
     var needsSignIn: Bool { stores?.fleet.needsSignIn ?? true }
+
+    /// The saved credential the control plane just turned away, so the sign-in screen can say why it's showing.
+    var rejectedCredential: Credential? { stores?.fleet.needsSignIn == true ? Keychain.load() : nil }
 
     /// Checks the credential before keeping it. Throws what the control plane said.
     func signIn(url: URL, credential: Credential) async throws {
@@ -183,6 +205,8 @@ final class AppSession {
         guard let s = stores else { return }
         if s.fleet.me?.user != nil { try? await s.api.signOut() }
         s.stop()
+        // Whoever signs in next starts in their own first org, not this one.
+        s.fleet.forgetOrg()
         stores = nil
         Keychain.clear()
     }

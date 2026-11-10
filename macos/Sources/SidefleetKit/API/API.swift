@@ -9,15 +9,15 @@ public struct API: Sendable {
 
     public init(backend: Backend) { self.backend = backend }
 
-    private func get<T: Decodable>(_ path: String) async throws -> T {
+    func get<T: Decodable>(_ path: String) async throws -> T {
         try Self.decode(try await backend.send("GET", path, body: nil))
     }
 
-    private func post<T: Decodable>(_ path: String, _ body: JSONValue? = nil) async throws -> T {
+    func post<T: Decodable>(_ path: String, _ body: JSONValue? = nil) async throws -> T {
         try Self.decode(try await backend.send("POST", path, body: body))
     }
 
-    private func call(_ method: String, _ path: String, _ body: JSONValue? = nil) async throws {
+    func call(_ method: String, _ path: String, _ body: JSONValue? = nil) async throws {
         _ = try await backend.send(method, path, body: body)
     }
 
@@ -84,12 +84,11 @@ public struct API: Sendable {
     public func removeWorker(_ id: String) async throws { try await call("DELETE", "/v1/workers/\(Self.pathPart(id))") }
     public func lookupEnrollment(code: String) async throws -> Enrollment { try await post("/v1/enrollments/lookup", ["code": .string(code)]) }
 
-    public func decideEnrollment(_ id: String, code: String?, approve: Bool) async throws {
-        if approve {
-            try await call("POST", "/v1/enrollments/\(id)/approve", code.map { ["code": .string($0)] } ?? .object([:]))
-        } else {
-            try await call("POST", "/v1/enrollments/\(id)/deny", .object([:]))
-        }
+    /// Let a machine in, or turn it away. A request found by its code belongs to no org yet, so the
+    /// code goes with either answer; `inOrg` approves it into another of your orgs.
+    public func decideEnrollment(_ id: String, code: String?, approve: Bool, inOrg org: String? = nil) async throws {
+        let body: JSONValue = code.map { ["code": .string($0)] } ?? .object([:])
+        _ = try await backend.send("POST", "/v1/enrollments/\(id)/\(approve ? "approve" : "deny")", body: body, inOrg: org)
     }
 
     public func workerTokens(org: String) async throws -> [WorkerToken] { try await get("/v1/orgs/\(org)/tokens") }
@@ -109,7 +108,7 @@ public struct API: Sendable {
     public func signOut() async throws { try await call("POST", "/auth/logout") }
 
     /// Worker ids are machine names, which can hold anything.
-    private static func pathPart(_ s: String) -> String {
+    static func pathPart(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? s
     }
 

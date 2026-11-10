@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MachinesScreen: View {
     @Environment(Stores.self) private var stores
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hover: String?
 
     private var fleet: FleetStore { stores.fleet }
@@ -24,6 +25,13 @@ struct MachinesScreen: View {
     }
 
     var body: some View {
+        // The map scrolls to a machine's card when its node is clicked.
+        ScrollViewReader { proxy in
+            page(proxy)
+        }
+    }
+
+    private func page(_ proxy: ScrollViewProxy) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 header
@@ -40,9 +48,13 @@ struct MachinesScreen: View {
                     .padding(24)
                     .card()
                 } else {
-                    FleetMap(hover: $hover)
+                    FleetMap(hover: $hover) { id in
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) { proxy.scrollTo(id, anchor: .center) }
+                    }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
-                        ForEach(sorted) { MachineCard(worker: $0, hot: hover == $0.id, onHover: { hover = $0 }) }
+                        ForEach(sorted) { w in
+                            MachineCard(worker: w, hot: hover == w.id, onHover: { hover = $0 }).id(w.id)
+                        }
                     }
                 }
                 WorkerTokensSection()
@@ -120,6 +132,7 @@ private struct MachineCard: View {
                     .background(SF.fill, in: RoundedRectangle(cornerRadius: 9))
             }
             chips
+            CleanupRow(worker: worker)
             Spacer(minLength: 0)
             Divider()
             footer
@@ -291,7 +304,7 @@ private struct MachineCard: View {
     /// Agents this machine takes no tasks for until their usage limit resets.
     private var limits: [(String, String)] {
         worker.limitedUntil.filter { $0.value > fleet.now }.sorted { $0.key < $1.key }.map { key, until in
-            (Format.agentName(AgentID(rawValue: key)), Format.startTime(until, now: fleet.now))
+            (Format.limitedAgentName(key), Format.limitClock(until, now: fleet.now))
         }
     }
 
@@ -404,6 +417,8 @@ private struct Sparkline: View {
 /// Deliberately quiet: motion only means something happened.
 private struct FleetMap: View {
     @Binding var hover: String?
+    /// A machine's node was clicked: bring its card into view.
+    var onOpen: (String) -> Void
     @Environment(Stores.self) private var stores
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pulses: [Pulse] = []
@@ -416,6 +431,17 @@ private struct FleetMap: View {
         var isTask: Bool
         var isBeat: Bool
         var born: Date
+        /// Something that happened on the centre machine itself: nothing travels, it just flashes.
+        var instant = false
+
+        var travel: TimeInterval { instant ? 0 : isBeat ? 1.5 : 1.3 }
+
+        /// How bright the ring around where it landed is: full on arrival, gone within a second.
+        func flash(at now: Date) -> Double {
+            let since = now.timeIntervalSince(born) - travel
+            guard since >= 0 else { return 0 }
+            return max(0, (isBeat ? 0.6 : 1) - since * 1.5)
+        }
     }
 
     private struct Node: Identifiable {
@@ -469,6 +495,17 @@ private struct FleetMap: View {
                 }
             }
             .overlay { labels(geo.size) }
+            .contentShape(Rectangle())
+            // Pointing at a machine lights up its card; clicking scrolls to it.
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let at): hover = machine(at: at, geo.size)
+                case .ended: hover = nil
+                }
+            }
+            .onTapGesture {
+                if let hover { onOpen(hover) }
+            }
         }
         .frame(height: 300)
         .overlay(alignment: .topTrailing) {
@@ -503,14 +540,15 @@ private struct FleetMap: View {
     private func take(_ events: [FleetEvent]) {
         let now = Date()
         let hub = nodes.first?.id ?? Self.hub
-        pulses.removeAll { now.timeIntervalSince($0.born) > 2 }
+        // Long enough for the slowest dot to land and its ring to fade.
+        pulses.removeAll { now.timeIntervalSince($0.born) > 2.5 }
         for e in events {
             switch e {
             case .beat(let w):
                 beats += 1
-                if w != hub { pulses.append(Pulse(from: w, to: hub, isTask: false, isBeat: true, born: now)) }
+                pulses.append(Pulse(from: w, to: hub, isTask: false, isBeat: true, born: now, instant: w == hub))
             case .dispatch(let w):
-                if w != hub { pulses.append(Pulse(from: hub, to: w, isTask: true, isBeat: false, born: now)) }
+                pulses.append(Pulse(from: hub, to: w, isTask: true, isBeat: false, born: now, instant: w == hub))
             case .done(let w):
                 if w != hub { pulses.append(Pulse(from: w, to: hub, isTask: false, isBeat: false, born: now)) }
             }
@@ -534,9 +572,9 @@ private struct FleetMap: View {
             ctx.stroke(p, with: .color((hot ? SF.run : SF.border).opacity(on ? 1 : 0.5)), style: StrokeStyle(lineWidth: hot ? 1.5 : 1, dash: [3, 5]))
         }
         // Dots travelling along links.
-        for pulse in pulses {
+        for pulse in pulses where !pulse.instant {
             guard let a = list.first(where: { $0.id == pulse.from }), let b = list.first(where: { $0.id == pulse.to }) else { continue }
-            let t = reduceMotion ? 1 : min(1, now.timeIntervalSince(pulse.born) / (pulse.isBeat ? 1.5 : 1.3))
+            let t = reduceMotion ? 1 : min(1, now.timeIntervalSince(pulse.born) / pulse.travel)
             guard t < 1 else { continue }
             let e = 1 - (1 - t) * (1 - t)
             let pa = position(a, size), pb = position(b, size)
@@ -549,6 +587,12 @@ private struct FleetMap: View {
             let p = position(n, size), r = radius(n)
             let on = n.ring == 0 && n.worker == nil ? true : (n.worker?.online ?? false)
             let circle = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2))
+            // A ring that widens and fades where a heartbeat or a task just landed.
+            let f = reduceMotion ? 0 : pulses.filter { $0.to == n.id }.map { $0.flash(at: now) }.max() ?? 0
+            if f > 0 {
+                let fr = r + 4 + CGFloat(1 - f) * 8
+                ctx.stroke(Path(ellipseIn: CGRect(x: p.x - fr, y: p.y - fr, width: fr * 2, height: fr * 2)), with: .color((running(n.id) > 0 ? SF.run : SF.ok).opacity(f * 0.3)), lineWidth: 1.5)
+            }
             ctx.opacity = on ? 1 : 0.55
             ctx.fill(circle, with: .color(SF.card))
             ctx.stroke(circle, with: .color(hover == n.id ? SF.run : SF.border), lineWidth: hover == n.id ? 2 : 1)
@@ -558,9 +602,7 @@ private struct FleetMap: View {
                 ctx.stroke(arc, with: .color(cpu > 75 ? SF.queue : SF.ink), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
             }
             ctx.opacity = 1
-            if n.id == hub.id, n.worker == nil {
-                ctx.draw(ctx.resolve(Image(systemName: "dot.radiowaves.left.and.right")), at: p)
-            }
+            if n.id == hub.id { drawMark(&ctx, at: p) }
             // Running tasks circle their machine.
             let busy = running(n.id)
             for i in 0..<busy {
@@ -587,10 +629,41 @@ private struct FleetMap: View {
 
     private func detail(_ n: Node) -> String {
         guard let w = n.worker else { return "control plane" }
-        if !w.online { return "offline, seen \(Format.rel(w.lastHeartbeatAt, now: fleet.now))" }
+        // The machine in the centre is the one the control plane runs on.
+        let prefix = n.ring == 0 ? "control plane, " : ""
+        if !w.online { return prefix + "offline, seen \(Format.rel(w.lastHeartbeatAt, now: fleet.now))" }
         let busy = running(w.id)
         let cpu = w.capabilities.system.map { "CPU \(Int($0.cpuPercent.rounded()))%" }
-        return [busy > 0 ? "\(busy) running" : "idle", cpu].compactMap { $0 }.joined(separator: ", ")
+        return prefix + [busy > 0 ? "\(busy) running" : "idle", cpu].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    /// The machine under the pointer, if any. The bare control plane has no card to point at.
+    private func machine(at point: CGPoint, _ size: CGSize) -> String? {
+        nodes.first { n in
+            let p = position(n, size)
+            return n.worker != nil && hypot(p.x - point.x, p.y - point.y) < radius(n) + 10
+        }?.id
+    }
+
+    /// The Sidefleet mark (site/brand/mark.py): fibres from the page to two machines.
+    private func drawMark(_ ctx: inout GraphicsContext, at p: CGPoint) {
+        let s: CGFloat = 0.55
+        func at(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: p.x + (x - 16) * s, y: p.y + (y - 16) * s) }
+        let fibres: [(CGFloat, [UInt32])] = [(7.5, [0x3fb8c9, 0x5c98ff, 0x8b5cf6]), (24.5, [0xff6fae, 0xf7797d, 0xe9b13c])]
+        for (ty, hues) in fibres {
+            for (i, hue) in hues.enumerated() {
+                let off = CGFloat(i - 1) * 2.4
+                var strand = Path()
+                strand.move(to: at(6, 16))
+                strand.addCurve(to: at(26, ty), control1: at(17, 16 + off), control2: at(15, ty + off))
+                ctx.stroke(strand, with: .color(Color(rgb: hue)), style: StrokeStyle(lineWidth: 1.6 * s, lineCap: .round))
+            }
+        }
+        let dots: [(CGFloat, CGFloat)] = [(6, 16), (26, 7.5), (26, 24.5)]
+        for (x, y) in dots {
+            let c = at(x, y), r = 3.2 * s
+            ctx.fill(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)), with: .color(SF.ink))
+        }
     }
 }
 
@@ -638,6 +711,14 @@ struct AddMachineSteps: View {
                     .fixedSize(horizontal: false, vertical: true)
                 CommandBlock(shown: prompt(masking: true), copy: prompt(masking: false), label: "Copy prompt")
             }
+            // The commands above carry this app's address for the control plane, which only works from here.
+            if Format.isLoopback(stores.controlURL) {
+                Text("This app reaches the control plane at `\(origin)`, which other machines can't reach. Use this machine's Tailscale or LAN address in the connect command instead.")
+                    .font(SF.font(12))
+                    .lineSpacing(3)
+                    .foregroundStyle(SF.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -649,7 +730,8 @@ struct AddMachineSteps: View {
     }
 }
 
-private struct CommandBlock: View {
+/// A terminal command, copied in full. `shown` may mask a secret that `copy` contains.
+struct CommandBlock: View {
     var shown: String
     var copy: String
     var label = "Copy"
@@ -691,136 +773,7 @@ struct AddMachineSheet: View {
     }
 }
 
-/// Machines waiting for someone in this org to approve them.
-private struct PendingMachines: View {
-    @Environment(Stores.self) private var stores
-    @State private var code = ""
-    @State private var busy = false
-
-    private var fleet: FleetStore { stores.fleet }
-
-    var body: some View {
-        if fleet.setup?.hosted == true || !fleet.pending.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(fleet.pending) { e in
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(e.machineName).font(SF.font(13, .medium))
-                            Text([e.os, e.hostname, e.repoCount > 0 ? "\(e.repoCount) repos" : nil, "code \(e.code)"].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
-                                .font(SF.font(12))
-                                .foregroundStyle(SF.muted)
-                        }
-                        Spacer()
-                        Button("Deny") { decide(e, approve: false) }.buttonStyle(SecondaryButtonStyle(height: 28)).disabled(busy)
-                        Button("Approve") { decide(e, approve: true) }.buttonStyle(PrimaryButtonStyle(height: 28)).disabled(busy)
-                    }
-                }
-                if fleet.setup?.hosted == true {
-                    HStack(spacing: 8) {
-                        TextField("Code a machine printed", text: $code)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 220)
-                        Button("Find it") { lookup() }.buttonStyle(SecondaryButtonStyle(height: 26)).disabled(code.trimmingCharacters(in: .whitespaces).isEmpty || busy)
-                    }
-                }
-            }
-            .padding(16)
-            .card()
-        }
-    }
-
-    private func decide(_ e: Enrollment, approve: Bool) {
-        busy = true
-        Task {
-            do {
-                try await fleet.api.decideEnrollment(e.id, code: e.code, approve: approve)
-                await fleet.refresh()
-            } catch {
-                stores.toasts.error(approve ? "Could not approve" : "Could not deny", error)
-            }
-            busy = false
-        }
-    }
-
-    private func lookup() {
-        busy = true
-        Task {
-            do {
-                let found = try await fleet.api.lookupEnrollment(code: code.trimmingCharacters(in: .whitespaces))
-                try await fleet.api.decideEnrollment(found.id, code: found.code, approve: true)
-                code = ""
-                await fleet.refresh()
-            } catch {
-                stores.toasts.error("Could not approve that machine", error)
-            }
-            busy = false
-        }
-    }
-}
-
-/// Per-org worker tokens, for owners on a hosted control plane.
-private struct WorkerTokensSection: View {
-    @Environment(Stores.self) private var stores
-    @State private var tokens: [WorkerToken] = []
-    @State private var name = ""
-    @State private var fresh: WorkerToken?
-
-    private var org: Org? { stores.fleet.org }
-
-    var body: some View {
-        if stores.fleet.setup?.hosted == true, stores.fleet.isOwner, let org {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Worker tokens").font(SF.font(15, .medium))
-                Text("Let machines connect to \(org.name) without approval. Each value is shown once.").font(SF.font(12)).foregroundStyle(SF.muted)
-                ForEach(tokens.filter { $0.revokedAt == nil }) { t in
-                    HStack {
-                        Text(t.name).font(SF.font(13))
-                        Text("\(t.prefix)…").font(SF.mono(11.5)).foregroundStyle(SF.muted)
-                        Spacer()
-                        Button("Revoke") {
-                            Task {
-                                do {
-                                    try await stores.api.revokeWorkerToken(org: org.id, id: t.id)
-                                    await load()
-                                } catch {
-                                    stores.toasts.error("Could not revoke", error)
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .font(SF.font(12))
-                        .foregroundStyle(SF.muted)
-                    }
-                }
-                if let value = fresh?.token { CommandBlock(shown: value, copy: value) }
-                HStack(spacing: 8) {
-                    TextField("Name, like the machine it's for", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-                    Button("Create") {
-                        Task {
-                            do {
-                                fresh = try await stores.api.createWorkerToken(org: org.id, name: name.trimmingCharacters(in: .whitespaces))
-                                name = ""
-                                await load()
-                            } catch {
-                                stores.toasts.error("Could not create the token", error)
-                            }
-                        }
-                    }
-                    .buttonStyle(SecondaryButtonStyle(height: 26))
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-            .padding(16)
-            .card()
-            .task(id: org.id) { await load() }
-        }
-    }
-
-    private func load() async {
-        guard let org else { return }
-        if let list = try? await stores.api.workerTokens(org: org.id) { tokens = list }
-    }
-}
+// Pending machines and worker tokens are in PendingMachines.swift and WorkerTokens.swift.
 
 // MARK: Choosing repos
 
@@ -833,53 +786,141 @@ struct RepoPickerSheet: View {
     /// Frozen when it opens, chosen first, so rows don't jump while ticking.
     @State private var order: [String] = []
     @State private var saving = false
+    /// The row the arrow keys are on.
+    @State private var act = 0
     @FocusState private var searching: Bool
 
+    private var terms: [String] { RepoSearch.terms(query) }
+
+    /// What each machine calls the project's folder, which you may know it by.
+    private var folders: [String: [String]] {
+        var out: [String: [String]] = [:]
+        for w in stores.fleet.workers {
+            for r in w.capabilities.repos { out[r.key, default: []].append(r.name) }
+        }
+        return out
+    }
+
     private var shown: [String] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return q.isEmpty ? order : order.filter { Format.repoLabel($0).lowercased().contains(q) }
+        let terms = terms, folders = folders
+        return order.filter { RepoSearch.matches(label: Format.repoLabel($0), folders: folders[$0] ?? [], terms: terms) }
+    }
+
+    private func wasAdded(_ repo: String) -> Bool { stores.fleet.added?.contains(repo) ?? false }
+
+    private func toggle(_ repo: String) {
+        if selected.contains(repo) { selected.remove(repo) } else { selected.insert(repo) }
+    }
+
+    private func move(_ by: Int, in shown: [String]) {
+        guard !shown.isEmpty else { return }
+        act = (min(act, shown.count - 1) + by + shown.count) % shown.count
+    }
+
+    /// The name with what you searched for marked in it.
+    private func marked(_ label: String, _ terms: [String]) -> AttributedString {
+        var out = AttributedString()
+        for part in RepoSearch.parts(label, terms: terms) {
+            var piece = AttributedString(part.text)
+            if part.marked { piece.backgroundColor = SF.queueSoft }
+            out += piece
+        }
+        return out
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let shown = shown, terms = terms
+        // Headings only while nothing is typed and something was chosen before.
+        let sections = terms.isEmpty && order.contains(where: wasAdded)
+        return VStack(alignment: .leading, spacing: 12) {
             Text("Choose your repos").font(SF.font(15, .semibold))
-            Text("These fill the composer's repo menu. Machines keep all their checkouts either way.").font(SF.font(13)).foregroundStyle(SF.muted)
-            TextField("Search repos", text: $query)
+            Text("Only these appear in the repo menu when you start a task. Machines still report every checkout.").font(SF.font(13)).foregroundStyle(SF.muted)
+            TextField("Search \(stores.fleet.allRepos.count) repos", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .focused($searching)
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(shown, id: \.self) { repo in
-                        Toggle(isOn: Binding(get: { selected.contains(repo) }, set: { on in
-                            if on { selected.insert(repo) } else { selected.remove(repo) }
-                        })) {
-                            HStack {
-                                Text(Format.repoLabel(repo)).font(SF.mono(12.5)).lineLimit(1)
-                                Spacer()
-                                Text((stores.fleet.allRepos[repo] ?? []).map(\.displayName).joined(separator: ", "))
-                                    .font(SF.font(11.5))
-                                    .foregroundStyle(SF.muted)
-                                    .lineLimit(1)
+                .accessibilityLabel("Search repos")
+                .onChange(of: query) { _, _ in act = 0 }
+                .onKeyPress(.downArrow) {
+                    move(1, in: shown)
+                    return .handled
+                }
+                .onKeyPress(.upArrow) {
+                    move(-1, in: shown)
+                    return .handled
+                }
+                // Return ticks the row the arrows are on; ⌘Return saves.
+                .onSubmit {
+                    if act < shown.count { toggle(shown[act]) }
+                    searching = true
+                }
+            HStack(spacing: 12) {
+                Text("\(selected.count) selected" + (terms.isEmpty ? "" : " · \(shown.count) match\(shown.count == 1 ? "" : "es")")).monospacedDigit()
+                Spacer()
+                if !terms.isEmpty, !shown.isEmpty {
+                    Button("Select matching") { selected.formUnion(shown) }.buttonStyle(.plain).underline()
+                }
+                if !selected.isEmpty {
+                    Button("Clear") { selected = [] }.buttonStyle(.plain).underline()
+                }
+            }
+            .font(SF.font(12))
+            .foregroundStyle(SF.muted)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(Array(shown.enumerated()), id: \.element) { i, repo in
+                            if sections, i == 0 {
+                                Text("Chosen").font(SF.font(12, .medium)).foregroundStyle(SF.muted).padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
                             }
+                            if sections, !wasAdded(repo), i == 0 || wasAdded(shown[i - 1]) {
+                                Text("Everything else").font(SF.font(12, .medium)).foregroundStyle(SF.muted).padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 4)
+                            }
+                            // Where a task in it can run now.
+                            let online = (stores.fleet.allRepos[repo] ?? []).filter(\.online).map(\.displayName)
+                            Button { toggle(repo) } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: selected.contains(repo) ? "checkmark.square.fill" : "square")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(selected.contains(repo) ? SF.ink : SF.muted)
+                                    Text(marked(Format.repoLabel(repo), terms)).font(SF.mono(12.5)).lineLimit(1).truncationMode(.middle)
+                                    Spacer(minLength: 8)
+                                    Text(online.isEmpty ? "offline" : online.joined(separator: ", "))
+                                        .font(SF.font(12))
+                                        .foregroundStyle(SF.faint)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .hoverBackground(active: i == act)
+                            }
+                            .buttonStyle(.plain)
+                            .id(repo)
+                            .accessibilityAddTraits(selected.contains(repo) ? .isSelected : [])
                         }
-                        .toggleStyle(.checkbox)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .hoverBackground()
+                        if shown.isEmpty {
+                            Text(order.isEmpty ? "No machine has reported any git checkouts yet." : "No repo matches “\(query)”.")
+                                .font(SF.font(13)).foregroundStyle(SF.muted).frame(maxWidth: .infinity).padding(24)
+                        }
                     }
-                    if shown.isEmpty {
-                        Text(order.isEmpty ? "No machine has reported a repo yet." : "Nothing matches.").font(SF.font(12)).foregroundStyle(SF.muted).padding(.vertical, 20)
-                    }
+                    .padding(6)
+                }
+                .onChange(of: act) { _, i in
+                    if i < shown.count { proxy.scrollTo(shown[i]) }
                 }
             }
             .frame(height: 320)
             .card(cornerRadius: 10)
-            HStack {
-                Text("\(selected.count) chosen").font(SF.font(12)).monospacedDigit().foregroundStyle(SF.muted)
+            HStack(spacing: 6) {
+                Kbd(text: "↑"); Kbd(text: "↓"); Text("move")
+                Kbd(text: "↵"); Text("select")
+                Kbd(text: "⌘↵"); Text("save")
                 Spacer()
                 Button("Cancel") { dismiss() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-                Button(saving ? "Saving…" : "Save") { save() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction).disabled(saving)
+                Button(saving ? "Saving…" : "Save" + (selected.isEmpty ? "" : " \(selected.count)")) { save() }
+                    .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.return, modifiers: .command).disabled(saving)
             }
+            .font(SF.font(12))
+            .foregroundStyle(SF.muted)
         }
         .padding(20)
         .frame(width: 520)
@@ -887,11 +928,8 @@ struct RepoPickerSheet: View {
             let repos = stores.fleet.allRepos
             let added = stores.fleet.added ?? []
             selected = added.filter { repos[$0] != nil }
-            order = repos.keys.sorted { a, b in
-                let (x, y) = (selected.contains(a), selected.contains(b))
-                if x != y { return x }
-                return Format.repoLabel(a).localizedCaseInsensitiveCompare(Format.repoLabel(b)) == .orderedAscending
-            }
+            order = RepoSearch.order(Array(repos.keys), chosen: selected)
+            act = 0
             searching = true
         }
     }

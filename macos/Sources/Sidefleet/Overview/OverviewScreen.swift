@@ -6,6 +6,8 @@ struct OverviewScreen: View {
     @Environment(Stores.self) private var stores
     @State private var filter = Filter.all
     @State private var sortOrder = [KeyPathComparator(\Row.updated, order: .reverse)]
+    /// A click anywhere on a row opens its task; the selection only carries the click.
+    @State private var picked: String?
 
     private enum Filter: String, CaseIterable, Identifiable {
         case all = "All", running = "Running", queued = "Queued", problems = "Failed or stopped", done = "Done"
@@ -109,7 +111,7 @@ struct OverviewScreen: View {
     }
 
     private var list: some View {
-        Table(rows, sortOrder: $sortOrder) {
+        Table(rows, selection: $picked, sortOrder: $sortOrder) {
             TableColumn("Task", value: \.title) { row in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.title).font(SF.font(13, .medium)).lineLimit(1)
@@ -123,8 +125,6 @@ struct OverviewScreen: View {
                     .lineLimit(1)
                 }
                 .padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 1) { stores.open(row.id) }
             }
             .width(min: 240, ideal: 420)
             TableColumn("Machine", value: \.machine) { row in
@@ -159,6 +159,11 @@ struct OverviewScreen: View {
                 Text(Format.rel(row.updated, now: fleet.now)).font(SF.font(12)).monospacedDigit().foregroundStyle(SF.muted)
             }
             .width(min: 60, ideal: 70)
+        }
+        .onChange(of: picked) { _, id in
+            guard let id else { return }
+            picked = nil
+            stores.open(id)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: false))
         .scrollContentBackground(.hidden)

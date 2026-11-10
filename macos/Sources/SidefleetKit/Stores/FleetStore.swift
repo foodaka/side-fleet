@@ -82,6 +82,7 @@ public final class FleetStore {
     @ObservationIgnored private var beats: [String: Date] = [:]
     @ObservationIgnored private var runStates: [String: RunStatus] = [:]
     @ObservationIgnored private var primed = false
+    @ObservationIgnored private var migratedAdded = false
 
     private static let orgKey = "sidefleet_org"
     private static let clearedKey = "sf.updatesCleared"
@@ -200,7 +201,10 @@ public final class FleetStore {
             self.runs = r
             self.pending = enrollments ?? []
             self.myMachines = mine ?? []
-            if let added { self.added = Set(added) }
+            if let added {
+                self.added = Set(added)
+                await migrateAdded(added, workers: w)
+            }
             now = Date()
             ingest(w, r)
             if setup == nil { setup = try? await api.setup() }
@@ -315,6 +319,21 @@ public final class FleetStore {
         added = Set(try await api.saveAddedRepos(names))
     }
 
+    /// Repos chosen before identities existed are stored by folder name; convert them once per org.
+    private func migrateAdded(_ added: [String], workers: [Worker]) async {
+        guard !migratedAdded, !added.isEmpty else { return }
+        switch RepoMigration.migrate(added: added, workers: workers) {
+        case .notYet:
+            return
+        case .unchanged:
+            migratedAdded = true
+        case .changed(let next):
+            migratedAdded = true
+            // If it doesn't save, the old names stand, as they did before.
+            try? await saveAdded(next)
+        }
+    }
+
     // MARK: Machines
 
     public func requestUpdate(_ w: Worker) async {
@@ -358,7 +377,13 @@ public final class FleetStore {
         runStates = [:]
         cpu = [:]
         primed = false
+        migratedAdded = false
         Task { await refresh(retry: false) }
+    }
+
+    /// Signing out: the next person to sign in here starts in their own first org.
+    public func forgetOrg() {
+        defaults.removeObject(forKey: Self.orgKey)
     }
 
     public func reloadMembers() async { await loadMembers(force: true) }

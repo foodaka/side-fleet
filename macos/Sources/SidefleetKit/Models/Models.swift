@@ -243,7 +243,11 @@ public struct AgentCapability: Sendable, Hashable, Decodable {
     public var version: String
     public var signedIn: Bool?
     public var signInError: String?
+    /// Codex and opencode: the models the machine offers.
     public var models: [String]
+    /// Claude Code: what each alias runs here, `fable` to `claude-fable-5-2`. Empty from older
+    /// workers, and when Claude Code wouldn't say.
+    public var aliases: [String: String]
     public var modelsTotal: Int?
 
     public init(from decoder: Decoder) throws {
@@ -251,7 +255,9 @@ public struct AgentCapability: Sendable, Hashable, Decodable {
         version = f.str("version")
         signedIn = f.opt("signed_in")
         signInError = f.opt("sign_in_error")
+        // One key, two shapes: a list for Codex and opencode, a map for Claude Code.
         models = f.opt("models") ?? []
+        aliases = f.opt("models") ?? [:]
         modelsTotal = f.opt("models_total", Double.self).map { Int($0) }
     }
 }
@@ -314,6 +320,8 @@ public struct Capabilities: Sendable, Hashable, Decodable {
     public var version: String
     public var system: SystemStats?
     public var slots: Slots?
+    /// This worker's build answers Clean up.
+    public var canCleanWorktrees: Bool
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
@@ -324,6 +332,7 @@ public struct Capabilities: Sendable, Hashable, Decodable {
         version = f.str("version")
         system = f.opt("system")
         slots = f.opt("slots")
+        canCleanWorktrees = f.bool("can_clean_worktrees")
     }
 }
 
@@ -351,11 +360,17 @@ public struct Worker: Sendable, Hashable, Decodable, Identifiable {
     /// Absent on older control planes, which means yours.
     public var mine: Bool
     public var guest: Bool
+    /// What it's been asked to do with its worktrees and hasn't reported back on: `preview` or `remove`.
+    public var worktreeCleanupPending: String?
+    /// What the last cleanup did.
+    public var worktreeCleanup: WorktreeCleanupTotals?
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
         id = try f.req("id")
         displayName = f.opt("display_name") ?? id
+        worktreeCleanupPending = f.opt("worktree_cleanup_pending")
+        worktreeCleanup = f.opt("worktree_cleanup")
         capabilities = try f.req("capabilities")
         lastHeartbeatAt = f.date("last_heartbeat_at")
         online = f.bool("online")
@@ -376,16 +391,22 @@ public struct Worker: Sendable, Hashable, Decodable, Identifiable {
 public struct MyMachine: Sendable, Hashable, Decodable, Identifiable {
     public var id: String
     public var displayName: String
+    /// The org it connected to; it serves you in all of yours.
+    public var orgID: String
     public var orgName: String
     public var online: Bool
     public var lastHeartbeatAt: Date?
     public var repos: [String]
     public var agents: [AgentID]
 
+    /// Machine ids are only unique within an org.
+    public var key: String { orgID + id }
+
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
         id = try f.req("id")
         displayName = f.opt("display_name") ?? id
+        orgID = f.opt("org", JSONValue.self)?["id"]?.string ?? ""
         orgName = f.opt("org", JSONValue.self)?["name"]?.string ?? ""
         online = f.bool("online")
         lastHeartbeatAt = f.date("last_heartbeat_at")
@@ -528,13 +549,31 @@ public struct Enrollment: Sendable, Hashable, Decodable, Identifiable {
     public var repoCount: Int
     public var status: String
     public var expiresAt: Date?
+    public var createdAt: Date?
+    public var workerID: String
+    /// The Sidefleet build asking to join.
+    public var version: String
+    /// Claude Code on that machine, and whether it's signed in.
+    public var claude: AgentCapability?
+
+    private struct Agents: Decodable {
+        var agents: AgentCapabilities?
+
+        init(from decoder: Decoder) throws {
+            agents = (try Fields(decoder)).opt("agents")
+        }
+    }
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
         id = try f.req("id")
         code = f.str("code")
         machineName = f.str("machine_name")
+        createdAt = f.date("created_at")
+        workerID = f.str("worker_id")
+        claude = f.opt("capabilities", Agents.self)?.agents?.claude
         let caps: JSONValue? = f.opt("capabilities")
+        version = caps?["version"]?.string ?? ""
         hostname = caps?["hostname"]?.string ?? ""
         os = caps?["os"]?.string ?? ""
         repoCount = caps?["repo_count"]?.int ?? 0

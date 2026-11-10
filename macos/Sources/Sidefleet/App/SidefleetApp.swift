@@ -41,10 +41,16 @@ struct SidefleetApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    /// `sidefleet://runs/<id>`, as notifications and anything else link to a task.
+    /// `sidefleet://runs/<id>`, as notifications and anything else link to a task; `sidefleet://rooms/<id>`
+    /// for a room and `sidefleet://join/<code>` for an invite.
     private func open(_ url: URL) {
-        guard url.scheme == "sidefleet", url.host == "runs", let id = url.pathComponents.last, id != "/" else { return }
-        session.stores?.open(id)
+        guard url.scheme == "sidefleet", let id = url.pathComponents.last, id != "/", let stores = session.stores else { return }
+        switch url.host {
+        case "runs": stores.open(id)
+        case "rooms": stores.route = .room(id)
+        case "join": stores.route = .join(id)
+        default: break
+        }
     }
 }
 
@@ -139,6 +145,16 @@ private struct MainView: View {
                     OverviewScreen()
                 case .machines:
                     MachinesScreen()
+                case .rooms:
+                    RoomsScreen()
+                case .room(let id):
+                    RoomScreen(roomID: id).id(id)
+                case .team:
+                    TeamScreen()
+                case .chatApps:
+                    ChatAppsScreen()
+                case .join(let code):
+                    JoinScreen(code: code).id(code)
                 case .thread(let id):
                     ThreadScreen(runID: id).id(id)
                 }
@@ -147,8 +163,16 @@ private struct MainView: View {
             .overlay(alignment: .bottomTrailing) { ToastOverlay(center: stores.toasts) }
             .navigationTitle(title)
         }
+        // ⌘B, as on the page; the system's own ⌃⌘S works too.
+        .focusedSceneValue(\.toggleSidebar) {
+            withAnimation { columns = columns == .detailOnly ? .all : .detailOnly }
+        }
         .sheet(isPresented: $stores.repoPickerOpen) { RepoPickerSheet() }
         .sheet(isPresented: $stores.addMachineOpen) { AddMachineSheet() }
+        .sheet(isPresented: $stores.machinesOpen) { MyMachinesSheet() }
+        .sheet(isPresented: $stores.renameOrgOpen) { RenameOrgSheet() }
+        .sheet(isPresented: $stores.newOrgOpen) { NewOrgSheet() }
+        .sheet(isPresented: $stores.feedbackOpen) { FeedbackSheet() }
     }
 
     private var title: String {
@@ -156,6 +180,10 @@ private struct MainView: View {
         case .newTask: "New task"
         case .overview: "Overview"
         case .machines: "Machines"
+        case .rooms, .room: "Rooms"
+        case .team: "Team"
+        case .chatApps: "Chat apps"
+        case .join: "Join a team"
         case .thread(let id): stores.fleet.runs.first { $0.id == id }?.run.task ?? "Task"
         }
     }
@@ -331,6 +359,7 @@ struct ThreadActions {
 
 private struct ThreadActionsKey: FocusedValueKey { typealias Value = ThreadActions }
 private struct FocusSearchKey: FocusedValueKey { typealias Value = () -> Void }
+private struct ToggleSidebarKey: FocusedValueKey { typealias Value = () -> Void }
 private struct FocusComposerKey: FocusedValueKey { typealias Value = () -> Void }
 
 extension FocusedValues {
@@ -344,6 +373,11 @@ extension FocusedValues {
         set { self[FocusSearchKey.self] = newValue }
     }
 
+    var toggleSidebar: (() -> Void)? {
+        get { self[ToggleSidebarKey.self] }
+        set { self[ToggleSidebarKey.self] = newValue }
+    }
+
     var focusComposer: (() -> Void)? {
         get { self[FocusComposerKey.self] }
         set { self[FocusComposerKey.self] = newValue }
@@ -355,6 +389,7 @@ struct SidefleetCommands: Commands {
     var session: AppSession
     @FocusedValue(\.threadActions) private var thread
     @FocusedValue(\.focusSearch) private var focusSearch
+    @FocusedValue(\.toggleSidebar) private var toggleSidebar
     @FocusedValue(\.focusComposer) private var focusComposer
     @Environment(\.openWindow) private var openWindow
 
@@ -375,8 +410,14 @@ struct SidefleetCommands: Commands {
             Button("New Task") { stores?.route = .newTask }.keyboardShortcut("1")
             Button("Overview") { stores?.route = .overview }.keyboardShortcut("2")
             Button("Machines") { stores?.route = .machines }.keyboardShortcut("3")
+            Button("Rooms") { stores?.route = .rooms }.keyboardShortcut("4")
+            Button("Chat Apps") { stores?.route = .chatApps }.keyboardShortcut("5")
+            if stores?.fleet.me?.user != nil {
+                Button("Team") { stores?.route = .team }.keyboardShortcut("6")
+            }
             Divider()
             Button("Search Tasks") { focusSearch?() }.keyboardShortcut("f").disabled(focusSearch == nil)
+            Button("Toggle Sidebar") { toggleSidebar?() }.keyboardShortcut("b").disabled(toggleSidebar == nil)
         }
         CommandMenu("Task") {
             Button("Previous Task") { move(-1) }.keyboardShortcut(.upArrow, modifiers: [.option, .command])

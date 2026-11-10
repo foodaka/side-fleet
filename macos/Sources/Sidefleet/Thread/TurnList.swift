@@ -194,6 +194,9 @@ private struct TurnRows: View {
             if first, !run.images.isEmpty {
                 ImageStrip(images: run.images).padding(.bottom, 12)
             }
+            if run.roomID != nil, run.kind == .agent, run.forkedFrom == nil, let brief = run.context, !brief.isEmpty {
+                RoomBrief(text: brief).padding(.bottom, 8)
+            }
             opening
             setupLine
             ForEach(turn.groups) { group in
@@ -235,9 +238,11 @@ private struct TurnRows: View {
             .font(SF.font(13))
             .foregroundStyle(SF.muted)
             .padding(.bottom, 8)
-        } else if run.kind == .restore || run.kind == .pr || run.kind == .integrate {
+        } else if run.kind == .integrate {
+            IntegrateLine(run: run).padding(.bottom, 8)
+        } else if run.kind == .restore || run.kind == .pr {
             HStack(spacing: 6) {
-                Image(systemName: run.kind == .pr ? "arrow.triangle.pull" : run.kind == .integrate ? "arrow.triangle.merge" : "arrow.counterclockwise").font(.system(size: 10))
+                Image(systemName: run.kind == .pr ? "arrow.triangle.pull" : "arrow.counterclockwise").font(.system(size: 10))
                 Text(run.task)
             }
             .font(SF.font(12))
@@ -456,7 +461,102 @@ private struct SetupLine: View {
         if let checkpoint = turn.checkpoint {
             t = t + Text(" pushed ") + Text(String(checkpoint.prefix(7))).font(SF.mono(12))
         }
-        return t + Text(" with \(Format.agentModel(run.agent, turn.sessionModel ?? run.model))")
+        // An agent that names no model in its first event says "", not nothing.
+        let model = turn.sessionModel.flatMap { $0.isEmpty ? nil : $0 } ?? run.model
+        return t + Text(" with \(Format.agentModel(run.agent, model))")
+    }
+}
+
+/// What a room task was told about the room, folded away under the message it went with.
+private struct RoomBrief: View {
+    var text: String
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { open.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).rotationEffect(.degrees(open ? 90 : 0))
+                    Text("Room brief sent with this message").font(SF.font(11.5))
+                }
+            }
+            .buttonStyle(ToolTextButtonStyle())
+            .accessibilityValue(open ? "Expanded" : "Collapsed")
+            if open {
+                ScrollView {
+                    Text(text)
+                        .font(SF.mono(11))
+                        .lineSpacing(3)
+                        .foregroundStyle(SF.muted)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(10)
+                }
+                .frame(maxHeight: 288)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(SF.fill.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(SF.border))
+                .frame(maxWidth: SF.column * 0.85, alignment: .trailing)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+}
+
+/// Merging the thread's branch into its room's branch: what it did, or what stood in the way.
+/// The outcome is in the run's result, not its events.
+private struct IntegrateLine: View {
+    var run: Run
+
+    private var integrated: JSONValue? { run.result?["integrated"].flatMap { $0.object == nil ? nil : $0 } }
+    private var conflicts: [String] { (run.result?["conflicts"]?.array ?? []).compactMap(\.string) }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.merge").font(.system(size: 10))
+                line
+            }
+            if !conflicts.isEmpty {
+                FlowRow(spacing: 4, lineSpacing: 4) {
+                    ForEach(conflicts, id: \.self) { file in
+                        Text(file)
+                            .font(SF.mono(11))
+                            .foregroundStyle(SF.errInk)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(SF.errSoft, in: RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+                (Text("Ask the agent to merge ") + Text("origin/\(run.context ?? "the room branch")").font(SF.mono(12))
+                    + Text(" into this branch and resolve them, then add it to the room again."))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(SF.font(12))
+        .foregroundStyle(SF.muted)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var line: Text {
+        if let integrated {
+            var t = Text("Added to the room on ") + Text(integrated["branch"]?.string ?? run.context ?? "").font(SF.mono(12)).foregroundColor(SF.ink.opacity(0.8))
+            if let commit = integrated["commit"]?.string, !commit.isEmpty {
+                t = t + Text(" at ") + Text(String(commit.prefix(7))).font(SF.mono(12))
+            }
+            if let files = integrated["files"]?.array, !files.isEmpty {
+                t = t + Text(", \(files.count) file\(files.count == 1 ? "" : "s")")
+            }
+            return t
+        }
+        if run.status == .failed {
+            return Text("Couldn't add this to the room\(conflicts.isEmpty ? "" : ": it conflicts with work already there")").foregroundColor(SF.errInk)
+        }
+        return Text(run.task.isEmpty ? "Adding to the room" : run.task)
     }
 }
 

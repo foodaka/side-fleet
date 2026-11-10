@@ -194,8 +194,44 @@ struct RemoteImage: View {
     @Environment(Stores.self) private var stores
     @State private var image: NSImage?
     @State private var previewing: URL?
+    /// Why it couldn't be shown. Nothing is kept, so the next time it's on screen it tries again.
+    @State private var failure: String?
 
     var body: some View {
+        if let failure {
+            Label(failure, systemImage: "photo.badge.exclamationmark")
+                .font(SF.font(12))
+                .foregroundStyle(SF.muted)
+        } else {
+            picture
+        }
+    }
+
+    private func load() async {
+        if let cached = ImageCache.shared.image(ref.id) {
+            image = cached
+            failure = nil
+            return
+        }
+        do {
+            let data = try await stores.api.image(ref.id)
+            guard let loaded = NSImage(data: data) else {
+                failure = "Could not load the image"
+                return
+            }
+            ImageCache.shared.store(ref.id, loaded)
+            image = loaded
+            failure = nil
+        } catch is CancellationError {
+            // Scrolled away before it arrived.
+        } catch {
+            if Task.isCancelled { return }
+            let status = (error as? APIError)?.httpStatus
+            failure = status == 404 ? "Image not found" : "Could not load the image\(status.map { " (\($0))" } ?? "")"
+        }
+    }
+
+    private var picture: some View {
         Group {
             if let image {
                 Image(nsImage: image)
@@ -214,14 +250,7 @@ struct RemoteImage: View {
         .help("Click to look closer")
         .accessibilityLabel("Image")
         .quickLookPreview($previewing)
-        .task(id: ref.id) {
-            if let cached = ImageCache.shared.image(ref.id) {
-                image = cached
-            } else if let data = try? await stores.api.image(ref.id), let loaded = NSImage(data: data) {
-                ImageCache.shared.store(ref.id, loaded)
-                image = loaded
-            }
-        }
+        .task(id: ref.id) { await load() }
     }
 
     private func preview(_ image: NSImage) {

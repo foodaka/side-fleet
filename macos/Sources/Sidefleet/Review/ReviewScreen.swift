@@ -6,14 +6,19 @@ import SwiftUI
 struct ReviewScreen: View {
     var thread: ThreadStore
     var request: ReviewRequest
+    /// What's marked Viewed or folded. The thread's screen holds it, so it outlives this one.
+    @Binding var state: ReviewState
     var onClose: () -> Void
     @Environment(Stores.self) private var stores
+    @Environment(\.openSettings) private var openSettings
     @State private var scope = "all"
     @State private var active: String?
-    @State private var viewed: Set<String> = []
-    @State private var closed: Set<String> = []
     @State private var jump: String?
-    @State private var preparedCollapse: Set<String> = []
+    @State private var filter = ""
+    /// Set while a jump scrolls into place, so the scrolling on the way doesn't move the highlight.
+    @State private var jumping = false
+    /// The file tree can be tucked away; the choice sticks.
+    @AppStorage("sf.diffTree") private var showTree = true
     @FocusState private var keyFocus: Bool
 
     private struct Scope: Identifiable {
@@ -37,17 +42,23 @@ struct ReviewScreen: View {
     }
 
     private var current: Scope? { scopes.first { $0.id == scope } ?? scopes.first }
-    private var files: [DiffFile] { current?.set.files ?? [] }
-    private func key(_ path: String) -> String { "\(current?.id ?? ""):\(path)" }
-    private func isOpen(_ path: String) -> Bool { !closed.contains(key(path)) && !viewed.contains(key(path)) }
+    private var scopeID: String { current?.id ?? "" }
+    /// The tree, with single-child folders folded into one row.
+    private var rows: [FileTreeRow] { FileTree.rows(current?.set.files ?? []) }
+    /// Files in tree order, so the list and the tree read the same way down.
+    private var files: [DiffFile] { FileTree.files(rows) }
+    private func isOpen(_ path: String) -> Bool { state.isOpen(scopeID, path) }
+    private func isViewed(_ path: String) -> Bool { state.isViewed(scopeID, path) }
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Divider()
             HSplitView {
-                fileList
-                    .frame(minWidth: 200, idealWidth: 260, maxWidth: 380)
+                if showTree {
+                    FileTreeList(rows: rows, active: active, isViewed: isViewed, filter: $filter, onPick: go)
+                        .frame(minWidth: 200, idealWidth: 280, maxWidth: 420)
+                }
                 diffs
                     .frame(minWidth: 420)
             }
@@ -59,6 +70,7 @@ struct ReviewScreen: View {
         .onExitCommand(perform: onClose)
         .onKeyPress(characters: .init(charactersIn: "jkvw")) { press in
             guard press.modifiers.isEmpty else { return .ignored }
+            let files = files
             let i = files.firstIndex { $0.path == active } ?? 0
             switch press.characters {
             case "j":
@@ -66,7 +78,7 @@ struct ReviewScreen: View {
             case "k":
                 if !files.isEmpty { go(files[max(0, i - 1)].path) }
             case "v":
-                if let active { setViewed(active, !viewed.contains(key(active))) }
+                if let active { state.setViewed(scopeID, active, !isViewed(active)) }
             case "w":
                 stores.prefs.set(\.diffHideWhitespace, !stores.prefs.diffHideWhitespace)
             default:
@@ -84,29 +96,34 @@ struct ReviewScreen: View {
         .onChange(of: scope) { _, _ in
             active = files.first?.path
             prepareCollapse()
+            // Another set of changes starts from its top.
+            jump = files.first?.path
         }
     }
 
     /// With "open collapsed" on, each set of changes opens folded the first time (bar the file asked for).
     private func prepareCollapse() {
-        guard stores.prefs.diffCollapsed, let current, files.count >= 2, !preparedCollapse.contains(current.id) else { return }
-        preparedCollapse.insert(current.id)
-        for f in files where f.path != request.focus { closed.insert(key(f.path)) }
+        guard stores.prefs.diffCollapsed, current != nil else { return }
+        state.foldOnce(scopeID, files.map(\.path), except: request.focus)
     }
 
     private func go(_ path: String) {
+        state.reveal(scopeID, path)
         active = path
-        if !isOpen(path), !viewed.contains(key(path)) { closed.remove(key(path)) }
+        jumping = true
         jump = path
     }
 
-    private func setViewed(_ path: String, _ on: Bool) {
-        if on {
-            viewed.insert(key(path))
-        } else {
-            viewed.remove(key(path))
-            closed.remove(key(path))
+    /// The file in view: the last one whose card has reached the top of the scroll area.
+    private func follow(_ tops: [String: CGFloat]) {
+        guard !jumping else { return }
+        var at: String?
+        for f in files {
+            guard let y = tops[f.path] else { continue }
+            if y <= 48 { at = f.path } else { break }
         }
+        // Cards far above are let go of, so nothing may have reported: keep what's highlighted then.
+        if let at, at != active { active = at }
     }
 
     // MARK: Toolbar
@@ -119,10 +136,18 @@ struct ReviewScreen: View {
             .buttonStyle(QuietButtonStyle(cornerRadius: 6))
             .help("Back to the thread  Esc")
             .accessibilityLabel("Back to the thread")
+            Button { showTree.toggle() } label: {
+                Image(systemName: "sidebar.left").font(.system(size: 12)).frame(width: 28, height: 28)
+            }
+            .buttonStyle(QuietButtonStyle(cornerRadius: 6))
+            .help(showTree ? "Hide file tree" : "Show file tree")
+            .accessibilityLabel(showTree ? "Hide file tree" : "Show file tree")
             Text("Changes").font(SF.font(15, .semibold))
             if scopes.count > 1, let current {
                 PickerPill(
-                    options: scopes.map { PickerOption(id: $0.id, title: $0.label, hint: $0.hint.map { String($0.prefix(80)) }) },
+                    options: scopes.map { s in
+                        PickerOption(id: s.id, title: "\(s.label) · \(s.set.fileCount) file\(s.set.fileCount == 1 ? "" : "s")", hint: s.hint.map { String($0.prefix(80)) })
+                    },
                     selected: current.id, height: 28, width: 300, accessibility: "Which changes", onPick: { scope = $0 }
                 ) {
                     Text(current.label).font(SF.font(13))
@@ -133,6 +158,14 @@ struct ReviewScreen: View {
                 DiffStatView(add: set.additions, del: set.deletions)
             }
             Spacer()
+            let allClosed = state.allClosed(scopeID, files.map(\.path))
+            Button { state.toggleAll(scopeID, files.map(\.path)) } label: {
+                Image(systemName: allClosed ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                    .font(.system(size: 12)).frame(width: 28, height: 28)
+            }
+            .buttonStyle(QuietButtonStyle(cornerRadius: 6))
+            .help(allClosed ? "Expand all" : "Collapse all")
+            .accessibilityLabel(allClosed ? "Expand all files" : "Collapse all files")
             Picker("Layout", selection: Binding(get: { stores.prefs.diffView }, set: { stores.prefs.set(\.diffView, $0) })) {
                 Label("Unified", systemImage: "rectangle.grid.1x2").tag(DiffLayout.unified)
                 Label("Split", systemImage: "rectangle.split.2x1").tag(DiffLayout.split)
@@ -143,70 +176,31 @@ struct ReviewScreen: View {
             Menu {
                 Toggle("Hide whitespace changes", isOn: Binding(get: { stores.prefs.diffHideWhitespace }, set: { stores.prefs.set(\.diffHideWhitespace, $0) }))
                 Toggle("Open with files collapsed", isOn: Binding(get: { stores.prefs.diffCollapsed }, set: { stores.prefs.set(\.diffCollapsed, $0) }))
+                Divider()
+                Button("All settings…") { openSettings() }
             } label: {
                 Image(systemName: "slider.horizontal.3")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .accessibilityLabel("Diff options")
+            // A dot while whitespace changes are hidden: the diff isn't showing everything.
+            .overlay(alignment: .topTrailing) {
+                if stores.prefs.diffHideWhitespace {
+                    Circle().fill(SF.ink).frame(width: 6, height: 6).offset(x: 2, y: -2).allowsHitTesting(false)
+                }
+            }
+            .help("View options")
+            .accessibilityLabel("View options")
         }
         .padding(.horizontal, 14)
         .frame(height: 52)
     }
 
-    // MARK: File list
-
-    private var fileList: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(files) { file in
-                        let parts = Format.splitPath(file.path)
-                        let seen = viewed.contains(key(file.path))
-                        Button { go(file.path) } label: {
-                            HStack(spacing: 8) {
-                                FileStatusIcon(status: file.status)
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text(parts.name).font(SF.mono(12)).lineLimit(1).truncationMode(.middle)
-                                    if !parts.dir.isEmpty {
-                                        Text(parts.dir).font(SF.mono(10.5)).foregroundStyle(SF.faint).lineLimit(1).truncationMode(.head)
-                                    }
-                                }
-                                Spacer(minLength: 4)
-                                if seen {
-                                    Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(SF.okInk).accessibilityLabel("Viewed")
-                                } else {
-                                    DiffStatView(add: file.additions, del: file.deletions, blocks: false, size: 10.5).opacity(0.8)
-                                }
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .hoverBackground(active: active == file.path)
-                        }
-                        .buttonStyle(.plain)
-                        .help(file.path)
-                    }
-                }
-                .padding(6)
-            }
-            Divider()
-            HStack(spacing: 10) {
-                Text("\(files.filter { viewed.contains(key($0.path)) }.count) of \(files.count) viewed").monospacedDigit()
-                Spacer()
-                HStack(spacing: 3) { Kbd(text: "j"); Kbd(text: "k"); Text("files") }
-                HStack(spacing: 3) { Kbd(text: "v"); Text("viewed") }
-            }
-            .font(SF.font(11))
-            .foregroundStyle(SF.faint)
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-        }
-    }
-
     // MARK: Diffs
 
     private var diffs: some View {
-        ScrollViewReader { proxy in
+        let files = files
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if let set = current?.set, let upstream = set.caughtUpUpstream, let commits = set.caughtUpCommits {
@@ -218,32 +212,45 @@ struct ReviewScreen: View {
                         FileDiffCard(
                             file: file,
                             open: isOpen(file.path),
-                            viewed: viewed.contains(key(file.path)),
+                            viewed: isViewed(file.path),
+                            active: active == file.path && files.count > 1,
                             layout: stores.prefs.diffView,
                             hideWhitespace: stores.prefs.diffHideWhitespace,
-                            onToggle: { open in
-                                if open {
-                                    closed.remove(key(file.path))
-                                    viewed.remove(key(file.path))
-                                } else {
-                                    closed.insert(key(file.path))
-                                }
-                            },
-                            onViewed: { setViewed(file.path, $0) }
+                            onToggle: { state.setOpen(scopeID, file.path, $0) },
+                            onViewed: { state.setViewed(scopeID, file.path, $0) },
+                            onShowWhitespace: { stores.prefs.set(\.diffHideWhitespace, false) }
                         )
                         .id(file.path)
+                        .background {
+                            GeometryReader { geo in
+                                Color.clear.preference(key: FileTopsKey.self, value: [file.path: geo.frame(in: .named("review")).minY])
+                            }
+                        }
                         .onAppear { if active == nil { active = file.path } }
                     }
                     if let set = current?.set, set.fileCount > set.files.count {
-                        Text("\((set.fileCount - set.files.count).formatted()) more files not listed.").font(SF.font(12)).foregroundStyle(SF.muted)
+                        Text("\((set.fileCount - set.files.count).formatted()) more changed files are not listed. See the branch for the full change.")
+                            .font(SF.font(12))
+                            .foregroundStyle(SF.muted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
                     }
+                    // Room below the last file, so it too can scroll up to the top and become the one in view.
+                    Color.clear.frame(height: 320).accessibilityHidden(true)
                 }
                 .padding(14)
             }
+            .coordinateSpace(name: "review")
+            .onPreferenceChange(FileTopsKey.self) { follow($0) }
             .onChange(of: jump) { _, path in
                 guard let path else { return }
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(path, anchor: .top) }
                 jump = nil
+                Task {
+                    // Let the scroll land before the list follows the scrolling again.
+                    try? await Task.sleep(for: .milliseconds(350))
+                    jumping = false
+                }
             }
         }
     }
@@ -253,10 +260,15 @@ private struct FileDiffCard: View {
     var file: DiffFile
     var open: Bool
     var viewed: Bool
+    /// The file in view, when there's more than one to tell apart.
+    var active: Bool
     var layout: DiffLayout
     var hideWhitespace: Bool
     var onToggle: (Bool) -> Void
     var onViewed: (Bool) -> Void
+    var onShowWhitespace: () -> Void
+    /// You asked to see a large diff anyway.
+    @State private var forced = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -268,6 +280,21 @@ private struct FileDiffCard: View {
         }
         .card(cornerRadius: 12)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            if active { RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(SF.ink.opacity(0.18)) }
+        }
+    }
+
+    private func notice(_ text: String, action: String? = nil, perform: @escaping () -> Void = {}) -> some View {
+        VStack(spacing: 8) {
+            Text(text).font(SF.font(13)).foregroundStyle(SF.muted).multilineTextAlignment(.center)
+            if let action {
+                Button(action, action: perform).buttonStyle(SecondaryButtonStyle(height: 26))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 24)
     }
 
     private var header: some View {
@@ -304,36 +331,42 @@ private struct FileDiffCard: View {
     }
 
     @ViewBuilder private func body(for file: DiffFile) -> some View {
-        if let reason = file.omittedReason {
-            Text(reason).font(SF.font(12)).foregroundStyle(SF.muted).frame(maxWidth: .infinity, alignment: .leading).padding(12)
-        } else if let patch = file.patch {
-            let hunks = DiffParser.parse(patch, hideWhitespace: hideWhitespace)
-            if DiffParser.changes(hunks) {
-                FileHunks(hunks: hunks, language: Highlighter.language(for: file.path), layout: layout)
+        if let patch = file.patch, !patch.isEmpty {
+            if file.isLarge, !forced {
+                notice("Large diffs are not shown by default. This one changes \((file.additions + file.deletions).formatted()) lines.", action: "Load diff") { forced = true }
             } else {
-                Text("Only whitespace changed.").font(SF.font(12)).foregroundStyle(SF.muted).frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                let parsed = DiffRenderCache.shared.entry(for: file, patch: patch, hideWhitespace: hideWhitespace)
+                if DiffParser.changes(parsed.hunks) {
+                    // A new or deleted file has one side only: split would leave half the width empty.
+                    FileHunks(hunks: parsed.hunks, tokens: parsed.tokens, layout: file.oneSided ? .unified : layout)
+                } else {
+                    notice("Only whitespace changed in this file.", action: "Show whitespace", perform: onShowWhitespace)
+                }
             }
         } else {
-            Text("No changes to show.").font(SF.font(12)).foregroundStyle(SF.muted).frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            notice(file.noPatchReason)
         }
     }
 }
 
 private struct FileHunks: View {
     var hunks: [DiffHunk]
-    var language: Language?
+    /// Each line's syntax tokens, by hunk and then by line.
+    var tokens: [[[Token]]]
     var layout: DiffLayout
 
     var body: some View {
         // Rows are lazy, so a long diff only draws what's on screen.
         LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(hunks) { hunk in
-                HunkHeader(hunk: hunk)
+            ForEach(Array(hunks.enumerated()), id: \.element.id) { i, hunk in
+                // A hunk at the very top with no heading has nothing to say.
+                if hunk.hasHeader { HunkHeader(hunk: hunk) }
+                let byLine = Dictionary(zip(hunk.lines.map(\.id), i < tokens.count ? tokens[i] : []), uniquingKeysWith: { first, _ in first })
                 switch layout {
                 case .unified:
-                    ForEach(hunk.lines) { UnifiedLine(line: $0, language: language) }
+                    ForEach(hunk.lines) { UnifiedLine(line: $0, tokens: byLine[$0.id]) }
                 case .split:
-                    ForEach(DiffParser.splitRows(hunk.lines)) { SplitLine(row: $0, language: language) }
+                    ForEach(DiffParser.splitRows(hunk.lines)) { SplitLine(row: $0, tokens: byLine) }
                 }
             }
         }
@@ -345,9 +378,9 @@ private struct HunkHeader: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9)).opacity(0.5)
             if hunk.gap > 0 {
-                Image(systemName: "chevron.up.chevron.down").font(.system(size: 9))
-                Text("\(hunk.gap) unchanged line\(hunk.gap == 1 ? "" : "s")").font(SF.font(11.5))
+                Text("\(hunk.gap.formatted()) unchanged line\(hunk.gap == 1 ? "" : "s")").font(SF.font(11.5))
             }
             if !hunk.section.isEmpty {
                 Text(hunk.section).font(SF.mono(11.5)).lineLimit(1)
@@ -362,9 +395,9 @@ private struct HunkHeader: View {
 }
 
 /// A line's text with its syntax colours and word-level marks.
-private func styledLine(_ line: DiffLine, language: Language?) -> AttributedString {
-    var inComment = false
-    let tokens = language.map { Highlighter.tokenize(line.text, $0, &inComment) } ?? [Token(text: line.text, kind: .plain)]
+private func styledLine(_ line: DiffLine, tokens: [Token]?) -> AttributedString {
+    // The tokens were worked out down the whole hunk, so a comment opened lines above still colours this one.
+    let tokens = tokens ?? [Token(text: line.text, kind: .plain)]
     var out = AttributedString()
     var at = 0
     let word = line.kind == .add ? SF.diffAddWord : SF.diffDelWord
@@ -388,7 +421,7 @@ private func styledLine(_ line: DiffLine, language: Language?) -> AttributedStri
 
 private struct UnifiedLine: View {
     var line: DiffLine
-    var language: Language?
+    var tokens: [Token]?
 
     private var lineColor: Color {
         switch line.kind {
@@ -411,7 +444,7 @@ private struct UnifiedLine: View {
             LineNumber(value: line.old, kind: line.kind).background(numberColor)
             LineNumber(value: line.new, kind: line.kind).background(numberColor)
             Sign(kind: line.kind)
-            Text(styledLine(line, language: language))
+            Text(styledLine(line, tokens: tokens))
                 .font(SF.mono(12))
                 .lineSpacing(3)
                 .textSelection(.enabled)
@@ -426,7 +459,8 @@ private struct UnifiedLine: View {
 
 private struct SplitLine: View {
     var row: SplitRow
-    var language: Language?
+    /// The hunk's tokens by line.
+    var tokens: [String: [Token]]
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -443,7 +477,7 @@ private struct SplitLine: View {
                     LineNumber(value: isLeft ? line.old : line.new, kind: line.kind)
                         .background(line.kind == .add ? SF.diffAddNum : line.kind == .del ? SF.diffDelNum : .clear)
                     Sign(kind: line.kind)
-                    Text(styledLine(line, language: language))
+                    Text(styledLine(line, tokens: tokens[line.id]))
                         .font(SF.mono(12))
                         .lineSpacing(3)
                         .textSelection(.enabled)

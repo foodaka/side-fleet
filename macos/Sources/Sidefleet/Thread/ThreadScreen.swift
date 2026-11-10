@@ -68,6 +68,12 @@ private struct ThreadContent: View {
     @State private var opening = false
     @State private var composerFocus = 1
     @State private var forkSource: String?
+    /// The room this thread belongs to, by name.
+    @State private var roomName: String?
+    /// What's marked Viewed or folded in the review: kept while the thread is open, so closing
+    /// the review and coming back loses nothing.
+    @State private var reviewState = ReviewState()
+    @Environment(\.openSettings) private var openSettings
 
     private var fleet: FleetStore { stores.fleet }
     private var root: Run? { thread.root }
@@ -91,7 +97,7 @@ private struct ThreadContent: View {
     var body: some View {
         Group {
             if let reviewing {
-                ReviewScreen(thread: thread, request: reviewing, onClose: { self.reviewing = nil })
+                ReviewScreen(thread: thread, request: reviewing, state: $reviewState, onClose: { self.reviewing = nil })
                     .transition(.opacity)
             } else {
                 conversation
@@ -108,6 +114,10 @@ private struct ThreadContent: View {
             // The title of the thread this one was forked from.
             forkSource = nil
             if let from = root?.forkedFrom, let t = try? await stores.api.thread(from) { forkSource = t.first?.task }
+        }
+        .task(id: root?.roomID) {
+            roomName = nil
+            if let id = root?.roomID, let detail = try? await stores.api.room(id) { roomName = detail.room.name }
         }
         .sheet(isPresented: $askingStop) { stopSheet }
     }
@@ -192,6 +202,19 @@ private struct ThreadContent: View {
                     Text(theirs ? "@\(login ?? "teammate")" : "You").foregroundStyle(SF.ink.opacity(0.8))
                 }
                 .help(theirs ? "Started by @\(login ?? "a teammate"); it runs on their machine" : "Your task")
+            }
+            if let room = root.roomID {
+                Button { stores.route = .room(room) } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "shippingbox").font(.system(size: 10))
+                        Text(roomName ?? "Room").foregroundStyle(SF.ink.opacity(0.8)).lineLimit(1).frame(maxWidth: 190, alignment: .leading)
+                    }
+                    .padding(.horizontal, 6)
+                    .frame(height: 22)
+                    .background(SF.fill, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Open the room")
             }
             if let machine = thread.machine {
                 HStack(spacing: 6) {
@@ -412,7 +435,8 @@ private struct ThreadContent: View {
                     askingStop = false
                     if dontAskAgain {
                         stores.prefs.set(\.confirmStop, false)
-                        stores.toasts.show("Stop won’t ask again", detail: "Turn it back on in Settings.")
+                        let settings = openSettings
+                        stores.toasts.show("Stop won’t ask again", detail: "Turn it back on in Settings.", actionTitle: "Settings") { settings() }
                     }
                     stop()
                 } label: {

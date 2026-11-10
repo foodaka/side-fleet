@@ -1,7 +1,8 @@
 # Sidefleet for Mac: spec
 
-Status: built through phase 4 as code, **not yet compiled on a Mac**. See "Where this stands" below.
-Evaluated against `main` at `5e168bb` on 2026-11-07.
+Status: built through phase 5 and compiled on GitHub's Mac runners; not yet used by hand against a
+real control plane. See "Where this stands" below.
+Evaluated against `main` at `5e168bb` on 2026-11-07, and brought level with the page at `fd75ee9` on 2026-11-10.
 
 A native macOS app, written in Swift and SwiftUI, that does what the web page does and adds what
 only a desktop app can: real notifications, a menu bar presence, a Dock badge, windows, keyboard
@@ -13,12 +14,11 @@ you reach Sidefleet from a phone, and `sidefleet serve` still embeds it.
 | Part | State |
 |---|---|
 | `SidefleetKit`: API, streams, reducer, diffs, markdown, stores, demo | Builds under Swift 6 strict concurrency on Linux. 69 tests pass, 10 of them against a real `sidefleet serve`, and the diff and format code is held to the web code's real output. |
-| `Sidefleet`: every screen in section 7, menu bar, notifications, keyboard, sign-in | Written. Type-checked only against a stand-in for SwiftUI and AppKit, so it has **never been compiled for real, run or seen**. |
+| `Sidefleet`: every screen in section 7, plus Rooms, Team, Chat apps and invites, menu bar, notifications, keyboard, sign-in | Compiles on macOS 15 runners and runs in demo mode there. **Not yet run by hand** against a real control plane. |
 | App icon | Rendered and checked by eye. |
-| Packaging, CI, demo-mode screenshots | Written, never run. |
+| Packaging, CI, demo-mode screenshots | Run on every push: the workflow uploads the app and a screenshot of each screen in light and dark. |
 
-Questions 1, 3 and 4 below are still open; the code assumes the recommendation for each. Nothing has
-been pushed, so the `macos` workflow hasn't run.
+Question 1 was answered yes. Questions 3 and 4 are still open; the code assumes the recommendation for each.
 
 Changes from the plan below: the stores moved into `SidefleetKit`, so far more of the app's logic is
 tested. The app target stays in Swift 5 language mode for now, since strict concurrency errors can't
@@ -113,7 +113,7 @@ Say if you disagree with any of these.
 | Syntax highlighting | A small tokenizer in Swift for the top languages (TS/JS, Rust, Python, Go, Swift, shell, JSON, YAML, CSS/HTML, SQL), GitHub's light and dark colours, plain text otherwise | Tree-sitter is heavy, and running Shiki in JavaScriptCore is a web view by another name. It will be less exact than Shiki on hard cases. |
 | Notifications | Local notifications driven by the inbox stream | Server push accepts browser push services only, and APNs needs a developer account and server work. So they fire only while the app runs, which is why the app keeps running in the menu bar. |
 | One control plane at a time | Switch by signing out | Same as the page. Multiple accounts can come later. |
-| Rooms, Team, Chat apps | Later phase; until then, sidebar items that open the page in the browser | The core loop is where a native app earns its place. The browser needs its own sign-in on a hosted control plane. |
+| Rooms, Team, Chat apps | Native, as of 2026-11-10 | Asked for: the app should do what the page does. |
 
 ### Non-goals
 
@@ -258,8 +258,8 @@ search, then the list, then nav.
   time, Archive or Unarchive, Open in New Window.
 - Mine and Team switch when the org has several members. The choice sticks.
 - Search covers title, repo and machine, plus archived once loaded.
-- Nav: Overview, Machines with `● 2/3` and an update icon, Settings; Rooms, Team and Chat apps open
-  the browser for now.
+- Nav: Overview, Machines with `● 2/3` and an update icon, Rooms, Team (GitHub sign-in only), Chat
+  apps, Settings.
 
 **New task** (`routes/+page.svelte`). "What should run?" centred, 672 pt column, about 14% from the top.
 - Growing text box up to 55% of the window height. Placeholder and character count (over 2,000) as on the page.
@@ -503,7 +503,7 @@ Each phase ends with something you can run.
 | 2. Act | New task, replies, attachments, stop, approvals, inbox, notifications, Dock badge, fork, restore, PR, snooze, archive | You can run your day from it |
 | 3. Review and fleet | Diff review, Machines and map, Overview, Settings, repo picker, add machine, org switch | The page is no longer needed on a Mac, apart from Rooms, Team and Chat apps |
 | 4. Finish | Menu bar, windows, keyboard, icon, motion, accessibility, performance, a look at every screen | Section 10's list is met; a bundle you can install |
-| 5. Optional | Rooms, Team, Chat apps | If you want them native |
+| 5. Parity | Rooms, Team, Chat apps, invites, worktree cleanup, and the smaller gaps a file-by-file comparison with the page found | Done 2026-11-10 |
 
 ## 13. Risks
 

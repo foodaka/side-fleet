@@ -37,6 +37,15 @@ public protocol Backend: Sendable {
     func send(_ method: String, _ path: String, body: JSONValue?) async throws -> Data
     func stream(_ path: String, lastEventID: Int?) -> AsyncThrowingStream<SSEFrame, Error>
     func setOrg(_ id: String)
+    /// One call in another of the user's orgs, without switching to it (approving a machine into it).
+    func send(_ method: String, _ path: String, body: JSONValue?, inOrg org: String?) async throws -> Data
+}
+
+extension Backend {
+    /// A backend with one org (the demo, a developer key) has nowhere else to send it.
+    public func send(_ method: String, _ path: String, body: JSONValue?, inOrg org: String?) async throws -> Data {
+        try await send(method, path, body: body)
+    }
 }
 
 /// The real thing: HTTP to a control plane. Each stream gets its own session, so a window full of
@@ -69,7 +78,7 @@ public final class HTTPBackend: Backend, @unchecked Sendable {
         lock.unlock()
     }
 
-    private func request(_ method: String, _ path: String) throws -> URLRequest {
+    private func request(_ method: String, _ path: String, inOrg: String? = nil) throws -> URLRequest {
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw APIError.transport("Bad address: \(path)")
         }
@@ -82,7 +91,7 @@ public final class HTTPBackend: Backend, @unchecked Sendable {
         case .session(let cookie):
             r.setValue("sf_session=\(cookie)", forHTTPHeaderField: "Cookie")
             lock.lock()
-            let o = org
+            let o = inOrg ?? org
             lock.unlock()
             if !o.isEmpty { r.setValue(o, forHTTPHeaderField: "X-Sidefleet-Org") }
         case nil:
@@ -92,7 +101,11 @@ public final class HTTPBackend: Backend, @unchecked Sendable {
     }
 
     public func send(_ method: String, _ path: String, body: JSONValue?) async throws -> Data {
-        var r = try request(method, path)
+        try await send(method, path, body: body, inOrg: nil)
+    }
+
+    public func send(_ method: String, _ path: String, body: JSONValue?, inOrg org: String?) async throws -> Data {
+        var r = try request(method, path, inOrg: org)
         if let body {
             r.httpBody = try JSONEncoder().encode(body)
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")

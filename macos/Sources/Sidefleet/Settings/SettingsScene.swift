@@ -54,29 +54,49 @@ private struct LabelledHint: View {
 private struct NewTaskSettings: View {
     @Environment(Stores.self) private var stores
 
+    /// A menu can't carry each choice's second line, so the one chosen is spelled out under the row's own hint.
+    private func chosen(_ hint: String?) -> String { hint.map { "\n\($0)." } ?? "" }
+
+    /// Where these are kept: with your account when you signed in with GitHub, else on this Mac.
+    private var kept: String {
+        guard stores.prefs.account else { return "How Sidefleet behaves for you. Changes apply right away. They’re kept on this Mac." }
+        let login = stores.fleet.me?.user.map { " (\($0.login))" } ?? ""
+        return "How Sidefleet behaves for you. Changes apply right away. New task defaults, the send key and confirmations are kept with your account\(login), so the page and every Mac you sign in on use them. How changes look and the theme stay with this device."
+    }
+
     var body: some View {
         Form {
-            Picker(selection: pref(stores.prefs, \.permission)) {
-                ForEach(Format.permissions) { Text($0.name).tag($0.id) }
-            } label: {
-                LabelledHint(title: "Permissions", hint: Format.permissions.first { $0.id == stores.prefs.permission }?.hint ?? "")
-            }
-            Picker(selection: pref(stores.prefs, \.workspace)) {
-                ForEach(Format.workspaces) { Text($0.name).tag($0.id) }
-            } label: {
-                LabelledHint(title: "Workspace", hint: Format.workspaces.first { $0.id == stores.prefs.workspace }?.hint ?? "")
-            }
-            Picker(selection: pref(stores.prefs, \.roomPermission)) {
-                ForEach(Format.permissions) { Text($0.name).tag($0.id) }
-            } label: {
-                LabelledHint(title: "In a room", hint: "A task started in a room reads teammates' notes, so it starts narrower.")
-            }
-            Text(stores.prefs.account ? "Kept with your account, so every device starts the same. The composer can change them for one task." : "The composer can change these for one task.")
+            Section {
+                Picker(selection: pref(stores.prefs, \.permission)) {
+                    ForEach(Format.permissions) { Text($0.name).tag($0.id) }
+                } label: {
+                    LabelledHint(title: "Permissions", hint: "For tasks you start from New task, and forks of a message that has no mode of its own." + chosen(Format.permissions.first { $0.id == stores.prefs.permission }?.hint))
+                }
+                Picker(selection: pref(stores.prefs, \.roomPermission)) {
+                    ForEach(Format.permissions) { Text($0.name).tag($0.id) }
+                } label: {
+                    LabelledHint(title: "Permissions in rooms", hint: "Room tasks read your teammates’ notes, so a note could steer what they do. Full access lets that reach commands on your machine." + chosen(Format.permissions.first { $0.id == stores.prefs.roomPermission }?.hint))
+                }
+                Picker(selection: pref(stores.prefs, \.workspace)) {
+                    ForEach(Format.workspaces) { Text($0.name).tag($0.id) }
+                } label: {
+                    LabelledHint(title: "Workspace", hint: "Own branch lets tasks run side by side. In place works in the checkout, one task per repo at a time.")
+                }
+            } header: {
+                Text("What every new task starts with, wherever you start it. The composer’s options menu can change them for one task without changing these.")
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Ask me works with Claude Code only; other agents start with Read & edit files instead. A reply keeps the mode its task was using, and a fork keeps its message’s.")
+                    Text(kept)
+                }
                 .font(SF.font(12))
                 .foregroundStyle(SF.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .formStyle(.grouped)
-        .frame(height: 280)
+        .frame(height: 440)
     }
 }
 
@@ -103,12 +123,59 @@ private struct SendingSettings: View {
         }
     }
 
+    /// The keys that send each kind of message with this choice, as the cards show them.
+    private func keys(_ key: SendKey, _ box: MessageBox) -> String {
+        switch key {
+        case .enter: "↵"
+        case .modEnter: "⌘↵"
+        case .smart: box == .reply ? "↵" : "⌘↵"
+        }
+    }
+
+    private func card(_ key: SendKey) -> some View {
+        let on = stores.prefs.sendKey == key
+        return Button {
+            stores.prefs.set(\.sendKey, key)
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(on ? SF.ink : SF.muted)
+                    Text(name(key)).font(SF.font(13, .medium))
+                    Spacer(minLength: 0)
+                    if key == .smart {
+                        Text("Default").font(SF.font(10.5)).foregroundStyle(SF.muted).padding(.horizontal, 6).padding(.vertical, 1).background(SF.fill, in: Capsule())
+                    }
+                }
+                VStack(spacing: 4) {
+                    HStack { Text("New task"); Spacer(); Kbd(text: keys(key, .task)) }
+                    HStack { Text("Reply"); Spacer(); Kbd(text: keys(key, .reply)) }
+                }
+                .font(SF.font(12))
+                .foregroundStyle(SF.muted)
+                Text(hint(key)).font(SF.font(12)).lineSpacing(2).foregroundStyle(SF.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(SF.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? SF.ink.opacity(0.25) : SF.border))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
     var body: some View {
         Form {
-            Picker(selection: pref(stores.prefs, \.sendKey)) {
-                ForEach(SendKey.allCases) { Text(name($0)).tag($0) }
-            } label: {
-                LabelledHint(title: "Send with", hint: hint(stores.prefs.sendKey))
+            Section {
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(SendKey.allCases) { card($0) }
+                }
+            } header: {
+                Text("Which key sends a new task or a reply. ⌘ Return always sends.")
+            } footer: {
+                EmptyView()
             }
             Section("Try it") {
                 Picker("As", selection: Binding(get: { tryAs == .reply }, set: { tryAs = $0 ? .reply : .task })) {
@@ -116,6 +183,12 @@ private struct SendingSettings: View {
                     Text("New task").tag(false)
                 }
                 .pickerStyle(.segmented)
+                HStack(spacing: 4) {
+                    Text("sends on")
+                    Kbd(text: stores.prefs.sendKeys(tryAs))
+                }
+                .font(SF.font(12))
+                .foregroundStyle(SF.muted)
                 ZStack(alignment: .topLeading) {
                     if tryText.isEmpty { EditorPlaceholder(text: "Type, then press the key…", fontSize: 13, inset: CGSize(width: 8, height: 8)) }
                     MessageEditor(
@@ -138,7 +211,7 @@ private struct SendingSettings: View {
             }
         }
         .formStyle(.grouped)
-        .frame(height: 320)
+        .frame(height: 440)
     }
 }
 
@@ -164,61 +237,163 @@ private struct ReviewSettings: View {
     }
 }
 
+/// The choices in a task's Snooze menu. Each is some hours from now, or a time of day on a day;
+/// every change is saved at once, as on the page.
 private struct SnoozeSettings: View {
     @Environment(Stores.self) private var stores
-    @State private var drafts: [SnoozePreset] = []
+
+    private var presets: [SnoozePreset] { stores.prefs.snoozePresets }
+
+    private func save(_ list: [SnoozePreset]) {
+        stores.prefs.set(\.snoozePresets, SnoozePreset.clean(.array(list.map(\.json))))
+    }
 
     var body: some View {
         Form {
             Section {
-                ForEach(Array(drafts.enumerated()), id: \.offset) { i, preset in
-                    HStack(spacing: 8) {
-                        TextField("Label", text: Binding(get: { preset.label }, set: { drafts[i].label = $0 }))
-                            .labelsHidden()
-                        whenControl(i, preset)
-                        Button {
-                            drafts.remove(at: i)
-                        } label: {
-                            Image(systemName: "minus.circle").foregroundStyle(SF.muted)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Remove \(preset.label)")
-                    }
+                ForEach(Array(presets.enumerated()), id: \.offset) { i, preset in
+                    SnoozePresetRow(
+                        preset: preset,
+                        canRemove: presets.count > 1,
+                        onChange: { next in save(presets.enumerated().map { $0.offset == i ? next : $0.element }) },
+                        onRemove: { save(presets.enumerated().filter { $0.offset != i }.map(\.element)) }
+                    )
+                    // A row starts afresh when its preset changes, so its fields show what was saved.
+                    .id("\(i) \(preset.id)")
                 }
             } header: {
-                Text("The choices in a task's Snooze menu")
+                Text("The choices in a task’s Snooze menu. A snoozed task leaves the list and the bell until its time, or until it finishes, fails or asks you something.")
             } footer: {
                 HStack {
-                    Button("Add") { drafts.append(SnoozePreset(label: "Later", when: .hours(2))) }
-                        .disabled(drafts.count >= SnoozePreset.maxCount)
-                    Button("Reset") { drafts = SnoozePreset.defaults }
+                    Button {
+                        save(presets + [SnoozePreset(label: "Later today", when: .hours(4))])
+                    } label: {
+                        Label("Add a choice", systemImage: "plus")
+                    }
+                    .disabled(presets.count >= SnoozePreset.maxCount)
                     Spacer()
-                    Button("Save") { stores.prefs.set(\.snoozePresets, SnoozePreset.clean(.array(drafts.map(\.json)))) }
-                        .keyboardShortcut(.defaultAction)
+                    if presets != SnoozePreset.defaults {
+                        Button("Reset to the defaults") { save(SnoozePreset.defaults) }
+                    }
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(height: 400)
-        .onAppear { drafts = stores.prefs.snoozePresets }
+        .frame(height: 440)
+    }
+}
+
+private struct SnoozePresetRow: View {
+    var preset: SnoozePreset
+    var canRemove: Bool
+    var onChange: (SnoozePreset) -> Void
+    var onRemove: () -> Void
+    @State private var label = ""
+    @State private var hours = ""
+    @State private var time = ""
+    @FocusState private var labelFocused: Bool
+    @FocusState private var hoursFocused: Bool
+    @FocusState private var timeFocused: Bool
+
+    private var isHours: Bool {
+        if case .hours = preset.when { return true }
+        return false
     }
 
-    @ViewBuilder private func whenControl(_ i: Int, _ preset: SnoozePreset) -> some View {
-        switch preset.when {
-        case .hours(let h):
-            Stepper("\(h.formatted()) h", value: Binding(get: { h }, set: { drafts[i].when = .hours(max(0.5, $0)) }), in: 0.5...(24 * 30), step: 1)
-                .fixedSize()
-            Button("At a time") { drafts[i].when = .at(time: "09:00", day: "tomorrow") }.buttonStyle(.link)
-        case .at(let time, let day):
-            Picker("Day", selection: Binding(get: { day }, set: { drafts[i].when = .at(time: time, day: $0) })) {
-                ForEach(SnoozePreset.days, id: \.id) { Text($0.name).tag($0.id) }
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("Name", text: $label)
+                .labelsHidden()
+                .focused($labelFocused)
+                .onSubmit(commitLabel)
+                .onChange(of: labelFocused) { _, on in if !on { commitLabel() } }
+                .accessibilityLabel("Name")
+            Picker("Kind", selection: Binding(get: { isHours }, set: { setKind(hours: $0) })) {
+                Text("In hours").tag(true)
+                Text("At a time").tag(false)
             }
             .labelsHidden()
             .fixedSize()
-            TextField("HH:mm", text: Binding(get: { time }, set: { drafts[i].when = .at(time: $0, day: day) }))
+            switch preset.when {
+            case .hours(let h):
+                TextField("Hours", text: $hours)
+                    .labelsHidden()
+                    .frame(width: 56)
+                    .focused($hoursFocused)
+                    .onSubmit(commitHours)
+                    .onChange(of: hoursFocused) { _, on in if !on { commitHours() } }
+                    .accessibilityLabel("Hours from now")
+                Stepper("", value: Binding(get: { h }, set: { onChange(SnoozePreset(label: preset.label, when: .hours(min(8760, max(0.25, $0))))) }), in: 0.25...8760, step: 0.25)
+                    .labelsHidden()
+            case .at(_, let day):
+                TextField("HH:mm", text: $time)
+                    .labelsHidden()
+                    .frame(width: 56)
+                    .focused($timeFocused)
+                    .onSubmit(commitTime)
+                    .onChange(of: timeFocused) { _, on in if !on { commitTime() } }
+                    .accessibilityLabel("Time")
+                Picker("Day", selection: Binding(get: { day }, set: { d in
+                    if case .at(let t, _) = preset.when { onChange(SnoozePreset(label: preset.label, when: .at(time: t, day: d))) }
+                })) {
+                    ForEach(SnoozePreset.days, id: \.id) { Text($0.name).tag($0.id) }
+                }
                 .labelsHidden()
-                .frame(width: 54)
+                .fixedSize()
+            }
+            Spacer(minLength: 4)
+            // Picked now, it would come back then.
+            LiveText(every: 30) { now in
+                Text(Format.wakeLabel(preset.time(now: now), now: now)).font(SF.font(12)).monospacedDigit().foregroundStyle(SF.muted)
+            }
+            .help("Picked now, it would come back then")
+            Button(action: onRemove) {
+                Image(systemName: "xmark").font(.system(size: 11)).foregroundStyle(SF.muted)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canRemove)
+            .accessibilityLabel("Remove \(preset.label)")
         }
+        .onAppear {
+            label = preset.label
+            if case .hours(let h) = preset.when { hours = h.formatted() }
+            if case .at(let t, _) = preset.when { time = t }
+        }
+    }
+
+    private func commitLabel() {
+        let l = String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        if l.isEmpty || l == preset.label {
+            label = preset.label
+        } else {
+            onChange(SnoozePreset(label: l, when: preset.when))
+        }
+    }
+
+    private func commitHours() {
+        guard case .hours(let h) = preset.when else { return }
+        let parsed = Double(hours.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces))
+        if let v = parsed, v > 0, v <= 8760, v != h {
+            onChange(SnoozePreset(label: preset.label, when: .hours(v)))
+        } else {
+            hours = h.formatted()
+        }
+    }
+
+    private func commitTime() {
+        guard case .at(let t, let day) = preset.when else { return }
+        let parts = time.split(separator: ":")
+        let valid = parts.count == 2 && parts[0].count == 2 && parts[1].count == 2 && (Int(parts[0]).map { (0..<24).contains($0) } ?? false) && (Int(parts[1]).map { (0..<60).contains($0) } ?? false)
+        if valid, time != t {
+            onChange(SnoozePreset(label: preset.label, when: .at(time: time, day: day)))
+        } else {
+            time = t
+        }
+    }
+
+    private func setKind(hours: Bool) {
+        guard hours != isHours else { return }
+        onChange(SnoozePreset(label: preset.label, when: hours ? .hours(1) : .at(time: "09:00", day: "tomorrow")))
     }
 }
 

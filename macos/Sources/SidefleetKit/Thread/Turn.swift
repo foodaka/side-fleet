@@ -359,6 +359,19 @@ public struct Turn: Sendable, Hashable, Identifiable {
             } else {
                 workspaceNote = p["note"]?.string ?? "in the checkout"
             }
+        case "worktree_setup":
+            // What the repo's `.sidefleet/worktree.json` brought into a new worktree.
+            if p["state"]?.string == "running" {
+                activity = "Setting up the worktree"
+                break
+            }
+            let copied = (p["copied"]?.array ?? []).compactMap(\.string)
+            let did = [copied.isEmpty ? nil : "copied \(copied.joined(separator: ", "))", (p["ran"]?.string).flatMap { $0.isEmpty ? nil : "ran \($0)" }]
+                .compactMap { $0 }.joined(separator: " and ")
+            if !did.isEmpty { items.append(.note(Note(key: key, tone: .muted, text: "Set up the worktree: \(did)", at: ev.at))) }
+            for (i, problem) in (p["problems"]?.array ?? []).compactMap(\.string).enumerated() {
+                items.append(.note(Note(key: "\(key)-\(i)", tone: .err, text: "Worktree setup: \(problem)", at: ev.at)))
+            }
         case "started":
             command = p["command"]?.string
             activity = "Waiting for the first message"

@@ -12,6 +12,8 @@ struct SignInScreen: View {
     @State private var checked: URL?
     @State private var checking = false
     @State private var error: String?
+    /// Why this screen is up when something was saved: the control plane no longer takes it.
+    @State private var stale: String?
     @State private var key = ""
     @State private var showKey = false
     @State private var busy = false
@@ -62,6 +64,9 @@ struct SignInScreen: View {
                     Text("This control plane has no way in configured.").font(SF.font(12)).foregroundStyle(SF.errInk)
                 }
             }
+            if let stale, error == nil {
+                Text(stale).font(SF.font(12)).foregroundStyle(SF.errInk).fixedSize(horizontal: false, vertical: true)
+            }
             if let error {
                 Text(error).font(SF.font(12)).foregroundStyle(SF.errInk).fixedSize(horizontal: false, vertical: true).accessibilityAddTraits(.isStaticText)
             }
@@ -73,6 +78,16 @@ struct SignInScreen: View {
         .onAppear {
             address = session.savedURL.isEmpty ? Self.hosted : session.savedURL
             addressFocused = true
+            // Here because the control plane turned away what was saved: say so, as the page does.
+            switch session.rejectedCredential {
+            case .devKey?:
+                stale = "The saved key no longer works. Paste the current one."
+                showKey = true
+            case .session?:
+                stale = "Your GitHub sign-in has ended. Sign in again."
+            case nil:
+                stale = nil
+            }
             check()
         }
         .sheet(isPresented: $signingInWithGitHub) {
@@ -174,12 +189,17 @@ struct SignInScreen: View {
     private func finish(url: URL, credential: Credential) {
         busy = true
         error = nil
+        stale = nil
         Task {
             defer { busy = false }
             do {
                 try await session.signIn(url: url, credential: credential)
             } catch APIError.unauthorized {
-                error = "That key was not accepted. Check SIDEFLEET_DEV_KEY on the control plane."
+                if case .session = credential {
+                    error = "GitHub sign-in finished, but the control plane didn't accept the session. Try again."
+                } else {
+                    error = "That key was not accepted. Check SIDEFLEET_DEV_KEY on the control plane."
+                }
             } catch {
                 self.error = error.localizedDescription
             }

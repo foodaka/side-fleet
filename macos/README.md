@@ -4,11 +4,11 @@ A native macOS client for Sidefleet, in SwiftUI. It talks to the same control pl
 over the same API, so it works with your existing machines and tasks. See [SPEC.md](SPEC.md) for what
 it does and why it's built this way.
 
-> [!WARNING]
-> **Not yet built on a Mac.** It was written on Linux. The non-UI package is compiled and tested
-> there, including against a real control plane, but the app has only been type-checked against a
-> stand-in for SwiftUI. Expect some compile fixes the first time, and nobody has seen it run. The
-> `macos` workflow does that build as soon as this is on GitHub.
+> [!NOTE]
+> **Written on Linux, built on GitHub's Mac runners.** The `macos` workflow compiles the app, runs
+> the tests and saves a screenshot of every screen in demo mode. Nobody has yet used it by hand
+> against a real control plane, so notifications, the Keychain, GitHub sign-in and sleep and wake
+> are untried.
 
 ## Build and run
 
@@ -64,5 +64,11 @@ is made up. The `macos` workflow uploads these as an artifact on every run.
 
 The two clients are separate code, so new features need porting or a decision not to. The tables most
 likely to go stale are the models and efforts in `Sources/SidefleetKit/Format/Format.swift`, which
-mirror `web/src/lib/sf/format.ts`. Rooms, Team and Chat apps aren't native yet: the sidebar opens them
-in your browser.
+mirror `web/src/lib/sf/format.ts`, and the chat-app setup text in `Format/ChatApps.swift`, which mirrors
+`web/src/lib/sf/chat.ts` (`Fixtures/chat-golden.json` holds that file's real output).
+
+What the page has and the app leaves out on purpose: browser push (the app posts its own
+notifications), the collapsed sidebar's icon rail (the menu bar shows what's running and waiting),
+and the `#/machines?code=` approval link (type the code on the Machines screen). Invite links are web
+addresses, so they open in a browser: paste one into Team > Join with a link, or open
+`sidefleet://join/<code>`.

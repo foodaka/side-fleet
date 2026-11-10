@@ -57,6 +57,19 @@ private actor DemoWorld {
     private var heartbeatTask: Task<Void, Never>?
     private let speed: Double
     private var booted = false
+    /// Worktree cleanup, by machine: what's left on disk, the latest preview and the latest cleanup.
+    private var team = DemoTeam(now: Date())
+    private var worktrees: [String: [JSONValue]] = [:]
+    private var previews: [String: JSONValue] = [:]
+    private var cleanups: [String: JSONValue] = [:]
+
+    /// The totals of a machine's last cleanup, as everyone polling the list sees them.
+    private func withCleanup(_ w: JSONValue) -> JSONValue {
+        guard case .object(var o) = w, let id = o["id"]?.string, case .object(var totals)? = cleanups[id] else { return w }
+        totals["items"] = nil
+        o["worktree_cleanup"] = .object(totals)
+        return .object(o)
+    }
 
     init(speed: Double) {
         self.speed = speed
@@ -95,6 +108,24 @@ private actor DemoWorld {
         try await Task.sleep(for: .milliseconds(Int(40 / max(speed, 0.01))))
         let now = Date()
 
+        // Rooms, the team and chat apps.
+        if method == "POST", seg.count == 4, seg[1] == "rooms", seg[3] == "tasks" {
+            var task = body
+            if case .object(var o)? = task {
+                o["room_id"] = .string(seg[2])
+                o["repo"] = "github.com/acme/storefront"
+                task = .object(o)
+            }
+            let id = createThread(task, now: now)
+            try team.addTask(room: seg[2], run: id, body: body, now: now)
+            return try encode(["id": .string(id), "status": "queued"])
+        }
+        if method == "POST", seg.count == 4, seg[1] == "runs", seg[3] == "integrate", team.integrate(run: seg[2], now: now) {
+            return try encode(["id": .string(seg[2])])
+        }
+        team.tick(now: now)
+        if let data = try team.handle(method, seg, query: query, body: body, now: now) { return data }
+
         switch (method, seg.count > 1 ? seg[1] : "") {
         case ("GET", "me") where seg.count == 2:
             return try encode(DemoData.me)
@@ -104,8 +135,25 @@ private actor DemoWorld {
             return try encode(.object([:]))
         case ("PUT", "me"):
             return try encode(.object([:]))
+        case ("GET", "workers") where seg.last == "clean-worktrees" && seg.count == 4:
+            let id = seg[2].removingPercentEncoding ?? seg[2]
+            return try encode(["pending": .null, "preview": previews[id] ?? .null, "cleanup": cleanups[id] ?? .null])
         case ("GET", "workers"):
-            return try encode(.array(tickedWorkers(now)))
+            return try encode(.array(tickedWorkers(now).map(withCleanup)))
+        case ("POST", "workers") where seg.last == "clean-worktrees" && seg.count == 4:
+            let id = seg[2].removingPercentEncoding ?? seg[2]
+            let left = (worktrees[id] ?? DemoData.worktrees(worker: id))
+            if body?["mode"]?.string == "remove" {
+                // As a worker does: only what was listed and is still safe goes.
+                let ids = Set(body?["ids"]?.array?.compactMap(\.string) ?? [])
+                let gone = left.filter { ids.contains($0["root_id"]?.string ?? "") && ["merged", "on_default"].contains($0["state"]?.string ?? "") }
+                worktrees[id] = left.filter { !gone.contains($0) }
+                cleanups[id] = DemoData.cleanup(removed: gone, now: now)
+                previews[id] = nil
+            } else {
+                previews[id] = ["items": .array(left), "at": .string(Timestamp.format(now))]
+            }
+            return Data()
         case ("POST", "workers"):
             return try encode(.object([:]))
         case ("DELETE", "workers"):

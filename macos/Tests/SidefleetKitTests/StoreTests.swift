@@ -38,7 +38,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(fleet.composerRepos, ["github.com/acme/cli", "github.com/acme/docs", "github.com/acme/storefront"])
         XCTAssertEqual(fleet.org?.name, "Acme")
         XCTAssertTrue(fleet.isOwner)
-        XCTAssertFalse(fleet.multi)
+        XCTAssertTrue(fleet.multi)
         XCTAssertEqual(fleet.cpu["mac-mini"]?.count, 1)
     }
 

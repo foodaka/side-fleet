@@ -1,6 +1,6 @@
 import Foundation
 
-// A port of web/src/lib/sf/format.ts: bump the model tables in both places when a new model ships.
+// A port of web/src/lib/sf/format.ts. A new model family goes in both tables; versions come from the machines.
 
 public struct AgentInfo: Sendable, Hashable, Identifiable {
     public let id: AgentID
@@ -11,7 +11,6 @@ public struct AgentInfo: Sendable, Hashable, Identifiable {
 public struct ModelInfo: Sendable, Hashable, Identifiable {
     public let id: String
     public let name: String
-    public let version: String
     public let hint: String
 }
 
@@ -43,17 +42,36 @@ public enum Format {
     public static func agentName(_ id: AgentID?) -> String { agents.first { $0.id == id }?.name ?? "Claude Code" }
 
     /// Claude Code's model aliases; Codex and opencode offer whatever each machine reports.
+    /// Which version an alias runs comes from the machine: see `pickerModelName`.
     public static let models: [ModelInfo] = [
-        ModelInfo(id: "sonnet", name: "Sonnet", version: "5.5", hint: "Balanced"),
-        ModelInfo(id: "opus", name: "Opus", version: "5.5", hint: "Most capable"),
-        ModelInfo(id: "fable", name: "Fable", version: "5.1", hint: "Newest family"),
-        ModelInfo(id: "haiku", name: "Haiku", version: "5.5", hint: "Fastest"),
+        ModelInfo(id: "sonnet", name: "Sonnet", hint: "Balanced"),
+        ModelInfo(id: "opus", name: "Opus", hint: "Most capable"),
+        ModelInfo(id: "fable", name: "Fable", hint: "Newest family"),
+        ModelInfo(id: "haiku", name: "Haiku", hint: "Fastest"),
     ]
 
-    /// A Claude alias as the picker shows it, `Opus 5.5`; anything else as `modelName` reads it.
-    public static func pickerModelName(_ id: String) -> String {
-        if let m = models.first(where: { $0.id == id }) { return "\(m.name) \(m.version)" }
-        return modelName(id)
+    /// A Claude alias as the picker shows it: `Opus 5.5` when the machines in `models` (`machineModels`)
+    /// agree on what it runs, plain `Opus` when they don't or haven't said; anything else as `modelName` reads it.
+    public static func pickerModelName(_ id: String, models running: [String] = []) -> String {
+        guard let m = models.first(where: { $0.id == id }) else { return modelName(id) }
+        let mine = running.filter { $0.hasPrefix("claude-\(id)-") }
+        guard mine.count == 1, let version = aliasVersion(mine[0]) else { return m.name }
+        return "\(m.name) \(version)"
+    }
+
+    /// `claude-fable-5-2` -> `5.2`, `claude-opus-5` -> `5`, `claude-sonnet-4-20250514` -> `4`: a minor
+    /// version is one or two digits, so a date after the major isn't taken for one.
+    private static func aliasVersion(_ id: String) -> String? {
+        let parts = id.split(separator: "-", omittingEmptySubsequences: false)
+        func digits(_ s: Substring) -> Bool { !s.isEmpty && s.allSatisfy { $0.isASCII && $0.isNumber } }
+        guard parts.count >= 3, parts[0] == "claude", !parts[1].isEmpty, parts[1].allSatisfy({ $0.isASCII && $0.isLowercase }) else { return nil }
+        // The page's pattern takes the digits the id's third part starts with, whatever follows them.
+        let major = parts[2].prefix { $0.isASCII && $0.isNumber }
+        guard !major.isEmpty else { return nil }
+        guard major.count == parts[2].count, parts.count > 3 else { return String(major) }
+        let minor = parts[3].prefix { $0.isASCII && $0.isNumber }
+        guard digits(minor), minor.count <= 2 else { return String(major) }
+        return "\(major).\(minor)"
     }
 
     /// `claude-opus-5-5` -> (`Opus`, `5.5`).
@@ -123,13 +141,16 @@ public enum Format {
         efforts(agent ?? .claude).first { $0.id == effort }?.name ?? effort ?? ""
     }
 
-    /// Models the given machines offer for an agent, most common first.
+    /// Models the given machines offer for an agent, most common first. For Claude Code: what its
+    /// aliases run on them.
     public static func machineModels(_ workers: [Worker], agent: AgentID) -> [String] {
-        guard agent != .claude else { return [] }
         var order: [String] = []
         var count: [String: Int] = [:]
         for w in workers {
-            for m in w.capabilities.agents?[agent]?.models ?? [] {
+            let capability = w.capabilities.agents?[agent]
+            // The control plane sends the map sorted by alias; a dictionary here has no order of its own.
+            let list = agent == .claude ? (capability?.aliases ?? [:]).sorted { $0.key < $1.key }.map(\.value) : capability?.models ?? []
+            for m in list {
                 if count[m] == nil { order.append(m) }
                 count[m, default: 0] += 1
             }

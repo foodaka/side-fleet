@@ -28,6 +28,10 @@ enum Tour {
                 ("thread-scheduled", .thread("demo-audit")),
                 ("machines", .machines),
                 ("overview", .overview),
+                ("rooms", .rooms),
+                ("room", .room("room-applepay")),
+                ("team", .team),
+                ("chat-apps", .chatApps),
             ]
             try? await Task.sleep(for: .seconds(2))
             for (name, route) in stops {

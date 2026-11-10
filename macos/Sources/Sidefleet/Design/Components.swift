@@ -434,18 +434,14 @@ struct SkeletonBar: View {
     }
 }
 
-/// `@login`, or initials on a tint. No avatars from the network.
+/// A teammate's picture at the small sizes rows use. The demo's logins are made up, so it shows initials there.
 struct InitialAvatar: View {
     var login: String?
     var size: CGFloat = 16
+    @Environment(Stores.self) private var stores: Stores?
 
     var body: some View {
-        Text((login ?? "?").prefix(1).uppercased())
-            .font(.system(size: size * 0.56, weight: .semibold))
-            .foregroundStyle(SF.muted)
-            .frame(width: size, height: size)
-            .background(SF.fill, in: Circle())
-            .accessibilityLabel(login.map { "@\($0)" } ?? "Teammate")
+        Avatar(login: login, size: size, loads: stores.map { !$0.isDemo } ?? false)
     }
 }
 

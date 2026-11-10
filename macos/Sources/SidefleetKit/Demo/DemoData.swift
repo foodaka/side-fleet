@@ -10,7 +10,7 @@ enum DemoData {
     }
 
     static let me: JSONValue = [
-        "user": .null,
+        "user": ["id": "u-ada", "login": "ada", "email": .null],
         "orgs": [["id": "default", "name": "Acme", "slug": "acme", "plan": "pro", "role": "owner", "limits": .null]],
     ]
 
@@ -24,7 +24,7 @@ enum DemoData {
         "finished_at": .null, "result": .null, "parent_id": .null, "session_id": .null, "resume_session_id": .null,
         "pinned_worker_id": .null, "permission_mode": "acceptEdits", "isolation": "worktree", "failover": false, "moved_from": .null,
         "resume_from_branch": .null, "images": [], "kind": "agent", "restore_to": .null, "forked_from": .null, "fork_commit": .null,
-        "archived_at": .null, "snoozed_until": .null, "pr": .null, "created_by": .null, "room_id": .null, "context": .null, "start_at": .null,
+        "archived_at": .null, "snoozed_until": .null, "pr": .null, "created_by": "u-ada", "room_id": .null, "context": .null, "start_at": .null,
     ]
 
     private static func iso(_ d: Date) -> JSONValue { .string(Timestamp.format(d)) }
@@ -39,10 +39,13 @@ enum DemoData {
                     "repos": .array(repos.map { ["name": .string(String($0.split(separator: "/").last ?? "")), "path": .string("/home/dev/" + $0), "id": .string("github.com/" + $0)] }),
                     "system": ["cpu_cores": .number(Double(cores)), "cpu_percent": .number(cpu), "load_avg_1m": 1.2, "mem_total_mb": .number(memTotal * 1024), "mem_used_mb": .number(memUsed * 1024), "disk_total_gb": .number(diskTotal), "disk_free_gb": .number(diskFree), "uptime_secs": .number(Double(up))],
                     "slots": ["parallel": .number(Double(parallel)), "active": 0],
+                    // The MacBook runs an older build, which can't clean up its worktrees.
+                    "can_clean_worktrees": .bool(id != "macbook-pro"),
                 ],
             ]
         }
-        let claude: JSONValue = ["version": "2.4.1", "signed_in": true]
+        // What each alias runs, as a worker reads it from Claude Code: the picker's versions come from here.
+        let claude: JSONValue = ["version": "2.4.1", "signed_in": true, "models": ["sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "fable": "claude-fable-5-2", "haiku": "claude-haiku-5-5"]]
         let codex: JSONValue = ["version": "0.61.0", "signed_in": true, "models": ["gpt-6-luna", "gpt-6-luna-mini"]]
         let opencode: JSONValue = ["version": "0.9.2", "models": ["moonshotai/kimi-k2", "deepseek/deepseek-v4"], "models_total": 2]
         return [

@@ -7,7 +7,7 @@ struct AgentModelPicker: View {
     var agent: AgentID
     var model: String
     var effort: String
-    /// Models the target machines offer for the agent (Codex, opencode).
+    /// Models the target machines offer for the agent; for Claude, what its aliases run.
     var models: [String]
     var small = false
     var unavailable: (AgentID) -> String? = { _ in nil }
@@ -54,23 +54,26 @@ struct AgentModelPicker: View {
     @ViewBuilder private var modelControl: some View {
         if agent == .claude {
             PickerPill(
-                options: Format.models.map { PickerOption(id: $0.id, title: Format.pickerModelName($0.id), hint: $0.hint) },
-                selected: model, height: height, width: 220, accessibility: "Model: \(Format.pickerModelName(model))", onPick: onModel
+                options: Format.models.map { PickerOption(id: $0.id, title: Format.pickerModelName($0.id, models: models), hint: $0.hint) },
+                selected: model, height: height, width: 220, accessibility: "Model: \(Format.pickerModelName(model, models: models))", onPick: pick
             ) {
-                Text(Format.pickerModelName(model)).font(text)
+                Text(Format.pickerModelName(model, models: models)).font(text)
             }
         } else if agent == .codex, !models.isEmpty || model.isEmpty {
             PickerPill(
                 options: [PickerOption(id: "", title: "Default model", hint: "Whatever Codex uses on that machine")]
                     + (models + (model.isEmpty || models.contains(model) ? [] : [model])).map { PickerOption(id: $0, title: $0, mono: true) },
-                selected: model, height: height, width: 280, accessibility: "Model: \(model.isEmpty ? "default" : model)", onPick: onModel
+                selected: model, height: height, width: 280, accessibility: "Model: \(model.isEmpty ? "default" : model)", onPick: pick
             ) {
                 Text(model.isEmpty ? "Default model" : model).font(model.isEmpty ? text : mono)
             }
         } else {
-            ModelSearchField(model: model, models: models, height: height, font: mono, agent: agent, onModel: onModel)
+            ModelSearchField(model: model, models: models, height: height, font: mono, agent: agent, onModel: pick)
         }
     }
+
+    /// A model id never has space around it, however it was typed or pasted.
+    private func pick(_ m: String) { onModel(m.trimmingCharacters(in: .whitespacesAndNewlines)) }
 }
 
 /// opencode can offer hundreds of models (OpenRouter alone): type to search them.
@@ -101,7 +104,13 @@ private struct ModelSearchField: View {
             .focused($focused)
             .accessibilityLabel("Model")
             .onAppear { draft = model }
-            .onChange(of: model) { _, m in if m != draft { draft = m } }
+            // The parent trims what it's given: don't take the space you just typed back out of the box.
+            .onChange(of: model) { _, m in if m != draft.trimmingCharacters(in: .whitespacesAndNewlines) { draft = m } }
+            // As you type, not only on leaving the box: Send doesn't take the focus away, and must
+            // send the model that's on screen.
+            .onChange(of: draft) { _, d in
+                if d.trimmingCharacters(in: .whitespacesAndNewlines) != model { onModel(d) }
+            }
             .onChange(of: focused) { _, on in
                 if on {
                     open = !models.isEmpty
@@ -203,8 +212,14 @@ struct ComposerOptions: View {
                     .padding(.horizontal, 8)
                 }
                 if sameAs == nil {
-                    Text("Changes here are for this task only. Set your defaults in Settings.")
-                        .font(SF.font(11.5)).foregroundStyle(SF.faint).padding(.horizontal, 8)
+                    SettingsLink {
+                        Text("Changes here are for this task only. Set your defaults in Settings…")
+                            .font(SF.font(11.5)).foregroundStyle(SF.faint).multilineTextAlignment(.leading)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .hoverBackground()
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(10)

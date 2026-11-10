@@ -309,10 +309,15 @@ private struct NoMachinesView: View {
                             .font(SF.font(15)).lineSpacing(4).foregroundStyle(SF.muted)
                     }
                 }
-                AddMachineSteps().padding(20).card(cornerRadius: 18)
-                HStack(spacing: 8) {
-                    StatusDot(status: .waiting)
-                    Text("Waiting for a machine to check in. This page updates by itself.").font(SF.font(13)).foregroundStyle(SF.muted)
+                if stores.fleet.mine.isEmpty {
+                    // First run: the steps from signing in to the first task.
+                    OnboardingSteps()
+                } else {
+                    AddMachineSteps().padding(20).card(cornerRadius: 18)
+                    HStack(spacing: 8) {
+                        StatusDot(status: .waiting)
+                        Text("Waiting for a machine to check in. This page updates by itself.").font(SF.font(13)).foregroundStyle(SF.muted)
+                    }
                 }
             }
             .frame(maxWidth: 588, alignment: .leading)

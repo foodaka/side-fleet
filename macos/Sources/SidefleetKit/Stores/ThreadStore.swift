@@ -199,6 +199,12 @@ public final class ThreadStore {
         append(try await api.run(try await api.restore(run: runID)))
     }
 
+    /// Merge the thread's branch into its room's branch.
+    public func integrate() async throws {
+        guard let root else { return }
+        append(try await api.run(try await api.integrate(run: root.id)))
+    }
+
     /// Push the branch and open a pull request for it (or update the open one).
     public func openPR() async throws {
         guard let root else { return }

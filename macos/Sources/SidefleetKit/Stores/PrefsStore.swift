@@ -95,10 +95,12 @@ public final class PrefsStore {
 
     /// Change a preference and save it.
     public func set<T>(_ path: ReferenceWritableKeyPath<PrefsStore, T>, _ value: T) {
+        let before = synced
         self[keyPath: path] = value
         if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.key) }
-        if account, let api {
-            let body = synced
+        // What only suits this Mac (the diff's layout, the theme) has nowhere to go.
+        let body = synced
+        if account, let api, body != before {
             // Kept here if this fails; it goes with the next change.
             Task { try? await api.savePrefs(body) }
         }
@@ -129,6 +131,11 @@ public final class PrefsStore {
     /// The mode a new task starts with for this agent: only Claude Code can ask you, so the others edit files instead.
     public func permission(for agent: AgentID) -> String {
         permission == "ask" && agent != .claude ? "acceptEdits" : permission
+    }
+
+    /// The same for a task in a room, which starts narrower: room tasks read teammates' notes.
+    public func roomPermission(for agent: AgentID) -> String {
+        roomPermission == "ask" && agent != .claude ? "acceptEdits" : roomPermission
     }
 
     /// Whether plain Return sends from a box of this kind.

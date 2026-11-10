@@ -45,11 +45,42 @@ public enum Highlighter {
     static let sql = Language(keywords: kw("select from where insert into update delete create table alter drop join left right inner outer on as and or not null primary key references index values set group by order having limit returning default SELECT FROM WHERE INSERT INTO UPDATE DELETE CREATE TABLE ALTER DROP JOIN LEFT RIGHT INNER OUTER ON AS AND OR NOT NULL PRIMARY KEY REFERENCES INDEX VALUES SET GROUP BY ORDER HAVING LIMIT RETURNING DEFAULT"), lineComments: ["--"], blockComment: ("/*", "*/"), stringQuotes: ["'"], capitalizedTypes: false)
     static let ruby = Language(keywords: kw("alias and begin break case class def do else elsif end ensure false for if in module next nil not or redo rescue retry return self super then true unless until when while yield"), lineComments: ["#"], blockComment: nil, stringQuotes: ["\"", "'"])
 
+    // Languages whose comments and strings are all this tells apart from the rest, which is most of
+    // what makes a diff of them readable.
+    static let toml = Language(keywords: kw("true false"), lineComments: ["#"], blockComment: nil, stringQuotes: ["\"", "'"], capitalizedTypes: false)
+    static let lua = Language(keywords: kw("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"), lineComments: ["--"], blockComment: nil, stringQuotes: ["\"", "'"], capitalizedTypes: false)
+    static let elixir = Language(keywords: kw("after alias and case catch cond def defimpl defmacro defmodule defp defprotocol defstruct do else end false fn for if import in nil not or quote raise receive require rescue true try unless use when with"), lineComments: ["#"], blockComment: nil, stringQuotes: ["\""])
+    static let zig = Language(keywords: kw("align and anytype async await break catch comptime const continue defer else enum errdefer error export extern false fn for if inline null or orelse packed pub return struct switch test true try undefined union unreachable usingnamespace var while"), lineComments: ["//"], blockComment: nil, stringQuotes: ["\""])
+    static let graphql = Language(keywords: kw("query mutation subscription fragment on type interface union enum input scalar schema extend implements directive true false null"), lineComments: ["#"], blockComment: nil, stringQuotes: ["\""])
+    static let terraform = Language(keywords: kw("resource data variable output locals module provider terraform for in if else true false null"), lineComments: ["#", "//"], blockComment: ("/*", "*/"), stringQuotes: ["\""], capitalizedTypes: false)
+    static let dockerfile = Language(keywords: kw("FROM AS RUN CMD LABEL EXPOSE ENV ADD COPY ENTRYPOINT VOLUME USER WORKDIR ARG ONBUILD STOPSIGNAL HEALTHCHECK SHELL"), lineComments: ["#"], blockComment: nil, stringQuotes: ["\"", "'"], capitalizedTypes: false)
+    static let makefile = Language(keywords: kw("ifeq ifneq ifdef ifndef else endif include define endef export override"), lineComments: ["#"], blockComment: nil, stringQuotes: ["\"", "'"], capitalizedTypes: false)
+    static let dotenv = Language(keywords: [], lineComments: ["#"], blockComment: nil, stringQuotes: ["\"", "'"], capitalizedTypes: false)
+    static let ini = Language(keywords: kw("true false yes no on off"), lineComments: ["#", ";"], blockComment: nil, stringQuotes: ["\""], capitalizedTypes: false)
+
     /// The language for a file path, or a code fence's name.
     public static func language(for name: String?) -> Language? {
         guard let name else { return nil }
+        // Some files are known by their name, not an extension.
+        let file = name.split(separator: "/").last.map(String.init) ?? name
+        switch file {
+        case "Dockerfile": return dockerfile
+        case "Makefile": return makefile
+        case ".gitignore": return shell
+        default: if file.hasPrefix(".env") { return dotenv }
+        }
         let ext = (name.split(separator: ".").last.map(String.init) ?? name).lowercased()
         switch ext {
+        case "toml": return toml
+        case "lua": return lua
+        case "ex", "exs", "elixir": return elixir
+        case "zig": return zig
+        case "graphql", "gql": return graphql
+        case "tf", "terraform", "hcl": return terraform
+        case "dockerfile": return dockerfile
+        case "makefile", "mk": return makefile
+        case "ini": return ini
+        case "svg": return html
         case "ts", "tsx", "mts", "cts", "typescript", "js", "jsx", "mjs", "cjs", "javascript", "svelte", "vue", "kt", "java", "dart", "php", "cs": return typescript
         case "rs", "rust": return rust
         case "py", "python": return python
@@ -58,7 +89,7 @@ public enum Highlighter {
         case "c", "h", "cc", "cpp", "hpp", "cxx": return cFamily
         case "sh", "bash", "zsh", "shell", "console": return shell
         case "json", "jsonc": return json
-        case "yaml", "yml", "toml": return yaml
+        case "yaml", "yml": return yaml
         case "css", "scss": return css
         case "html", "xml": return html
         case "sql": return sql
@@ -72,6 +103,31 @@ public enum Highlighter {
         guard let language else { return lines.map { [Token(text: $0, kind: .plain)] } }
         var inBlock = false
         return lines.map { tokenize($0, language, &inBlock) }
+    }
+
+    /// A diff's lines, hunk by hunk. The old and the new file are two texts, so each side carries its
+    /// own open block comment down its lines: a deleted `/*` must not turn the added lines grey.
+    /// Each hunk starts afresh, as the lines skipped before it are unknown.
+    public static func highlight(hunks: [DiffHunk], language: Language?) -> [[[Token]]] {
+        guard let language else { return hunks.map { $0.lines.map { [Token(text: $0.text, kind: .plain)] } } }
+        return hunks.map { hunk in
+            var old = false, new = false
+            return hunk.lines.map { line in
+                switch line.kind {
+                case .del:
+                    return tokenize(line.text, language, &old)
+                case .add:
+                    return tokenize(line.text, language, &new)
+                case .context:
+                    // On both sides: shown as the new side reads it.
+                    let same = old == new
+                    if !same { _ = tokenize(line.text, language, &old) }
+                    let tokens = tokenize(line.text, language, &new)
+                    if same { old = new }
+                    return tokens
+                }
+            }
+        }
     }
 
     public static func tokenize(_ line: String, _ lang: Language, _ inBlock: inout Bool) -> [Token] {

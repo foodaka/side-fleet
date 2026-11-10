@@ -29,6 +29,7 @@ struct SidebarView: View {
         .frame(minWidth: 220)
         .sheet(item: $picking) { SnoozePickSheet(run: $0) }
         .focusedSceneValue(\.focusSearch) { searchFocused = true }
+        .modifier(SlashFocusesSearch { searchFocused = true })
     }
 
     private var header: some View {
@@ -84,7 +85,7 @@ struct SidebarView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
             } else if !searchFocused {
-                Kbd(text: "⌘F")
+                Kbd(text: "/")
             }
         }
         .padding(.horizontal, 10)
@@ -243,26 +244,22 @@ struct SidebarView: View {
             Divider().padding(.bottom, 8).padding(.horizontal, -12)
             NavRow(title: "Overview", symbol: "square.grid.2x2", active: stores.route == .overview) { stores.route = .overview }
             NavRow(title: "Machines", symbol: "server.rack", active: stores.route == .machines) { stores.route = .machines } trailing: { machineStatus }
+            NavRow(title: "Rooms", symbol: "shippingbox", active: inRooms) { stores.route = .rooms }
             if fleet.me?.user != nil {
-                NavRow(title: "Team", symbol: "person.2", external: true) { stores.openOnWeb("/team") }
+                NavRow(title: "Team", symbol: "person.2", active: stores.route == .team) { stores.route = .team }
             }
-            NavRow(title: "Rooms", symbol: "shippingbox", external: true) { stores.openOnWeb("/rooms") }
-            NavRow(title: "Chat apps", symbol: "bubble.left.and.bubble.right", external: true) { stores.openOnWeb("/chat") }
-            SettingsLink {
-                HStack(spacing: 10) {
-                    Image(systemName: "gearshape").font(.system(size: 12)).frame(width: 16)
-                    Text("Settings").font(SF.font(13))
-                    Spacer()
-                }
-                .foregroundStyle(SF.muted)
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-                .hoverBackground()
-            }
-            .buttonStyle(.plain)
+            NavRow(title: "Chat apps", symbol: "bubble.left.and.bubble.right", active: stores.route == .chatApps) { stores.route = .chatApps }
+            SettingsMenuRow()
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 10)
+    }
+
+    private var inRooms: Bool {
+        switch stores.route {
+        case .rooms, .room: true
+        default: false
+        }
     }
 
     @ViewBuilder private var machineStatus: some View {
@@ -272,6 +269,7 @@ struct SidebarView: View {
                 Text("Unreachable").foregroundStyle(SF.errInk)
             }
             .font(SF.font(11.5))
+            .help(connLabel)
         } else if fleet.loaded {
             HStack(spacing: 6) {
                 if !fleet.updatable.isEmpty {
@@ -283,7 +281,16 @@ struct SidebarView: View {
             }
             .font(SF.font(11.5))
             .foregroundStyle(SF.muted)
+            .help(connLabel)
         }
+    }
+
+    /// The numbers beside Machines, in words.
+    private var connLabel: String {
+        if fleet.conn == .unreachable { return "Control plane unreachable" }
+        if !fleet.loaded { return "Connecting…" }
+        return "\(fleet.online.count) of \(fleet.workers.count) machine\(fleet.workers.count == 1 ? "" : "s") online"
+            + (fleet.updatable.isEmpty ? "" : ", \(fleet.updatable.count) can update")
     }
 }
 
@@ -390,6 +397,9 @@ struct RunRow: View {
     var onPick: (RunSummary) -> Void
     @Environment(Stores.self) private var stores
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
+    /// The pointer is over the row: its ⋯ button takes the place of the time and marks on the right.
+    @State private var hovering = false
 
     private var fleet: FleetStore { stores.fleet }
     private var isOpen: Bool { stores.openThreadID == run.id }
@@ -425,6 +435,22 @@ struct RunRow: View {
         .id(run.id)
         .help(run.run.task)
         .contextMenu { menu }
+        // The same menu, for those who don't think to right-click.
+        .overlay(alignment: .topTrailing) {
+            if hovering {
+                Menu { menu } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 11, weight: .medium)).frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(SF.muted)
+                .padding(.top, 5)
+                .padding(.trailing, 6)
+                .accessibilityLabel("Actions for \(String(run.run.task.prefix(60)))")
+            }
+        }
+        .onHover { hovering = $0 }
     }
 
     private var titleLine: some View {
@@ -438,29 +464,35 @@ struct RunRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if let pr = run.run.pr {
-                HStack(spacing: 2) {
-                    PRIcon(state: pr.state)
-                    Text("\(pr.number)").monospacedDigit()
-                }
+            trailingMarks
+                // They keep their room while hidden, so the title doesn't shift under the pointer.
+                .opacity(hovering ? 0 : 1)
+        }
+    }
+
+    @ViewBuilder private var trailingMarks: some View {
+        if let pr = run.run.pr {
+            HStack(spacing: 2) {
+                PRIcon(state: pr.state)
+                Text("\(pr.number)").monospacedDigit()
+            }
+            .font(SF.font(11))
+            .foregroundStyle(SF.muted)
+            .help("Pull request #\(pr.number): \(pr.state)")
+        }
+        if let waiting {
+            Circle()
+                .fill(waiting.reason.toneColor)
+                .frame(width: 8, height: 8)
+                .help(waiting.label)
+                .accessibilityLabel("Waiting on you: \(waiting.label)")
+        } else if unread {
+            Circle().fill(SF.ink).frame(width: 6, height: 6).accessibilityLabel("New")
+        } else if !detail, !asleep {
+            Text(Format.ago(run.lastActivityAt, now: fleet.now))
                 .font(SF.font(11))
-                .foregroundStyle(SF.muted)
-                .help("Pull request #\(pr.number): \(pr.state)")
-            }
-            if let waiting {
-                Circle()
-                    .fill(waiting.reason.toneColor)
-                    .frame(width: 8, height: 8)
-                    .help(waiting.label)
-                    .accessibilityLabel("Waiting on you: \(waiting.label)")
-            } else if unread {
-                Circle().fill(SF.ink).frame(width: 6, height: 6).accessibilityLabel("New")
-            } else if !detail, !asleep {
-                Text(Format.ago(run.lastActivityAt, now: fleet.now))
-                    .font(SF.font(11))
-                    .monospacedDigit()
-                    .foregroundStyle(SF.faint)
-            }
+                .monospacedDigit()
+                .foregroundStyle(SF.faint)
         }
     }
 
@@ -474,15 +506,18 @@ struct RunRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            // The effort shows whatever the model, the machine's default included.
+            let effort = run.latestEffort.flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
             if !asking {
-                Text(run.latestModel.isEmpty ? "default" : Format.modelName(run.latestModel, agent: run.latestAgent) + (run.latestEffort.map { " · \($0)" } ?? ""))
+                Text((run.latestModel.isEmpty ? "default" : Format.modelName(run.latestModel, agent: run.latestAgent)) + effort)
                     .font(SF.font(11))
                     .foregroundStyle(SF.faint)
                     .lineLimit(1)
+                    .help(Format.agentModel(run.latestAgent, run.latestModel) + effort)
             }
             AgentIcon(agent: run.latestAgent, size: 11)
                 .foregroundStyle(SF.faint)
-                .help(Format.agentModel(run.latestAgent, run.latestModel))
+                .help(Format.agentModel(run.latestAgent, run.latestModel) + effort)
         }
         .font(SF.font(11.5))
         .foregroundStyle(SF.muted)
@@ -496,7 +531,9 @@ struct RunRow: View {
         } else if detail {
             if run.threadStatus == .running {
                 LiveText { now in
-                    Text("\(run.latestWorkerID ?? "Starting") · \(Format.duration(start: run.run.startedAt, now: now))").monospacedDigit()
+                    // Running, but the machine's first word hasn't arrived: there's no start to count from yet.
+                    let took = Format.duration(start: run.run.startedAt, now: now)
+                    Text("\(run.latestWorkerID ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
                 }
             } else if let start = run.run.startAt, run.run.isScheduled(now: fleet.now) {
                 Text("Scheduled · \(Format.startTime(start, now: fleet.now))" + (otherRepo ? " · \(Format.repoLabel(run.run.repo))" : ""))
@@ -513,9 +550,14 @@ struct RunRow: View {
     @ViewBuilder private var menu: some View {
         Button("Open in New Window") { openWindow(value: ThreadWindowID(id: run.id)) }
         Divider()
-        Button(fleet.othersRun(run.run.createdBy) ? "Continue on My Machine…" : "Fork…") {
+        let theirs = fleet.othersRun(run.run.createdBy)
+        Button {
             stores.forkThread = run.id
             stores.open(run.id)
+        } label: {
+            // A second line of text is a menu item's subtitle.
+            Text(theirs ? "Continue on My Machine…" : "Fork…")
+            Text("New thread from its latest message, any agent, model or machine\(theirs ? " of yours" : "")")
         }
         if run.run.archivedAt != nil {
             Button("Unarchive") { Task { await fleet.setArchived(run, archived: false) } }
@@ -533,6 +575,7 @@ struct RunRow: View {
                 }
                 Divider()
                 Button("Pick a Date and Time…") { onPick(run) }
+                Button("Edit These Choices…") { openSettings() }
             }
             Button("Archive") { Task { await fleet.setArchived(run, archived: true) } }
         }
@@ -595,26 +638,7 @@ private struct SnoozePickSheet: View {
     }
 }
 
-// MARK: Org switcher
-
-struct OrgSwitcher: View {
-    @Environment(Stores.self) private var stores
-
-    var body: some View {
-        if let me = stores.fleet.me, me.orgs.count > 1 {
-            PickerPill(
-                options: me.orgs.map { PickerOption(id: $0.id, title: $0.name, hint: $0.plan == "pro" ? "Pro" : nil) },
-                selected: stores.fleet.org?.id,
-                heading: "Your orgs",
-                accessibility: "Switch org",
-                onPick: { stores.switchOrg($0) }
-            ) {
-                Text(stores.fleet.org?.name ?? "").font(SF.font(13, .medium)).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
-}
+// The org switcher and the Settings menu are in SidebarMenus.swift.
 
 // MARK: Inbox
 

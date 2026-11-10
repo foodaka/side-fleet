@@ -319,7 +319,8 @@ private struct ChatUpdatesView: View {
     @State private var turningOff = false
 
     var body: some View {
-        Group {
+        // A stack, not a Group: modifiers on an empty Group never run, and the model is made in `.task`.
+        VStack(alignment: .leading, spacing: 12) {
             if let model { content(model) }
         }
         .task(id: token.id) {

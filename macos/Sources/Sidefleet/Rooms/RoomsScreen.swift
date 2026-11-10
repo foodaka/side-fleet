@@ -113,7 +113,8 @@ private struct RoomRow: View {
                     Text(Format.rel(room.lastActivityAt, now: stores.fleet.now)).font(SF.font(12)).monospacedDigit().foregroundStyle(SF.muted)
                 }
                 if !room.goal.isEmpty {
-                    Text(room.goal)
+                    // Line breaks collapse here, as on the page: this is a preview, the room shows it whole.
+                    Text(room.goal.split(whereSeparator: \.isNewline).joined(separator: " "))
                         .font(SF.font(13))
                         .lineSpacing(3)
                         .foregroundStyle(SF.muted)

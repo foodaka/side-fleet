@@ -93,7 +93,9 @@ private struct NewTaskForm: View {
             }
             AttachmentStrip(images: $model.images).padding(.horizontal, 16).padding(.bottom, 8)
             HStack(alignment: .bottom, spacing: 8) {
-                ControlRow {
+                // Wraps pill by pill when the row is too narrow, like the page's flex-wrap, rather than
+                // stacking every control on its own line.
+                FlowRow(spacing: 2, lineSpacing: 2) {
                     AgentModelPicker(
                         agent: model.agent, model: model.model, effort: model.effort, models: model.models,
                         unavailable: { model.unavailable($0) },
@@ -108,6 +110,7 @@ private struct NewTaskForm: View {
                     )
                     StartLaterPicker(value: $model.startAt)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
                     if model.task.count > 2000 {
                         Text("\(model.task.count.formatted()) characters").font(SF.font(12)).monospacedDigit().foregroundStyle(SF.faint)
@@ -156,7 +159,7 @@ private struct NewTaskForm: View {
                 }
             }
         ) {
-            Text(model.repo.isEmpty ? "Choose a repo" : Format.repoLabel(model.repo)).font(SF.mono(12.5)).lineLimit(1).frame(maxWidth: 200)
+            Text(model.repo.isEmpty ? "Choose a repo" : Format.repoLabel(model.repo)).font(SF.mono(12.5)).lineLimit(1).truncationMode(.middle).frame(maxWidth: 200, alignment: .leading)
         }
     }
 
@@ -234,18 +237,6 @@ private struct NewTaskForm: View {
                 }
                 .buttonStyle(.plain)
             }
-        }
-    }
-}
-
-/// Lays controls out in a row and lets the row shrink before anything truncates badly.
-private struct ControlRow<Content: View>: View {
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 2) { content() }.frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) { content() }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

@@ -72,3 +72,22 @@ notifications), the collapsed sidebar's icon rail (the menu bar shows what's run
 and the `#/machines?code=` approval link (type the code on the Machines screen). Invite links are web
 addresses, so they open in a browser: paste one into Team > Join with a link, or open
 `sidefleet://join/<code>`.
+
+## Releasing
+
+A `v*` tag builds `Sidefleet.dmg` (universal, Developer ID signed, notarized, stapled) and attaches it to
+the GitHub release, through `.github/workflows/macos-release.yml`. Running that workflow by hand builds
+the same file as an artifact. Locally: `scripts/release.sh`, with the variables at its top.
+
+It needs five repository secrets:
+
+| Secret | What |
+|---|---|
+| `MACOS_CERTIFICATE_P12` | `base64 -i cert.p12` of the Developer ID Application certificate with its private key |
+| `MACOS_CERTIFICATE_PASSWORD` | the password the `.p12` was exported with |
+| `NOTARY_KEY_P8` | `base64 -i AuthKey_XXXX.p8` of an App Store Connect API key (Developer role) |
+| `NOTARY_KEY_ID` | that key's ID |
+| `NOTARY_ISSUER_ID` | the issuer ID shown above the keys list |
+
+The app isn't sandboxed and needs no special entitlements, so no provisioning profile is involved.
+

@@ -51,6 +51,7 @@
 			<symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></symbol>
 			<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5" /></symbol>
 			<symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6" /></symbol>
+			<symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" /></symbol>
 			<symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 1.5a10.5 10.5 0 0 0-3.32 20.46c.53.1.72-.23.72-.5v-1.8c-2.92.63-3.54-1.25-3.54-1.25-.48-1.22-1.17-1.54-1.17-1.54-.95-.65.08-.64.08-.64 1.05.08 1.6 1.08 1.6 1.08.94 1.6 2.46 1.14 3.06.87.1-.68.37-1.14.66-1.4-2.33-.27-4.78-1.17-4.78-5.18 0-1.15.41-2.08 1.08-2.82-.1-.26-.47-1.33.1-2.78 0 0 .88-.28 2.88 1.07a10 10 0 0 1 5.24 0c2-1.35 2.88-1.07 2.88-1.07.57 1.45.21 2.52.1 2.78.68.74 1.08 1.67 1.08 2.82 0 4.02-2.45 4.9-4.79 5.16.38.33.71.97.71 1.96v2.9c0 .28.19.61.73.5A10.5 10.5 0 0 0 12 1.5Z" /></symbol>
 		</defs>
 	</svg>
@@ -101,7 +102,7 @@
 					<li><b>2</b><span>Run one command<small>On your Mac or Linux box</small></span></li>
 					<li><b>3</b><span>Approve it, send a task<small>From any device</small></span></li>
 				</ol>
-				<p class="fine">Free for 2 machines · Open-source worker · macOS and Linux</p>
+				<p class="fine">Free for 2 machines · Open-source worker · macOS and Linux · <a href="https://github.com/foodaka/side-fleet/releases/latest/download/Sidefleet.dmg">Mac app</a></p>
 			</div>
 
 			<ul class="hero-nodes" aria-label="Example machines">
@@ -393,6 +394,10 @@
 						<small>3 · Connect it, then approve the code it prints on the page</small>
 						<div class="cmd-line"><code>sidefleet connect --control https://app.sidefleet.xyz</code><button class="copy" data-copy="sidefleet connect --control https://app.sidefleet.xyz" aria-label="Copy connect command"><svg><use href="#i-copy" /></svg></button></div>
 					</div>
+					<div class="cmd">
+						<small>Prefer an app to the page? macOS 14 or later, Apple silicon and Intel</small>
+						<a class="btn btn-light" href="https://github.com/foodaka/side-fleet/releases/latest/download/Sidefleet.dmg"><svg><use href="#i-download" /></svg>Download for Mac</a>
+					</div>
 				</div>
 			</section>
 
@@ -431,6 +436,7 @@
 					<details><summary>Can I use it from my phone?</summary><p>Yes. The page works on any browser that can reach your control plane. Put it on Tailscale and it's reachable from your phone anywhere, without exposing it to the internet.</p></details>
 					<details><summary>My laptop went to sleep mid-task. Is the work lost?</summary><p>Not if the task has “Move if it drops” on: the worker pushes the task's own <code>sidefleet/…</code> branch as it goes, and another machine with the repo continues from the last pushed commit. Without it, the task stops with the machine.</p></details>
 					<details><summary>Is there a hosted version?</summary><p>Yes, at app.sidefleet.xyz: sign in with GitHub and connect up to 2 machines for free. The worker stays open source and runs on your machines, so your code doesn't move. <a href="https://app.sidefleet.xyz/auth/github/login">Start free</a>.</p></details>
+					<details><summary>Is there a Mac app?</summary><p>Yes, an early native one. It signs in to the same control plane, hosted or your own, and does what the page does. <a href="https://github.com/foodaka/side-fleet/releases/latest/download/Sidefleet.dmg">Download it</a> for macOS 14 or later; it's signed and notarized, so it opens without a warning.</p></details>
 					<details><summary>Which platforms does it run on?</summary><p>macOS (arm64 and x86_64) and Linux (x86_64 and arm64). The control plane needs Postgres; one Docker command sets it up.</p></details>
 					<details><summary>Can I switch agents halfway through a task?</summary><p>Yes: fork the thread from any message into another agent and model. The new agent gets the conversation so far as a transcript and starts from the files as they were at that point.</p></details>
 					<details><summary>Is it OK to run my subscription this way?</summary><p>Sidefleet drives your own sign-ins, headless. Check the terms of your subscriptions for automated or unattended use, and never share or resell access to an account through it.</p></details>
@@ -456,7 +462,7 @@
 					<p>Coding agents on your own machines, from anywhere.</p>
 				</div>
 				<div class="foot-cols">
-					<div><h3>Product</h3><a href="#how">How it works</a><a href="#fleet">Fleet</a><a href="#security">Security</a><a href="#faq">Questions</a></div>
+					<div><h3>Product</h3><a href="#how">How it works</a><a href="#fleet">Fleet</a><a href="#security">Security</a><a href="https://github.com/foodaka/side-fleet/releases/latest/download/Sidefleet.dmg">Mac app</a><a href="#faq">Questions</a></div>
 					<div><h3>Docs</h3><a href="https://github.com/foodaka/side-fleet#readme">README</a><a href="https://github.com/foodaka/side-fleet/blob/main/HOSTING.md">Hosting</a><a href="https://github.com/foodaka/side-fleet/blob/main/docs/API.md">API</a></div>
 					<div><h3>Project</h3><a href="https://github.com/foodaka/side-fleet">GitHub</a><a href="https://github.com/foodaka/side-fleet/blob/main/LICENSE">MIT License</a></div>
 				</div>

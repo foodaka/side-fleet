@@ -4,6 +4,9 @@ A native macOS client for Sidefleet, in SwiftUI. It talks to the same control pl
 over the same API, so it works with your existing machines and tasks. See [SPEC.md](SPEC.md) for what
 it does and why it's built this way.
 
+**[Download Sidefleet.dmg](https://github.com/foodaka/side-fleet/releases/latest/download/Sidefleet.dmg)**
+from the latest release: macOS 14 or later, Apple silicon and Intel, signed and notarized.
+
 > [!NOTE]
 > **Written on Linux, built on GitHub's Mac runners.** The `macos` workflow compiles the app, runs
 > the tests and saves a screenshot of every screen in demo mode. Nobody has yet used it by hand

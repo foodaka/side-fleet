@@ -94,7 +94,13 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 
 ## Mac app
 
-There's a native macOS client in [`macos/`](macos/README.md), early and built from source for now.
+A native macOS client that signs in to the same control plane as the page, hosted or your own.
+It's early.
+
+**[Download Sidefleet.dmg](https://github.com/foodaka/side-fleet/releases/latest/download/Sidefleet.dmg)**:
+macOS 14 or later, Apple silicon and Intel. It's signed and notarized, so it opens without a
+warning: open the `.dmg` and drag Sidefleet into Applications. To build it yourself, see
+[`macos/`](macos/README.md).
 
 ## Install
 

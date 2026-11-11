@@ -1,0 +1,32 @@
+# Builds the Mac app, runs its tests, and walks its screens in demo mode (made-up data, no network)
+# so how it looks can be checked from the run's artifacts.
+name: macos
+on:
+  push:
+    branches: [main, "sidefleet/**"]
+    paths: ["macos/**", ".github/workflows/macos.yml"]
+  pull_request:
+    paths: ["macos/**", ".github/workflows/macos.yml"]
+jobs:
+  build:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Which Swift
+        run: swift --version
+      - name: Test
+        run: swift test
+      - name: Bundle
+        run: scripts/bundle.sh
+      - name: Screenshots
+        run: scripts/screenshots.sh dist/screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidefleet-mac
+          path: |
+            macos/dist/screenshots
+            macos/dist/Sidefleet.app
+          if-no-files-found: warn

@@ -92,6 +92,10 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 ![Reviewing a task's diff](docs/screenshots/review.png)
 ![The Machines page](docs/screenshots/machines.png)
 
+## Mac app
+
+There's a native macOS client in [`macos/`](macos/README.md), early and built from source for now.
+
 ## Install
 
 ```bash

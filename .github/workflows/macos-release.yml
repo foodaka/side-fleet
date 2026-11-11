@@ -1,0 +1,77 @@
+# Builds the Mac app for download on each release tag: universal, signed with the Developer ID,
+# notarized and attached to the GitHub release as Sidefleet.dmg. Run it by hand to get the .dmg as
+# an artifact without a release.
+#
+# Secrets (see macos/README.md, "Releasing"):
+#   MACOS_CERTIFICATE_P12       base64 of the Developer ID Application certificate and key (.p12)
+#   MACOS_CERTIFICATE_PASSWORD  the .p12's password
+#   NOTARY_KEY_P8               base64 of an App Store Connect API key (.p8)
+#   NOTARY_KEY_ID, NOTARY_ISSUER_ID
+name: macos-release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  app:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the secrets are there
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          KEY: ${{ secrets.NOTARY_KEY_P8 }}
+        run: |
+          if [ -z "$P12" ] || [ -z "$KEY" ]; then
+            echo "::error::Signing secrets are missing. See macos/README.md, Releasing."
+            exit 1
+          fi
+      - name: Load the signing certificate into a keychain of its own
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          pass="$(uuidgen)"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$pass" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$pass" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          id="$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+          if [ -z "$id" ]; then
+            echo "::error::No Developer ID Application identity in the certificate."
+            exit 1
+          fi
+          echo "SIGN_ID=$id" >> "$GITHUB_ENV"
+      - name: Build, sign and notarize
+        env:
+          KEY: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          case "$GITHUB_REF" in refs/tags/v*) export VERSION="${GITHUB_REF#refs/tags/v}" ;; esac
+          scripts/release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sidefleet-dmg
+          path: macos/dist/Sidefleet.dmg
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: macos/dist/Sidefleet.dmg
+      - name: Remove the keychain and key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8"

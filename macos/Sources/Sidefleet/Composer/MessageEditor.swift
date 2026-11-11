@@ -22,7 +22,7 @@ struct MessageEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = EditorScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
@@ -70,8 +70,11 @@ struct MessageEditor: NSViewRepresentable {
             tv.string = text
             context.coordinator.remeasure(tv)
         }
-        tv.isEditable = enabled
-        tv.textColor = NSColor(SF.ink)
+        if tv.isEditable != enabled { tv.isEditable = enabled }
+        // Setting the colour restyles every character and lays the text out again, which can move
+        // the scroll position: only do it when it changed (the theme), not on every keystroke.
+        let ink = NSColor(SF.ink)
+        if tv.textColor != ink { tv.textColor = ink }
         if context.coordinator.lastFocusTick != focusTick {
             context.coordinator.lastFocusTick = focusTick
             DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
@@ -118,6 +121,26 @@ struct MessageEditor: NSViewRepresentable {
             guard !images.isEmpty else { return false }
             parent.onPasteImages(images)
             return true
+        }
+    }
+}
+
+/// The box grows with its text, but SwiftUI hands it the new height a beat after the text view has
+/// grown. In between, the text view scrolls the caret's new line into view, and once the box is tall
+/// enough that offset is left behind: the first line hides and the text jumps. So after each resize,
+/// pin the text to the top while it all fits, and keep the caret in view once it doesn't.
+final class EditorScrollView: NSScrollView {
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize.height != frame.height
+        super.setFrameSize(newSize)
+        guard changed, let tv = documentView as? NSTextView else { return }
+        if tv.frame.height <= contentSize.height + 0.5 {
+            if contentView.bounds.origin != .zero {
+                contentView.scroll(to: .zero)
+                reflectScrolledClipView(contentView)
+            }
+        } else {
+            tv.scrollRangeToVisible(tv.selectedRange())
         }
     }
 }

@@ -6,18 +6,24 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-if [ "${UNIVERSAL:-}" = 1 ]; then
-  set -- --arch arm64 --arch x86_64
-else
-  set --
-fi
-swift build -c release --product Sidefleet "$@"
-bin="$(swift build -c release --product Sidefleet "$@" --show-bin-path)"
-
 app=dist/Sidefleet.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin/Sidefleet" "$app/Contents/MacOS/Sidefleet"
+
+if [ "${UNIVERSAL:-}" = 1 ]; then
+  # One build per architecture, joined with lipo. `swift build --arch arm64 --arch x86_64` hands
+  # the build to a different build system that rejects the app target's Swift 5 language mode.
+  for arch in arm64 x86_64; do
+    swift build -c release --product Sidefleet --arch "$arch"
+  done
+  bin="$(swift build -c release --product Sidefleet --arch arm64 --show-bin-path)"
+  x86_bin="$(swift build -c release --product Sidefleet --arch x86_64 --show-bin-path)"
+  lipo -create "$bin/Sidefleet" "$x86_bin/Sidefleet" -output "$app/Contents/MacOS/Sidefleet"
+else
+  swift build -c release --product Sidefleet
+  bin="$(swift build -c release --product Sidefleet --show-bin-path)"
+  cp "$bin/Sidefleet" "$app/Contents/MacOS/Sidefleet"
+fi
 # SwiftPM resource bundles sit beside the binary; the app has none today, but a dependency could.
 for b in "$bin"/*.bundle; do [ -e "$b" ] && cp -R "$b" "$app/Contents/Resources/"; done
 

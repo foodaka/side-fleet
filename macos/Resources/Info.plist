@@ -37,6 +37,15 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Updates (Sparkle): every release attaches appcast.xml, signed with the key behind this public one. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/foodaka/side-fleet/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>IiB4pcab6p3HwglHtxohN5OR9K3n0CpoeTrLRTa1xxU=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SidefleetCommit</key>
+	<string>__COMMIT__</string>
 	<!-- Self-hosted control planes are often plain HTTP on a tailnet or at home, at any address.
 	     Sign-in warns when plain HTTP is going to a public address. -->
 	<key>NSAppTransportSecurity</key>

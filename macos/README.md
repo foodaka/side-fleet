@@ -82,7 +82,11 @@ A `v*` tag builds `Sidefleet.dmg` (universal, Developer ID signed, notarized, st
 the GitHub release, through `.github/workflows/macos-release.yml`. Running that workflow by hand builds
 the same file as an artifact. Locally: `scripts/release.sh`, with the variables at its top.
 
-It needs five repository secrets:
+It also attaches `appcast.xml`, the feed installed copies check for updates (Sparkle, under the app menu's
+Check for Updates…). The feed URL is the latest release's `appcast.xml`, so each release reaches everyone
+on an older one. Sparkle compares `CFBundleVersion`, which is the tag's version.
+
+It needs six repository secrets:
 
 | Secret | What |
 |---|---|
@@ -91,6 +95,7 @@ It needs five repository secrets:
 | `NOTARY_KEY_P8` | `base64 -i AuthKey_XXXX.p8` of an App Store Connect API key (Developer role) |
 | `NOTARY_KEY_ID` | that key's ID |
 | `NOTARY_ISSUER_ID` | the issuer ID shown above the keys list |
+| `SPARKLE_PRIVATE_KEY` | base64 EdDSA private key that signs the update feed; its public half is `SUPublicEDKey` in `Resources/Info.plist`. Keep a copy offline: without it, installed apps can't be updated |
 
 The app isn't sandboxed and needs no special entitlements, so no provisioning profile is involved.
 

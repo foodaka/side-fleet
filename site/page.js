@@ -516,6 +516,7 @@
 		if (el.dataset.copy) window.va('event', { name: 'Copy command', data: { command: el.dataset.copy.split(' ')[0] === 'curl' ? 'install' : el.dataset.copy.split(' ')[1] } });
 		else if (el.getAttribute('href') === '#install') window.va('event', { name: 'Install click', data: { where } });
 		else if (el.hostname === 'app.sidefleet.xyz') window.va('event', { name: 'Sign in click', data: { where } });
+		else if (el.hostname === 'github.com' && el.pathname.endsWith('.dmg')) window.va('event', { name: 'Mac download', data: { where } });
 		else if (el.hostname === 'github.com') window.va('event', { name: 'GitHub click', data: { where } });
 	});
 

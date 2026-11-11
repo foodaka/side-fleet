@@ -7,6 +7,7 @@ import UserNotifications
 struct SidefleetApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var session = AppSession()
+    @StateObject private var updater = Updater.shared
 
     var body: some Scene {
         Window("Sidefleet", id: "main") {
@@ -16,7 +17,10 @@ struct SidefleetApp: App {
         }
         .defaultSize(width: 1280, height: 820)
         .windowToolbarStyle(.unified(showsTitle: false))
-        .commands { SidefleetCommands(session: session) }
+        .commands {
+            SidefleetCommands(session: session)
+            UpdateCommands(updater: updater)
+        }
 
         WindowGroup("Task", id: "thread", for: ThreadWindowID.self) { $window in
             if let id = window?.id, let stores = session.stores {
@@ -381,6 +385,26 @@ extension FocusedValues {
     var focusComposer: (() -> Void)? {
         get { self[FocusComposerKey.self] }
         set { self[FocusComposerKey.self] = newValue }
+    }
+}
+
+/// "Check for Updates…" under About, as Mac apps have it.
+struct UpdateCommands: Commands {
+    let updater: Updater
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            if updater.available { CheckForUpdatesButton(updater: updater) }
+        }
+    }
+}
+
+/// A view of its own, so the menu item follows `canCheck` as it changes.
+private struct CheckForUpdatesButton: View {
+    @ObservedObject var updater: Updater
+
+    var body: some View {
+        Button("Check for Updates…") { updater.check() }.disabled(!updater.canCheck)
     }
 }
 

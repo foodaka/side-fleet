@@ -13,7 +13,7 @@ var targets: [Target] = [
 products.append(.executable(name: "Sidefleet", targets: ["Sidefleet"]))
 targets.append(.executableTarget(
     name: "Sidefleet",
-    dependencies: ["SidefleetKit"],
+    dependencies: ["SidefleetKit", .product(name: "Sparkle", package: "Sparkle")],
     swiftSettings: [.swiftLanguageMode(.v5)]
 ))
 #endif
@@ -22,6 +22,9 @@ let package = Package(
     name: "Sidefleet",
     platforms: [.macOS(.v14)],
     products: products,
-    dependencies: [.package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.7.3")],
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.7.3"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0"),
+    ],
     targets: targets
 )

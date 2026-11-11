@@ -7,6 +7,7 @@
 #   MACOS_CERTIFICATE_PASSWORD  the .p12's password
 #   NOTARY_KEY_P8               base64 of an App Store Connect API key (.p8)
 #   NOTARY_KEY_ID, NOTARY_ISSUER_ID
+#   SPARKLE_PRIVATE_KEY         base64 EdDSA key that signs the update feed (appcast.xml)
 name: macos-release
 on:
   push:
@@ -26,8 +27,9 @@ jobs:
         env:
           P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           KEY: ${{ secrets.NOTARY_KEY_P8 }}
+          SPARKLE: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          if [ -z "$P12" ] || [ -z "$KEY" ]; then
+          if [ -z "$P12" ] || [ -z "$KEY" ] || [ -z "$SPARKLE" ]; then
             echo "::error::Signing secrets are missing. See macos/README.md, Releasing."
             exit 1
           fi
@@ -62,14 +64,26 @@ jobs:
           export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
           case "$GITHUB_REF" in refs/tags/v*) export VERSION="${GITHUB_REF#refs/tags/v}" ;; esac
           scripts/release.sh
+      # The feed installed apps check for updates: signed, so only this key can ship one to them.
+      - name: Write the update feed
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          REPO: ${{ github.repository }}
+        run: VERSION="${GITHUB_REF#refs/tags/v}" scripts/appcast.sh
       - uses: actions/upload-artifact@v4
         with:
           name: Sidefleet-dmg
-          path: macos/dist/Sidefleet.dmg
+          path: |
+            macos/dist/Sidefleet.dmg
+            macos/dist/appcast.xml
+          if-no-files-found: warn
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: macos/dist/Sidefleet.dmg
+          files: |
+            macos/dist/Sidefleet.dmg
+            macos/dist/appcast.xml
       - name: Remove the keychain and key
         if: always()
         run: |

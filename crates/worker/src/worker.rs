@@ -545,12 +545,12 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Download the images attached to the run into a private temporary folder
-/// (outside the repo, so they never end up in a commit). One that cannot be
-/// fetched is reported and left out.
-async fn fetch_images(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Vec<PathBuf>) {
-    if run.images.is_empty() {
-        return (None, vec![]);
+/// Download the images and files attached to the run into a private temporary
+/// folder (outside the repo, so they never end up in a commit). One that cannot
+/// be fetched is reported and left out. Returns the folder, the images and the files.
+async fn fetch_attachments(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+    if run.images.is_empty() && run.files.is_empty() {
+        return (None, vec![], vec![]);
     }
     let dir = std::env::temp_dir().join("sidefleet-images").join(run.id.to_string());
     let made = {
@@ -558,9 +558,9 @@ async fn fetch_images(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Ve
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)
     };
     if let Err(e) = made {
-        let msg = format!("could not save the attached images ({e}); the task runs without them");
+        let msg = format!("could not save the attached files ({e}); the task runs without them");
         let _ = client.post_events(run.id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
-        return (None, vec![]);
+        return (None, vec![], vec![]);
     }
     let mut paths = Vec::with_capacity(run.images.len());
     for (n, img) in run.images.iter().enumerate() {
@@ -583,7 +583,45 @@ async fn fetch_images(client: &ControlClient, run: &Run) -> (Option<PathBuf>, Ve
             }
         }
     }
-    (Some(dir), paths)
+    // Files keep their own names (the agent and the user refer to them by name),
+    // in a folder of their own so a file named like `image-1.png` can't clash.
+    let mut files = Vec::with_capacity(run.files.len());
+    let files_dir = dir.join("files");
+    if !run.files.is_empty() {
+        if let Err(e) = std::fs::create_dir_all(&files_dir) {
+            let msg = format!("could not save the attached files ({e}); the task runs without them");
+            let _ = client.post_events(run.id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+            return (Some(dir), paths, vec![]);
+        }
+    }
+    for (n, f) in run.files.iter().enumerate() {
+        let path = files_dir.join(attachment_file_name(&f.name, n, &files));
+        let saved = match client.file(f.id).await {
+            Ok(bytes) => std::fs::write(&path, bytes).map_err(anyhow::Error::from),
+            Err(e) => Err(e),
+        };
+        match saved {
+            Ok(()) => files.push(path),
+            Err(e) => {
+                let msg = format!("could not fetch attached file {} ({e:#}); the task runs without it", f.name);
+                let _ = client.post_events(run.id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+            }
+        }
+    }
+    (Some(dir), paths, files)
+}
+
+/// A safe name for the `n`th attached file: only its last path part (the control
+/// plane already cleans it; a worker does not rely on that), numbered if another
+/// file already took it.
+fn attachment_file_name(name: &str, n: usize, taken: &[PathBuf]) -> String {
+    let base = std::path::Path::new(name).file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let base = if base.is_empty() || base.starts_with('.') || base.contains(['/', '\\']) { format!("file-{}", n + 1) } else { base.to_string() };
+    if taken.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some(base.as_str())) {
+        format!("{}-{base}", n + 1)
+    } else {
+        base
+    }
 }
 
 /// Execute one claimed run: forward events as they arrive, poll for stop, report the outcome.
@@ -726,7 +764,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let diff_cwd = cwd.clone();
 
     let keep_at = std::time::Instant::now();
-    let (images_dir, images) = fetch_images(client, &run).await;
+    let (images_dir, images, files) = fetch_attachments(client, &run).await;
     // What runs before the agent starts, so slow git work ahead of each turn shows up.
     let ms = |d: Duration| d.as_millis() as u64;
     tracing::debug!(
@@ -781,6 +819,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         extra_args: cfg.extra_args.clone(),
         resume_session_id: run.resume_session_id.clone(),
         images,
+        files,
         approval,
     };
 

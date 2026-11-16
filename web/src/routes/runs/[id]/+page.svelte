@@ -24,7 +24,7 @@
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
-	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
+	import { Attachments } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
@@ -380,7 +380,7 @@
 			<form class="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 pt-3 pb-4 short:pt-2 short:pb-2 max-md:px-3 max-md:pt-2 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]" onsubmit={send}>
 				<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
 					{#if attachments.dragging}
-						<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images to attach them</div>
+						<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images or files to attach them</div>
 					{/if}
 					<label for="reply" class="sr-only">Reply</label>
 					<textarea
@@ -411,10 +411,10 @@
 						{#if thread?.context && thread.context.agent === agent}
 							<ContextMeter context={thread.context.context} agent={agent} class="ml-auto max-sm:hidden" />
 						{/if}
-						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canReply} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
+						<button type="button" aria-label="Attach files" title="Attach images or files: markdown, text, code, PDFs (or drop or paste them)" disabled={!canReply} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
 							<Paperclip class="size-4" />
 						</button>
-						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
+						<input bind:this={picker} type="file" multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
 						<!-- While it runs and the box is empty, Stop stands in for Send; a draft only gets Queue. -->
 						{#if live && !reply.trim()}
 							<button type="button" aria-label={stopping || latest?.stop_requested ? 'Stopping' : 'Stop'} title={stopping || latest?.stop_requested ? 'Stopping…' : 'Stop this message and any queued after it'} disabled={stopping || !!latest?.stop_requested} onclick={askStop} class="grid size-8 shrink-0 place-items-center rounded-full bg-err-soft text-err-ink hover:bg-err/20 disabled:animate-pulse disabled:opacity-50">

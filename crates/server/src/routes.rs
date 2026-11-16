@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
-    HeartbeatRequest, HeartbeatResponse, ImageUpload, LiveTextRequest, WorktreeCleanupRequest, WorktreeCleanupResult, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
+    HeartbeatRequest, HeartbeatResponse, FileUpload, ImageUpload, LiveTextRequest, WorktreeCleanupRequest, WorktreeCleanupResult, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
+    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_FILES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
         .route("/v1/runs/{id}/approvals/{approval}/deny", post(deny_tool))
         .route("/v1/images/{id}", get(get_image))
+        .route("/v1/files/{id}", get(get_file))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}", axum::routing::delete(delete_worker))
         .route("/v1/workers/{id}/update", post(request_update))
@@ -121,6 +122,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/runs/{id}/approvals", post(request_approval))
         .route("/v1/worker/runs/{id}/approvals/{approval}", get(poll_approval))
         .route("/v1/worker/images/{id}", get(worker_get_image))
+        .route("/v1/worker/files/{id}", get(worker_get_file))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route("/v1/worker/prs", post(report_prs))
         // Workers gzip what they post (see HeartbeatResponse::accepts_gzip): smaller, and a
@@ -303,6 +305,7 @@ async fn start_run(
         return Err(ApiError(StatusCode::BAD_REQUEST, "repo must be a relative repo name".into()));
     }
     check_images(&req.images)?;
+    check_files(&req.files)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     check_full_access(caller, mode)?;
     check_ask_agent(mode, agent)?;
@@ -335,6 +338,7 @@ async fn start_run(
         pinned_worker_id: worker,
         failover: req.failover,
         images: &req.images,
+        files: &req.files,
         created_by: caller.user_id(),
         room_id: room.as_ref().map(|r| r.id),
         context: brief.as_deref(),
@@ -525,6 +529,7 @@ async fn follow_up(
         a => Some(parse_agent(a)?),
     };
     check_images(&req.images)?;
+    check_files(&req.files)?;
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     if let Some(a) = agent {
         check_ask_agent(mode, a)?;
@@ -558,6 +563,7 @@ async fn follow_up(
         req.effort.as_deref().map(str::trim),
         mode,
         &req.images,
+        &req.files,
         caller.user_id(),
         update.as_deref(),
     )
@@ -702,6 +708,56 @@ async fn get_run(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Run>, ApiError> {
     db::get_run(&state.pool, caller.org_id(), id).await?.map(Json).ok_or_else(not_found)
+}
+
+/// Attached files: any type (the agent reads them), but not too many or too large.
+fn check_files(files: &[FileUpload]) -> Result<(), ApiError> {
+    use base64::Engine;
+    let bad = |m: String| Err(ApiError(StatusCode::BAD_REQUEST, m));
+    if files.len() > MAX_ATTACHED_FILES {
+        return bad(format!("at most {MAX_ATTACHED_FILES} files per message"));
+    }
+    for f in files {
+        match base64::engine::general_purpose::STANDARD.decode(&f.data) {
+            Ok(b) if b.len() > db::MAX_FILE_BYTES => return bad(format!("{} is over {} MB", db::clean_file_name(&f.name), db::MAX_FILE_BYTES / 1024 / 1024)),
+            Ok(_) => {}
+            Err(_) => return bad(format!("{} is not valid base64", db::clean_file_name(&f.name))),
+        }
+    }
+    Ok(())
+}
+
+/// An attached file, for the page. Always a download, never shown inline: a
+/// file of any type served from this origin (HTML, SVG) could otherwise run script.
+async fn get_file(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    file_response(&state, caller.org_id(), id).await
+}
+
+/// An attached file, for the worker that runs its message.
+async fn worker_get_file(State(state): State<AppState>, Extension(auth): Extension<WorkerAuth>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    for org in &auth.orgs {
+        if db::get_file(&state.pool, *org, id).await?.is_some() {
+            return file_response(&state, *org, id).await;
+        }
+    }
+    Err(ApiError(StatusCode::NOT_FOUND, "file not found".into()))
+}
+
+async fn file_response(state: &AppState, org: Uuid, id: Uuid) -> Result<Response, ApiError> {
+    let (name, data) = db::get_file(&state.pool, org, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "file not found".into()))?;
+    // ASCII fallback plus the UTF-8 name (RFC 6266).
+    let ascii: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._- ".contains(c) { c } else { '_' }).collect();
+    let utf8: String = name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"._-".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{utf8}")),
+            (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_string()),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        data,
+    )
+        .into_response())
 }
 
 /// An image from a tool result. Fetched by the page with its key, never embedded by URL.

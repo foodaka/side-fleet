@@ -33,6 +33,7 @@ fn spec(task: &str) -> AgentSpec {
         extra_args: vec![],
         resume_session_id: None,
         images: vec![],
+        files: vec![],
         approval: None,
     }
 }
@@ -195,6 +196,30 @@ fn attached_images_reach_each_agent() {
     s.images = vec![img];
     assert!(s.args().contains(&"--file=/tmp/sidefleet-images/r1/image-1.png".to_string()));
     assert_eq!(s.stdin(), Some("what is wrong here?"));
+}
+
+#[test]
+fn attached_files_reach_each_agent() {
+    let f = std::path::PathBuf::from("/tmp/sidefleet-images/r1/files/notes.md");
+    let mut s = spec("follow these notes");
+    s.files = vec![f.clone()];
+    // Claude Code: told where the file is, and allowed to read that folder.
+    let a = s.args();
+    assert!(a[1].starts_with("follow these notes") && a[1].contains("attached a file") && a[1].contains("/tmp/sidefleet-images/r1/files/notes.md"), "{}", a[1]);
+    assert!(a.contains(&"--add-dir=/tmp/sidefleet-images/r1/files".to_string()));
+
+    // Codex has no file flag: the path goes in the task, after `--`.
+    let mut s = agent_spec(Agent::Codex, "follow these notes");
+    s.files = vec![f.clone()];
+    let a = s.args();
+    assert!(!a.iter().any(|x| x.starts_with("--image")));
+    let task = a.last().unwrap();
+    assert!(task.starts_with("follow these notes") && task.contains("/tmp/sidefleet-images/r1/files/notes.md") && !task.contains("Read tool"), "{task}");
+
+    let mut s = agent_spec(Agent::Opencode, "follow these notes");
+    s.files = vec![f];
+    assert!(s.args().contains(&"--file=/tmp/sidefleet-images/r1/files/notes.md".to_string()));
+    assert_eq!(s.stdin(), Some("follow these notes"));
 }
 
 #[tokio::test]

@@ -30,7 +30,7 @@
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
-	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
+	import { Attachments } from '#lib/sf/attach.svelte';
 	import DiffStat from '#lib/sf/diff/DiffStat.svelte';
 
 	const id = $derived(page.params.id ?? '');
@@ -142,7 +142,7 @@
 	let starting = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
-	// Images for the new task: dropped anywhere on the page, pasted into the box, or picked with the paperclip.
+	// Images and files for the new task: dropped anywhere on the page, pasted into the box, or picked with the paperclip.
 	const attachments = new Attachments();
 	const canAttach = $derived(!!room && !room.archived_at);
 	$effect(() => {
@@ -180,7 +180,7 @@
 		try {
 			const r = await api<{ id: string }>(`/v1/rooms/${room.id}/tasks`, {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: effectivePerm, worker_id: pinned?.id, images: await attachments.payload() })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, permission_mode: effectivePerm, worker_id: pinned?.id, ...(await attachments.payload()) })
 			});
 			task = '';
 			attachments.clear();
@@ -427,7 +427,7 @@
 				<form class="flex flex-col gap-1.5" onsubmit={startTask}>
 					<div class="relative rounded-2xl border border-input bg-card focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
 						{#if attachments.dragging}
-							<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images to attach them</div>
+							<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[13px] text-muted-foreground">Drop images or files to attach them</div>
 						{/if}
 						<label for="room-task" class="sr-only">New task in this room</label>
 						<textarea
@@ -452,10 +452,10 @@
 								unavailable={(a) => (withRepo.some((w) => hasAgent(w, a)) ? '' : `Not on a machine of yours with ${repoLabel(room?.repo)}`)}
 							/>
 							<ComposerOptions {agent} perm={effectivePerm} onperm={(v) => (perm = v)} defaultPerm={prefs.permissionFor(agent, true)} {machines} machine={pinned?.id ?? ''} onmachine={(v) => (machine = v)} size="sm" />
-							<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" disabled={!canAttach} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
+							<button type="button" aria-label="Attach files" title="Attach images or files: markdown, text, code, PDFs (or drop or paste them)" disabled={!canAttach} onclick={() => picker?.click()} class="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40">
 								<Paperclip class="size-4" />
 							</button>
-							<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
+							<input bind:this={picker} type="file" multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
 							<button type="submit" aria-label="Start task" title={blocked || undefined} disabled={!canStart} class="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 								<ArrowUp class="size-4" strokeWidth={2.2} />
 							</button>

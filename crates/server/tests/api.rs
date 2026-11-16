@@ -1396,6 +1396,59 @@ async fn images_attached_to_tasks_and_replies_reach_the_worker() {
 }
 
 #[tokio::test]
+async fn files_attached_to_tasks_and_replies_reach_the_worker_as_downloads() {
+    use base64::Engine;
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let md = b"# Plan\n\n- do the thing\n".to_vec();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&md);
+    let body = |files: Value| json!({"task": "follow the plan", "model": "claude-sonnet-5-5", "repo": "r", "files": files});
+
+    for (files, why) in [
+        (json!([{"name": "a.md", "data": "not base64!"}]), "not base64"),
+        (json!(vec![json!({"name": "a.md", "data": b64}); 9]), "too many"),
+    ] {
+        let r = api.dev(reqwest::Method::POST, "/v1/runs").json(&body(files)).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{why}");
+    }
+
+    // Any type, and the name loses its folders.
+    let id = create_id(&api, body(json!([{"name": "../../docs/plan.md", "media_type": "text/markdown", "data": b64}]))).await;
+    let run = api.claim("w1", &["r"]).await.unwrap();
+    assert_eq!(run.id, id);
+    assert_eq!(run.files.len(), 1);
+    assert_eq!(run.files[0].name, "plan.md");
+    assert_eq!(run.files[0].media_type, "text/markdown");
+    assert_eq!(run.files[0].bytes, md.len());
+    assert_eq!(api.get_run(id).await.files, run.files, "the page sees them too");
+    let r = api.worker(reqwest::Method::GET, &format!("/v1/worker/files/{}", run.files[0].id)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), md.as_slice());
+
+    // The page only ever gets it as a download, whatever its type.
+    let r = api.dev(reqwest::Method::GET, &format!("/v1/files/{}", run.files[0].id)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "application/octet-stream");
+    assert!(r.headers()["content-disposition"].to_str().unwrap().starts_with("attachment; filename=\"plan.md\""));
+    let r = Client::new().get(format!("{}/v1/files/{}", env.base_url, run.files[0].id)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "needs the key");
+
+    // A reply carries its own files.
+    api.post_events("w1", id, json!([{"kind": "agent_init", "payload": {"model": "claude-sonnet-5-5", "session_id": "s1"}}])).await;
+    api.finish("w1", id, "succeeded", json!({"session_id": "s1"})).await;
+    let r = api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/messages"))
+        .json(&json!({"task": "and these", "files": [{"name": "a.txt", "data": b64}, {"name": "b.csv", "data": b64}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let next = api.claim("w1", &["r"]).await.unwrap();
+    assert_eq!(next.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["a.txt", "b.csv"]);
+    assert_eq!(next.files[0].media_type, "application/octet-stream", "no type given");
+
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn a_queued_message_follows_a_failover_run_to_its_new_machine() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

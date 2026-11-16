@@ -4,6 +4,15 @@ import { fleet } from './state.svelte';
 import type { AgentId, ApprovalStatus, Run, RunEvent } from './types';
 import { agentName } from './format';
 import type { DiffSet } from './diff/parse';
+import type { AttachedPayload } from './attach.svelte';
+
+/** A file the user attached, stored on the control plane (`GET /v1/files/:id`, always a download). */
+export interface FileRef {
+	id: string;
+	name: string;
+	media_type: string;
+	bytes: number;
+}
 
 /** An image from a tool result, stored on the control plane (`GET /v1/images/:id`). */
 export interface ImageRef {
@@ -159,14 +168,15 @@ export class Thread {
 	 * Send a follow-up on the same session. While a message runs, it waits behind it.
 	 * With another agent the thread switches to it: it starts its own session with the conversation so far.
 	 */
-	async reply(text: string, permission?: string, images: { media_type: string; data: string }[] = [], agent?: { agent: AgentId; model: string }, effort?: string) {
+	async reply(text: string, permission?: string, attached: AttachedPayload = { images: [], files: [] }, agent?: { agent: AgentId; model: string }, effort?: string) {
 		const root = this.root!;
 		const body: Record<string, unknown> = { task: text };
 		if (permission) body.permission_mode = permission;
 		// '' goes back to the agent's default; absent keeps the thread's.
 		if (effort !== undefined) body.effort = effort;
 		if (agent) Object.assign(body, agent);
-		if (images.length) body.images = images;
+		if (attached.images.length) body.images = attached.images;
+		if (attached.files.length) body.files = attached.files;
 		const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(body) });
 		const run = await api<Run>(`/v1/runs/${r.id}`);
 		this.runs.push(run);

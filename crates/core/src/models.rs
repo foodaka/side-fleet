@@ -100,6 +100,9 @@ pub struct Run {
     /// Images the user attached to this message (`GET /v1/images/:id`, `/v1/worker/images/:id`).
     #[serde(default)]
     pub images: Vec<ImageRef>,
+    /// Other files the user attached: markdown, text, code, PDFs (`GET /v1/files/:id`, `/v1/worker/files/:id`).
+    #[serde(default)]
+    pub files: Vec<FileRef>,
     /// `agent` (the coding agent works on the task), `restore` (the worker puts
     /// the thread's worktree back to the snapshot in `restore_to`), `pr` (the
     /// worker commits and pushes the thread's branch and opens a pull request) or
@@ -194,6 +197,29 @@ pub struct ImageUpload {
 
 /// Images one message may carry.
 pub const MAX_ATTACHED_IMAGES: usize = 8;
+
+/// A stored file the user attached, as runs refer to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileRef {
+    pub id: Uuid,
+    /// The file's own name (no folders), as the agent sees it.
+    pub name: String,
+    pub media_type: String,
+    pub bytes: usize,
+}
+
+/// A file sent with a task or reply: its `name` and base64 `data`. Any type;
+/// the agent is told where it is and reads it (or `--file` for opencode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileUpload {
+    pub name: String,
+    #[serde(default)]
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Files (other than images) one message may carry.
+pub const MAX_ATTACHED_FILES: usize = 8;
 
 pub fn default_agent() -> Agent {
     Agent::Claude
@@ -538,6 +564,9 @@ pub struct CreateRunRequest {
     /// Images for the agent to look at, up to `MAX_ATTACHED_IMAGES`.
     #[serde(default)]
     pub images: Vec<ImageUpload>,
+    /// Files for the agent to read, up to `MAX_ATTACHED_FILES`.
+    #[serde(default)]
+    pub files: Vec<FileUpload>,
     /// Start later: no machine picks the task up before this time (at most
     /// `MAX_START_DELAY_DAYS` ahead). Absent: as soon as a machine can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -564,6 +593,9 @@ pub struct FollowUpRequest {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub images: Vec<ImageUpload>,
+    /// Files for the agent to read, up to `MAX_ATTACHED_FILES`.
+    #[serde(default)]
+    pub files: Vec<FileUpload>,
 }
 
 /// Fork a thread at a message into a new thread, with any agent and model.

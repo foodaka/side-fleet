@@ -15,6 +15,7 @@
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import ToolImages from './ToolImages.svelte';
+	import AttachedFiles from './AttachedFiles.svelte';
 	import ChangesCard from '../diff/ChangesCard.svelte';
 	import ForkDialog from './ForkDialog.svelte';
 	import type { Turn } from '../thread.svelte';
@@ -107,6 +108,9 @@
 	{#if first && run.images?.length}
 		<ToolImages images={run.images} inset={false} alt="Attached to the task" />
 	{/if}
+	{#if first && run.files?.length}
+		<AttachedFiles files={run.files} />
+	{/if}
 	{#if run.room_id && run.kind === 'agent' && !run.forked_from && run.context}
 		<details class="self-end text-[11.5px] text-muted-foreground max-w-[85%]">
 			<summary class="cursor-pointer text-right select-none hover:text-foreground">Room brief sent with this message</summary>
@@ -145,6 +149,7 @@
 		<Message from="user">
 			<MessageContent class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap text-primary-foreground group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground">{run.task}</MessageContent>
 			{#if run.images?.length}<div class="self-end"><ToolImages images={run.images} inset={false} alt="Attached to the message" /></div>{/if}
+			{#if run.files?.length}<AttachedFiles files={run.files} class="self-end justify-end" />{/if}
 			{#if waiting}
 				<span class="flex items-center gap-2 self-end text-[11px] text-muted-foreground">
 					<span>Queued, sends when the current message finishes</span>

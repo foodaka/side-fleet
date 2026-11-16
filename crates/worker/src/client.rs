@@ -343,6 +343,19 @@ impl ControlClient {
         Ok(r.bytes().await?.to_vec())
     }
 
+    /// A file attached to a task, as stored on the control plane.
+    pub async fn file(&self, id: Uuid) -> Result<Vec<u8>> {
+        let r = self
+            .http
+            .get(self.url(&format!("/v1/worker/files/{id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("file request failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.bytes().await?.to_vec())
+    }
+
     pub async fn finish(&self, run_id: Uuid, status: RunStatus, result: Option<Value>, usage_limit: Option<UsageLimit>) -> Result<Run> {
         let req = self.http.post(self.url(&format!("/v1/worker/runs/{run_id}/finish?worker_id={}", self.worker_id))).bearer_auth(&self.token);
         let r = self

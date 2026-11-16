@@ -34,6 +34,8 @@ export interface Run {
 	resume_from_branch: string | null;
 	/** Images the user attached to this message. */
 	images?: { id: string; media_type: string; bytes: number }[];
+	/** Other files the user attached (markdown, text, code, PDFs). */
+	files?: { id: string; name: string; media_type: string; bytes: number }[];
 	/** `restore` runs put the thread's worktree back to a snapshot instead of running the agent;
 	 * `pr` runs push the thread's branch and open a pull request. */
 	kind: 'agent' | 'restore' | 'pr' | 'integrate';

@@ -55,8 +55,8 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Live, and a conversation**: events stream over SSE within milliseconds, survive reloads and
   dropped connections, and replies resume the same agent session like a chat. Reply while it works
   and the message waits its turn, or press Send now to interrupt. Screenshots and other images the
-  agent opens show inline, so you can ask for one from your phone. Drop, paste or attach images to a
-  task or reply and the agent gets them too.
+  agent opens show inline, so you can ask for one from your phone. Drop, paste or attach images or files
+  (markdown, text, code, PDFs) to a task or reply and the agent gets them too.
 - **Waiting on you**: a bell lists every task that needs you, with why and for how long: finished
   and waiting for a reply, failed, paused on a usage limit, or its machine dropped. Each such task
   also gets a marker in the sidebar. A task leaves the list when you open it, reply or dismiss it,

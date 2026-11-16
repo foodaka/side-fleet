@@ -17,7 +17,7 @@
 	import AddMachine from '#lib/sf/ui/AddMachine.svelte';
 	import Onboarding from '#lib/sf/ui/Onboarding.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
-	import { Attachments, IMAGE_TYPES } from '#lib/sf/attach.svelte';
+	import { Attachments } from '#lib/sf/attach.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import StartAtPicker from '#lib/sf/ui/StartAtPicker.svelte';
@@ -135,7 +135,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, images: await attachments.payload(), start_at: startAt || undefined })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined })
 			});
 			task = '';
 			startAt = '';
@@ -222,7 +222,7 @@
 			<h1 class="text-center text-[28px] leading-tight font-medium tracking-tight">What should run?</h1>
 			<div class="relative rounded-2xl border border-input bg-card shadow-[0_1px_3px_rgb(0_0_0/0.04)] transition-shadow focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--ring)_8%,transparent)]">
 				{#if attachments.dragging}
-					<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[14px] text-muted-foreground">Drop images to attach them</div>
+					<div class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-primary/40 bg-card/90 text-[14px] text-muted-foreground">Drop images or files to attach them</div>
 				{/if}
 				<label for="task" class="sr-only">Task</label>
 				<textarea
@@ -279,10 +279,10 @@
 					</div>
 					<span class="flex shrink-0 items-center gap-2">
 						{#if task.length > 2000}<span class="tnum text-xs text-faint">{task.length.toLocaleString()} characters</span>{/if}
-						<button type="button" aria-label="Attach images" title="Attach images (or drop or paste them)" onclick={() => picker?.click()} class="grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground">
+						<button type="button" aria-label="Attach files" title="Attach images or files: markdown, text, code, PDFs (or drop or paste them)" onclick={() => picker?.click()} class="grid size-8 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground">
 							<Paperclip class="size-4" />
 						</button>
-						<input bind:this={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
+						<input bind:this={picker} type="file" multiple hidden onchange={(e) => { attachments.add(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
 						{#if task.trim()}<a href="#/settings" title="Change which key sends in Settings" class="hidden items-center gap-1 text-xs text-faint hover:text-muted-foreground sm:flex pointer-coarse:hidden">{#each prefs.sendKeys('task') as k (k)}<Kbd>{k}</Kbd>{/each}</a>{/if}
 						<button type="submit" disabled={!canRun} aria-label="Run task" class="grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-opacity disabled:opacity-25">
 							<ArrowUp class="size-4" strokeWidth={2.2} />

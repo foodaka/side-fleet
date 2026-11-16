@@ -65,6 +65,8 @@ pub struct AgentSpec {
     pub resume_session_id: Option<String>,
     /// Image files the user attached, for the agent to look at.
     pub images: Vec<PathBuf>,
+    /// Other files the user attached (markdown, text, code, PDFs), for the agent to read.
+    pub files: Vec<PathBuf>,
     /// "Ask me" with Claude Code: where its permission prompts go (see [`crate::approval`]).
     pub approval: Option<ApprovalHook>,
 }
@@ -88,23 +90,38 @@ impl AgentSpec {
         }
     }
 
-    /// The task as the agent gets it. Claude Code has no image flag: it is told
-    /// where the images are and opens them with its Read tool. Its `ultrathink`
+    /// The task as the agent gets it. Claude Code has no image or file flag: it
+    /// is told where they are and opens them with its Read tool. Codex gets
+    /// images as flags and is told where the files are. Claude Code's `ultrathink`
     /// and `ultracode` are keywords in the message, not flags.
     fn prompt(&self) -> String {
-        if self.agent != Agent::Claude {
-            return self.task.clone();
-        }
         let mut p = self.task.clone();
+        match self.agent {
+            Agent::Opencode => return p,
+            Agent::Codex => {
+                if !self.files.is_empty() {
+                    p.push_str(&Self::attached_note("a file", "files", "read", "", &self.files));
+                }
+                return p;
+            }
+            Agent::Claude => {}
+        }
         if let Some(k @ ("ultrathink" | "ultracode")) = self.effort.as_deref() {
             p.push_str(&format!("\n\n{k}"));
         }
-        if self.images.is_empty() {
-            return p;
+        if !self.images.is_empty() {
+            p.push_str(&Self::attached_note("an image", "images", "open", " with the Read tool", &self.images));
         }
-        let paths: Vec<String> = self.images.iter().map(|p| p.to_string_lossy().to_string()).collect();
-        format!("{p}\n\nThe user attached {} for this message; open {} with the Read tool:\n{}",
-            if paths.len() == 1 { "an image" } else { "images" }, if paths.len() == 1 { "it" } else { "them" }, paths.join("\n"))
+        if !self.files.is_empty() {
+            p.push_str(&Self::attached_note("a file", "files", "read", " with the Read tool", &self.files));
+        }
+        p
+    }
+
+    fn attached_note(one: &str, many: &str, verb: &str, how: &str, paths: &[PathBuf]) -> String {
+        let list: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let (what, them) = if list.len() == 1 { (one, "it") } else { (many, "them") };
+        format!("\n\nThe user attached {what} for this message; {verb} {them}{how}:\n{}", list.join("\n"))
     }
 
     /// Claude Code's `--effort` level: ultracode runs at xhigh, ultrathink at the session's default.
@@ -148,8 +165,9 @@ impl AgentSpec {
             a.push("--max-turns".into());
             a.push(n.to_string());
         }
-        // The images live outside the workspace; let Claude Code read them.
-        let mut dirs: Vec<&std::path::Path> = self.images.iter().filter_map(|p| p.parent()).collect();
+        // The images and files live outside the workspace; let Claude Code read them.
+        let mut dirs: Vec<&std::path::Path> = self.images.iter().chain(&self.files).filter_map(|p| p.parent()).collect();
+        dirs.sort();
         dirs.dedup();
         for d in dirs {
             a.push(format!("--add-dir={}", d.to_string_lossy()));
@@ -189,7 +207,7 @@ impl AgentSpec {
         if let Some(sid) = &self.resume_session_id {
             a.push(sid.clone());
         }
-        a.push(self.task.clone());
+        a.push(self.prompt());
         a
     }
 
@@ -209,8 +227,8 @@ impl AgentSpec {
             "bypassPermissions" => a.push("--dangerously-skip-permissions".into()),
             _ => {}
         }
-        for img in &self.images {
-            a.push(format!("--file={}", img.to_string_lossy()));
+        for f in self.images.iter().chain(&self.files) {
+            a.push(format!("--file={}", f.to_string_lossy()));
         }
         a
     }

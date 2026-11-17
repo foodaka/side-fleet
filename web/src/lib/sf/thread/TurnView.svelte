@@ -11,7 +11,7 @@
 	import GitMerge from '@lucide/svelte/icons/git-merge';
 	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
 	import { fleet } from '../state.svelte';
-	import { agentModel, agentName, clock, effortName, permName, repoLabel, scheduled, startTime, until } from '../format';
+	import { agentModel, agentName, clock, durationMs, effortName, permName, repoLabel, scheduled, startTime, until } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import ToolImages from './ToolImages.svelte';
@@ -236,9 +236,9 @@
 		{#if turn.result}
 			<p class="tnum flex flex-wrap gap-x-3 pt-1 text-xs text-muted-foreground">
 				{#if !turn.result.ok}<span class="text-err-ink">{agentName(run.agent)} reported an error{turn.result.subtype && turn.result.subtype !== 'error' ? ` (${turn.result.subtype})` : ''}</span>{/if}
-				{#if turn.result.durationMs != null}<span>{(turn.result.durationMs / 1000).toFixed(1)}s</span>{/if}
+				{#if turn.result.durationMs != null}<span>{durationMs(turn.result.durationMs)}</span>{/if}
 				{#if turn.result.turns != null}<span>{turn.result.turns} turn{turn.result.turns === 1 ? '' : 's'}</span>{/if}
-				{#if turn.result.cost != null}<span>${turn.result.cost.toFixed(4)}</span>{:else if turn.result.tokens}<span>{turn.result.tokens.toLocaleString()} tokens</span>{/if}
+				{#if turn.result.cost != null}<span>${turn.result.cost.toFixed(2)}</span>{:else if turn.result.tokens}<span>{turn.result.tokens.toLocaleString()} tokens</span>{/if}
 			</p>
 		{/if}
 

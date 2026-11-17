@@ -14,6 +14,7 @@
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import Sidebar from '#lib/sf/ui/Sidebar.svelte';
 	import SignIn from '#lib/sf/ui/SignIn.svelte';
+	import ConnectionError from '#lib/sf/ui/ConnectionError.svelte';
 	import NewOrgDialog from '#lib/sf/ui/NewOrgDialog.svelte';
 	import MyMachinesDialog from '#lib/sf/ui/MyMachinesDialog.svelte';
 	import RenameOrgDialog from '#lib/sf/ui/RenameOrgDialog.svelte';
@@ -198,12 +199,16 @@
 		</DialogPrimitive.Root>
 
 		<main class="min-w-0 flex-1">
+			{#if fleet.conn === 'unreachable' && !fleet.loaded}
+				<ConnectionError />
+			{:else}
 			{#if fleet.conn === 'unreachable' && fleet.loaded}
 				<div class="border-b border-queue/30 bg-queue-soft px-4 py-2 text-center text-xs text-queue-ink" role="status">
 					Lost contact with the control plane. Retrying every few seconds; what you see may be out of date.
 				</div>
 			{/if}
 			{@render children()}
+			{/if}
 		</main>
 	</div>
 </Tooltip.Provider>

@@ -213,7 +213,7 @@
 			{/each}
 			{#if live && turn.liveText}
 				<!-- Takes the place of the final message, which lands here when it is complete. -->
-				<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.liveText} /></div>
+				<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.liveText} isAnimating /></div>
 			{/if}
 		</div>
 

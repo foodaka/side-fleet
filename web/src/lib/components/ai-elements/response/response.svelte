@@ -12,6 +12,7 @@
 	import githubDarkDefault from '@shikijs/themes/github-dark-default';
 	import githubLightDefault from '@shikijs/themes/github-light-default';
 	import { cn } from '#lib/utils';
+	import StreamingCode from './streaming-code.svelte';
 	type Props = StreamdownProps;
 
 	let { content, class: className, components, ...restProps }: Props = $props();
@@ -30,6 +31,7 @@
 			'github-dark-default': githubDarkDefault
 		}}
 		// plugins={{ code, mermaid, math, cjk }}
+		components={{ code: StreamingCode, ...components }}
 		{...restProps}
 	/>
 </div>

@@ -77,7 +77,7 @@
 	const q = $derived(query.trim().toLowerCase());
 	// Archived tasks are searched too once their list has been opened.
 	const matches = $derived(
-		q ? [...fleet.runs, ...(fleet.archived ?? [])].filter((r) => [r.task, repoLabel(r.repo), r.worker_id ?? ''].some((s) => s.toLowerCase().includes(q))) : []
+		q ? [...fleet.runs, ...(fleet.archived ?? [])].filter((r) => [r.task, repoLabel(r.repo), r.worker_id ?? '', fleet.workerName(r.latest_worker_id)].some((s) => s.toLowerCase().includes(q))) : []
 	);
 
 	// Threads waiting on you first, then running, then queued, then those scheduled for later (soonest first).
@@ -151,7 +151,7 @@
 						<span class="font-medium text-queue-ink">Waiting on you{#if r.pending_approvals! > 1}&nbsp;· {r.pending_approvals} tool calls{/if}</span>
 					{:else if detail}
 						{#if r.thread_status === 'running'}
-							<span class="flex min-w-0 gap-1"><span class="truncate">{r.latest_worker_id ?? 'Starting'}</span><span class="shrink-0">· {duration(r.started_at, null, fleet.now) || 'starting'}</span></span>
+							<span class="flex min-w-0 gap-1"><span class="truncate">{r.latest_worker_id ? fleet.workerName(r.latest_worker_id) : 'Starting'}</span><span class="shrink-0">· {duration(r.started_at, null, fleet.now) || 'starting'}</span></span>
 						{:else if r.start_at && later(r)}
 							Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 						{:else}
@@ -160,7 +160,7 @@
 					{:else if asleep}
 						<AlarmClock class="mr-1 inline size-3 align-[-2px]" />Back {wakeLabel(r.snoozed_until!, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
 					{:else}
-						{[other ? repoLabel(r.repo) : null, fleet.workers.length > 1 ? r.latest_worker_id : null].filter(Boolean).join(' · ')}
+						{[other ? repoLabel(r.repo) : null, fleet.workers.length > 1 ? fleet.workerName(r.latest_worker_id) : null].filter(Boolean).join(' · ')}
 					{/if}
 				</span>
 				<span class="flex max-w-[55%] shrink-0 items-center gap-1 text-faint" title="{agentModel(r.latest_agent, r.latest_model)}{r.latest_effort ? ` · ${r.latest_effort}` : ''}">

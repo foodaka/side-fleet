@@ -323,14 +323,19 @@
 				</div>
 				<ul class="flex flex-col">
 					{#each recent as r (r.id)}
+						{@const asking = !!r.pending_approvals && (r.thread_status === 'running' || r.thread_status === 'queued')}
 						<li>
 							<a href="#/runs/{r.id}" class="group flex items-center gap-3 rounded-lg px-2 py-2.5 text-[13px] hover:bg-accent/60">
-								<StatusDot status={r.thread_status} />
+								{#if asking}
+									<span aria-hidden="true" class="inline-block size-1.5 shrink-0 rounded-full bg-queue pulse-run"></span>
+								{:else}
+									<StatusDot status={r.thread_status} />
+								{/if}
 								<span class="min-w-0 flex-1 truncate">{r.task}</span>
 								{#if r.follow_ups}<span class="tnum hidden shrink-0 text-xs text-muted-foreground sm:inline">{r.follow_ups + 1} messages</span>{/if}
 								<span class="hidden shrink-0 font-mono text-[12px] text-muted-foreground sm:inline">{repoLabel(r.repo)}</span>
-								<span class="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">
-									{r.thread_status === 'running' ? duration(r.started_at, null, fleet.now) : rel(r.last_activity_at, fleet.now)}
+								<span class="tnum min-w-16 shrink-0 text-right text-xs {asking ? 'font-medium text-queue-ink' : 'text-muted-foreground'}">
+									{asking ? 'Needs you' : r.thread_status === 'running' ? duration(r.started_at, null, fleet.now) : rel(r.last_activity_at, fleet.now)}
 								</span>
 							</a>
 						</li>

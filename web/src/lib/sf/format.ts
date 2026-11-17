@@ -182,6 +182,9 @@ export function duration(start: string | null | undefined, end?: string | null, 
 	return Math.floor(s / 3600) + 'h ' + String(Math.round((s % 3600) / 60)).padStart(2, '0') + 'm';
 }
 
+/** A length of time given in milliseconds, in the same style: `42s`, `25m 00s`, `1h 05m`. */
+export const durationMs = (ms: number): string => duration(new Date(0).toISOString(), new Date(ms).toISOString());
+
 /** When a scheduled task starts: `14:30` today, `Tue 07:00` within a week, else `Nov 12, 07:00`. */
 export function startTime(iso: string, now = Date.now()): string {
 	const d = new Date(iso);

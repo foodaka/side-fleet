@@ -22,6 +22,10 @@ class Fleet {
 	setup = $state<Setup | null>(null);
 	conn = $state<Conn>('connecting');
 	loaded = $state(false);
+	/** Why the last refresh failed, in words; empty while it works. */
+	connError = $state('');
+	/** A refresh the person asked for (Retry) is in flight. */
+	retrying = $state(false);
 	/** Ticks every second so relative times and durations stay fresh. */
 	now = $state(Date.now());
 	pickerOpen = $state(false);
@@ -117,6 +121,7 @@ class Fleet {
 			if (!this.setup) this.setup = await api<Setup>('/v1/setup');
 			void this.#loadMembers();
 			this.conn = 'ok';
+			this.connError = '';
 			this.loaded = true;
 		} catch (e) {
 			// The remembered org is gone (left it, or another account): fall back to the first one.
@@ -125,6 +130,17 @@ class Fleet {
 				return;
 			}
 			this.conn = e instanceof Unauthorized ? 'unauthorized' : 'unreachable';
+			this.connError = e instanceof ApiError ? `The control plane answered ${e.status}: ${e.message}` : "The browser couldn't reach the control plane. Check that it is running and that this device can get to it.";
+		}
+	}
+
+	/** Try again now instead of waiting for the next poll. */
+	async retry() {
+		this.retrying = true;
+		try {
+			await this.refresh();
+		} finally {
+			this.retrying = false;
 		}
 	}
 
@@ -152,6 +168,11 @@ class Fleet {
 
 	reloadMembers() {
 		return this.#loadMembers(true);
+	}
+
+	/** A machine's name for people; its id when it isn't in the list (gone, or not loaded yet). */
+	workerName(id: string | null | undefined): string {
+		return id ? (this.workers.find((w) => w.id === id)?.display_name || id) : '';
 	}
 
 	/** A user's login, if they are in this org. */

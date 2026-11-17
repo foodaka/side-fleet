@@ -26,6 +26,7 @@
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import { Attachments } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
+	import PendingMessage from '#lib/sf/thread/PendingMessage.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
 	import ContextMeter from '#lib/sf/thread/ContextMeter.svelte';
@@ -150,14 +151,21 @@
 		sending = true;
 		try {
 			const pick = switching || model !== thread.latest?.model ? { agent, model } : undefined;
-			await thread.reply(reply.trim(), replyPerm || undefined, await attachments.payload(), pick, effort);
+			const payload = await attachments.payload();
+			// It shows in the thread at once; if the server can't take it, it says so there, with a Retry.
+			thread.reply(reply.trim(), replyPerm || undefined, payload, pick, effort);
 			reply = '';
 			attachments.clear();
-			void fleet.refresh();
 		} catch (err) {
+			// Only reading the attachments can fail here: the text stays in the box.
 			toast.error('Could not send', { description: (err as Error).message });
 		}
 		sending = false;
+	}
+	/** A message that couldn't go: its text goes back to the box, unless you have started another. */
+	function discard(key: string, text: string) {
+		if (!reply.trim()) reply = text;
+		thread?.discard(key);
 	}
 	async function sendNow() {
 		try { await thread?.interrupt(); } catch (err) { toast.error('Could not interrupt', { description: (err as Error).message }); }
@@ -323,7 +331,10 @@
 							ondecide={theirs ? undefined : (item, approve) => thread!.decide(item, approve).then(() => void fleet.refresh())}
 						/>
 					{/each}
-					{#if !live && thread.turns.length && thread.branch && (thread.changes?.file_count || pr)}
+					{#each thread.outbox as m (m.key)}
+						<PendingMessage msg={m} onretry={() => thread!.retry(m.key)} ondiscard={() => discard(m.key, m.text)} />
+					{/each}
+					{#if !live && !thread.outbox.length && thread.turns.length && thread.branch && (thread.changes?.file_count || pr)}
 						{@const branch = thread.branch}
 						<div class="flex items-center gap-3 rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground max-sm:flex-col max-sm:items-stretch">
 							<p class="flex-1">

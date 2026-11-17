@@ -217,8 +217,10 @@
 			{/if}
 		</div>
 
-		{#if live && turn.activity && turn.activity !== 'queued' && !turn.liveText}
-			<div class="flex items-center gap-2 py-1.5" role="status">
+		<!-- A fixed-height slot: while the agent is writing, the indicator hides but keeps its room, so nothing pops in and out (and moves) with every paragraph. -->
+		{#if live && turn.activity && turn.activity !== 'queued'}
+			{@const writing = !!turn.liveText}
+			<div class="flex h-8 items-center gap-2 {writing ? 'invisible' : ''}" role="status" aria-hidden={writing}>
 				<span class="size-1.5 rounded-full bg-run pulse-run"></span>
 				<Shimmer as="span" class="text-[13px]" content_length={turn.activity.length}>{turn.activity}</Shimmer>
 				{#if turn.reconnecting}<span class="text-xs text-queue-ink">reconnecting…</span>{/if}

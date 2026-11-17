@@ -15,6 +15,9 @@
 	type Props = StreamdownProps;
 
 	let { content, class: className, components, ...restProps }: Props = $props();
+	// Until shiki has loaded a language, a code block shows its lines as plain monospace text (same metrics and indentation as
+	// the highlighted ones) instead of Streamdown's grey pulsing bars, so highlighting only recolours the text.
+	const codeTheme = { code: { skeleton: 'rounded-none bg-transparent text-foreground scale-y-100 animate-none whitespace-pre' } };
 	let currentTheme = $derived(
 		mode.current === 'dark' ?  'github-dark-default' : 'github-light-default'
 	);
@@ -24,6 +27,7 @@
 	<Streamdown
 		{content}
 		baseTheme="shadcn"
+		theme={codeTheme}
 		shikiTheme={currentTheme}
 		shikiThemes={{
 			'github-light-default': githubLightDefault,

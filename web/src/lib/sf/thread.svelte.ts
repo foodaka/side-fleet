@@ -53,6 +53,14 @@ export type Item =
 	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string; href?: string }
 	| { kind: 'stderr'; key: string; text: string; at: string };
 
+/** A message you just sent that the server hasn't taken yet, or couldn't. It shows at once, in place of its turn. */
+export interface Outgoing {
+	key: string;
+	text: string;
+	status: 'sending' | 'failed';
+	error: string | null;
+}
+
 export interface Turn {
 	run: Run;
 	items: Item[];
@@ -125,7 +133,14 @@ export class Thread {
 	runs = $state<Run[]>([]);
 	turns = $state<Turn[]>([]);
 	error = $state<string | null>(null);
+	/** Messages on their way: shown straight away, then replaced by their turn once the server has them. */
+	outbox = $state<Outgoing[]>([]);
 	#abort = new AbortController();
+	#bodies = new Map<string, Record<string, unknown>>();
+	/** The id the server gave a message that went through, if loading its run failed (a retry must not send it twice). */
+	#sent = new Map<string, string>();
+	/** Messages go out one at a time, so they queue in the order they were sent. */
+	#sending: Promise<void> = Promise.resolve();
 
 	root = $derived(this.runs[0] ?? null);
 	latest = $derived(this.runs[this.runs.length - 1] ?? null);
@@ -167,9 +182,9 @@ export class Thread {
 	/**
 	 * Send a follow-up on the same session. While a message runs, it waits behind it.
 	 * With another agent the thread switches to it: it starts its own session with the conversation so far.
+	 * Returns at once: the message sits in `outbox` until the server has it, or says why it couldn't.
 	 */
-	async reply(text: string, permission?: string, attached: AttachedPayload = { images: [], files: [] }, agent?: { agent: AgentId; model: string }, effort?: string) {
-		const root = this.root!;
+	reply(text: string, permission?: string, attached: AttachedPayload = { images: [], files: [] }, agent?: { agent: AgentId; model: string }, effort?: string) {
 		const body: Record<string, unknown> = { task: text };
 		if (permission) body.permission_mode = permission;
 		// '' goes back to the agent's default; absent keeps the thread's.
@@ -177,11 +192,56 @@ export class Thread {
 		if (agent) Object.assign(body, agent);
 		if (attached.images.length) body.images = attached.images;
 		if (attached.files.length) body.files = attached.files;
-		const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(body) });
-		const run = await api<Run>(`/v1/runs/${r.id}`);
-		this.runs.push(run);
-		this.turns.push(newTurn(run));
-		void this.#follow(this.runs.length - 1);
+		const key = crypto.randomUUID();
+		this.#bodies.set(key, body);
+		this.outbox.push({ key, text, status: 'sending', error: null });
+		this.#deliver(key);
+	}
+
+	/** Try a message that failed again. */
+	retry(key: string) {
+		const m = this.outbox.find((x) => x.key === key);
+		if (!m || m.status !== 'failed') return;
+		m.status = 'sending';
+		m.error = null;
+		this.#deliver(key);
+	}
+
+	/** Drop a message that failed. */
+	discard(key: string) {
+		this.outbox = this.outbox.filter((x) => x.key !== key);
+		this.#bodies.delete(key);
+		this.#sent.delete(key);
+	}
+
+	#deliver(key: string) {
+		this.#sending = this.#sending.then(async () => {
+			try {
+				let id = this.#sent.get(key);
+				if (!id) {
+					const root = this.root!;
+					const r = await api<{ id: string }>(`/v1/runs/${root.id}/messages`, { method: 'POST', body: JSON.stringify(this.#bodies.get(key)) });
+					id = r.id;
+					this.#sent.set(key, id);
+				}
+				const run = await api<Run>(`/v1/runs/${id}`);
+				if (this.#abort.signal.aborted) return;
+				// Swap in one go, so the bubble never blinks out or shows twice.
+				this.runs.push(run);
+				this.turns.push(newTurn(run));
+				this.outbox = this.outbox.filter((x) => x.key !== key);
+				this.#bodies.delete(key);
+				this.#sent.delete(key);
+				void this.#follow(this.runs.length - 1);
+				void fleet.refresh();
+			} catch (e) {
+				const m = this.outbox.find((x) => x.key === key);
+				if (m) {
+					m.status = 'failed';
+					m.error = (e as Error).message;
+				}
+			}
+		});
 	}
 
 	/** Put the files back to how they were before `runId` started; the session carries on. */

@@ -1,9 +1,9 @@
 // Chat apps: the assistants people already chat with (Hermes, OpenClaw, Claude
-// Code) connect to the fleet over MCP at `/mcp`, with an API token. This is what
+// Code, Grok Bot) connect to the fleet over MCP at `/mcp`, with an API token. This is what
 // the Chat apps page offers and the setup it hands out for each one.
 import type { ApiScope } from './types';
 
-export type ChatAppId = 'hermes' | 'openclaw' | 'claude' | 'other';
+export type ChatAppId = 'hermes' | 'openclaw' | 'claude' | 'grok' | 'other';
 
 export interface ChatApp {
 	id: ChatAppId;
@@ -17,6 +17,7 @@ export const CHAT_APPS: ChatApp[] = [
 	{ id: 'hermes', name: 'Hermes', hint: 'Hermes Agent by Nous Research', canSelfSetup: true },
 	{ id: 'openclaw', name: 'OpenClaw', hint: 'Your OpenClaw assistant', canSelfSetup: true },
 	{ id: 'claude', name: 'Claude Code', hint: 'On your computer', canSelfSetup: true },
+	{ id: 'grok', name: 'Grok Bot', hint: 'Your Grok Bot assistant', canSelfSetup: false },
 	{ id: 'other', name: 'Something else', hint: 'Any app with MCP, or a script', canSelfSetup: false }
 ];
 
@@ -63,6 +64,7 @@ export function setupSnippet(app: ChatAppId, token: string): string {
 			return `openclaw mcp set sidefleet '${JSON.stringify({ url, transport: 'streamable-http', headers: { Authorization: `Bearer ${token}` } })}'`;
 		case 'claude':
 			return `claude mcp add --transport http --scope user sidefleet ${url} --header "Authorization: Bearer ${token}"`;
+		case 'grok':
 		case 'other':
 			return `URL: ${url}\nHeader: Authorization: Bearer ${token}`;
 	}
@@ -86,6 +88,12 @@ export function setupSteps(app: ChatAppId): { before: string; after: string } {
 				before: 'Run this in a terminal:',
 				after: 'Then start Claude Code (or a new session). Sidefleet shows up in /mcp.'
 			};
+		case 'grok':
+			return {
+				before:
+					'In Grok Bot, add a remote MCP server (name it Sidefleet) with this address and a custom header. Choose Streamable HTTP if it asks for a transport, and no OAuth: the header is the sign-in. Grok Bot connects from the internet, so this needs a Sidefleet reachable from the public internet (the hosted one is; a self-hosted one behind Tailscale is not).',
+				after: 'Once it is added, Grok Bot lists Sidefleet’s tools. Ask it what is on your fleet to check.'
+			};
 		case 'other':
 			return {
 				before: 'Add an MCP server to your app with this address and header (Streamable HTTP). A script can call the API at the same address with the same header.',
@@ -96,12 +104,12 @@ export function setupSteps(app: ChatAppId): { before: string; after: string } {
 
 /** A message to send the assistant so it sets itself up. */
 export function setupMessage(app: ChatAppId, token: string): string {
-	const how: Record<Exclude<ChatAppId, 'other'>, string> = {
+	const how: Record<Exclude<ChatAppId, 'other' | 'grok'>, string> = {
 		hermes: 'Add this MCP server to your config in ~/.hermes/config.yaml (under mcp_servers), then reload your MCP servers:',
 		openclaw: 'Run this command to add the Sidefleet MCP server:',
 		claude: 'Run this command to add the Sidefleet MCP server for all my projects:'
 	};
-	if (app === 'other') return setupSnippet(app, token);
+	if (app === 'other' || app === 'grok') return setupSnippet(app, token);
 	return [
 		'Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.',
 		how[app],
@@ -121,7 +129,8 @@ export const EXAMPLES = [
 // ---- updates in chat ----
 // Sidefleet tells the app when a task finishes, fails, needs an OK or gets a pull
 // request; the app turns that into a message in the chat. Claude Code has no
-// chat to message, so it doesn't get these.
+// chat to message, and Grok Bot has no webhook address to give yet, so neither
+// gets these.
 
 /** The app a connection was made for (its name is the app's). */
 export function appOf(name: string): ChatAppId {
@@ -129,7 +138,7 @@ export function appOf(name: string): ChatAppId {
 	return a?.id ?? 'other';
 }
 
-export const hasUpdates = (app: ChatAppId) => app !== 'claude';
+export const hasUpdates = (app: ChatAppId) => app !== 'claude' && app !== 'grok';
 
 export const updatesKind = (app: ChatAppId) => (app === 'hermes' ? 'hermes' : app === 'openclaw' ? 'openclaw' : 'webhook');
 
@@ -138,6 +147,7 @@ export const updatesPlaceholder: Record<ChatAppId, string> = {
 	hermes: 'https://my-server.example.com:8644',
 	openclaw: 'https://my-server.example.com:18789',
 	claude: '',
+	grok: '',
 	other: 'https://example.com/sidefleet-webhook'
 };
 

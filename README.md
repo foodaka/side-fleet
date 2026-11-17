@@ -71,7 +71,7 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
   the team's threads, diffs and PRs. Machines are not shared: each runs only its owner's tasks,
   under its owner's agent sign-in. To pick up a teammate's work, "Continue on my machine" forks it
   onto yours. See [Teams and rooms](#teams-and-rooms).
-- **Chat with your fleet**: connect the AI assistant you already chat with (Hermes, OpenClaw,
+- **Chat with your fleet**: connect the AI assistant you already chat with (Hermes, OpenClaw, Grok Bot,
   Claude Code or any MCP client) on the Chat apps page, and run and check tasks from Telegram,
   WhatsApp or Discord: "fix the failing test in my web repo", "how did it go?", "open a PR". You
   choose what it may do: check on tasks, run them, or also approve commands. With updates in chat

@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Chat apps: connect the assistant you already chat with (Hermes, OpenClaw,
-	// Claude Code) so it can run and check tasks on the fleet. Three steps on one
+	// Claude Code, Grok Bot) so it can run and check tasks on the fleet. Three steps on one
 	// card: pick the app, pick what it may do, add the setup it gets; then the page
 	// waits until the app first calls in, and offers updates in chat (the app
 	// messages you when a task finishes or needs an OK). Each connection is a
@@ -165,7 +165,7 @@
 				<div class="flex flex-col gap-3">
 					<p class="flex items-center gap-3 text-[14px] font-medium"><span class={step(true)}>1</span>Which assistant do you chat with?</p>
 					<div class="flex min-w-0 flex-col gap-3 sm:pl-9">
-						<div class="grid grid-cols-2 gap-2 sm:grid-cols-4" role="radiogroup" aria-label="Assistant">
+						<div class="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Assistant">
 							{#each CHAT_APPS as a (a.id)}
 								<button type="button" role="radio" aria-checked={app === a.id} disabled={!!fresh} class="{tile(app === a.id)} disabled:opacity-60" onclick={() => pick(a.id)}>
 									<span class="text-[13px] font-medium">{a.name}</span>

@@ -1773,6 +1773,8 @@ pub async fn upsert_worker(
 }
 
 /// Returns false when the worker is unknown or registered with a different token.
+/// Workers send Claude Code's commands only when they change, so a heartbeat
+/// without them keeps the ones stored.
 pub async fn heartbeat(
     pool: &PgPool,
     org: Uuid,
@@ -1781,7 +1783,12 @@ pub async fn heartbeat(
     caps: &Capabilities,
 ) -> sqlx::Result<bool> {
     let res = sqlx::query(
-        "UPDATE workers SET capabilities = $3, last_heartbeat_at = now(),
+        "UPDATE workers SET capabilities = CASE
+                WHEN $3::jsonb #> '{agents,claude}' IS NOT NULL AND NOT ($3::jsonb #> '{agents,claude}' ? 'commands')
+                     AND capabilities #> '{agents,claude,commands}' IS NOT NULL
+                THEN jsonb_set($3::jsonb, '{agents,claude,commands}', capabilities #> '{agents,claude,commands}')
+                ELSE $3::jsonb END,
+            last_heartbeat_at = now(),
             slots_parallel = $4, slots_active = $5
          WHERE id = $1 AND token_hash = $2 AND org_id = $6",
     )
@@ -1905,6 +1912,12 @@ pub async fn count_active_runs(pool: &PgPool, org: Uuid) -> sqlx::Result<i64> {
         .fetch_one(pool)
         .await?
         .get("n"))
+}
+
+/// One machine's capabilities in `org`.
+pub async fn worker_capabilities(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<Option<Capabilities>> {
+    let row = sqlx::query("SELECT capabilities FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await?;
+    Ok(row.map(|r| serde_json::from_value(r.get::<Value, _>("capabilities")).unwrap_or_default()))
 }
 
 pub async fn list_workers(pool: &PgPool, org: Uuid) -> sqlx::Result<Vec<Worker>> {

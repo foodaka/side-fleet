@@ -175,6 +175,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let cleaned = Arc::new(Mutex::new(None));
         tokio::spawn(async move {
             let mut agents_checked = Instant::now();
+            // Claude Code's commands as the control plane has them (register sent them): a long
+            // list that changes rarely, so heartbeats leave it out until it does.
+            let mut sent_commands = claude_commands(&*caps.lock().await);
             loop {
                 tokio::time::sleep(interval).await;
                 // Agents installed after start-up show up without a restart.
@@ -201,7 +204,13 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                     c.system = Some(detect::system_stats(&root));
                     c.slots = Some(Slots { parallel, active: active_count.load(Ordering::Relaxed) });
                 }
-                let snapshot = caps.lock().await.clone();
+                let mut snapshot = caps.lock().await.clone();
+                let commands = claude_commands(&snapshot);
+                if commands == sent_commands {
+                    if let Some(c) = snapshot.agents.claude.as_mut() {
+                        c.commands.clear();
+                    }
+                }
                 let ids: Vec<Uuid> = active.lock().await.keys().copied().collect();
                 // Ahead of the heartbeat, so its answer can't still ask for the cleanup reported here.
                 let report = cleaned.lock().await.take();
@@ -216,6 +225,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 }
                 match client.heartbeat(&snapshot, &ids).await {
                     Ok(resp) => {
+                        sent_commands = commands;
                         client.set_gzip(resp.accepts_gzip);
                         for id in resp.finished_runs {
                             end_finished_run(&running, id, END_GRACE);
@@ -250,6 +260,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                     Err(ClientError::NotRegistered) => {
                         tracing::warn!("control plane forgot us; re-registering");
                         register_with_backoff(&client, &cfg2, &caps, &active).await;
+                        sent_commands = claude_commands(&*caps.lock().await);
                     }
                     Err(e) => tracing::warn!(error = %e, "heartbeat failed"),
                 }
@@ -399,9 +410,13 @@ async fn register_with_backoff(
     }
 }
 
+fn claude_commands(caps: &Capabilities) -> Vec<sidefleet_core::SlashCommand> {
+    caps.agents.claude.as_ref().map(|c| c.commands.clone()).unwrap_or_default()
+}
+
 fn log_caps(caps: &Capabilities) {
     if let Some(c) = &caps.agents.claude {
-        tracing::info!(version = %c.version, signed_in = c.signed_in, error = c.sign_in_error.as_deref().unwrap_or(""), "claude code");
+        tracing::info!(version = %c.version, signed_in = c.signed_in, commands = c.commands.len(), error = c.sign_in_error.as_deref().unwrap_or(""), "claude code");
     }
     if let Some(c) = &caps.agents.codex {
         tracing::info!(version = %c.version, signed_in = ?c.signed_in, models = c.models.len(), "codex");
@@ -1298,7 +1313,7 @@ mod tests {
     }
 
     fn r(name: &str, id: &str) -> RepoInfo {
-        RepoInfo { name: name.into(), path: format!("/home/u/{name}"), id: id.into() }
+        RepoInfo { name: name.into(), path: format!("/home/u/{name}"), id: id.into(), commands: vec![] }
     }
 
     #[test]

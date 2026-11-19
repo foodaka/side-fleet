@@ -24,6 +24,7 @@
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
+	import SlashMenu from '#lib/sf/ui/SlashMenu.svelte';
 	import { Attachments } from '#lib/sf/attach.svelte';
 	import TurnView from '#lib/sf/thread/TurnView.svelte';
 	import PendingMessage from '#lib/sf/thread/PendingMessage.svelte';
@@ -122,6 +123,7 @@
 	let sending = $state(false);
 	let stopping = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
+	let slash: SlashMenu | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
 	const attachments = new Attachments();
 
@@ -402,9 +404,11 @@
 						disabled={!canReply}
 						onpaste={attachments.paste}
 						placeholder={switching ? `Message ${agentName(agent)}…` : live ? 'Queue your next message…' : 'Reply to continue on the same machine…'}
-						onkeydown={(e) => { if (prefs.sends(e, 'reply')) send(e); }}
+						onkeydown={(e) => { if (slash?.keydown(e)) return; if (prefs.sends(e, 'reply')) send(e); }}
+						aria-controls="reply-slash"
 						class="block max-h-[220px] min-h-11 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
 					></textarea>
+					<SlashMenu bind:this={slash} bind:value={reply} {box} worker={host[0]?.id} repo={root?.repo ?? ''} enabled={agent === 'claude'} placement="above" id="reply-slash" />
 					<AttachedImages {attachments} class="px-4 pt-1 pb-2" />
 					<div class="flex flex-wrap items-center gap-0.5 px-2 pb-2 min-[22rem]:max-sm:flex-nowrap">
 						<AgentModelPicker

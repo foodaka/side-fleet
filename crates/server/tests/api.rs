@@ -43,7 +43,7 @@ impl Api {
     }
     async fn register(&self, id: &str, repos: &[&str]) {
         let caps = Capabilities {
-            repos: repos.iter().map(|r| RepoInfo { name: r.to_string(), path: format!("/tmp/{r}"), id: String::new() }).collect(),
+            repos: repos.iter().map(|r| RepoInfo { name: r.to_string(), path: format!("/tmp/{r}"), id: String::new(), commands: vec![] }).collect(),
             ..Default::default()
         };
         let r = self
@@ -522,6 +522,64 @@ async fn the_heartbeat_names_runs_that_are_over_here_so_the_worker_frees_them() 
     sqlx::query("UPDATE runs SET stop_requested_at = now() - interval '2 minutes' WHERE id = $1").bind(id).execute(&env.pool).await.unwrap();
     sidefleet_server::db::stop_unresponsive_runs(&env.pool, 60).await.unwrap();
     assert_eq!(beat().await["finished_runs"], json!([id]));
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn slash_commands_stay_out_of_the_machine_list_and_come_per_repo() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let caps = json!({
+        "agents": { "claude": { "version": "2", "signed_in": true, "commands": [
+            { "name": "review", "description": "Review the diff" },
+            { "name": "deploy", "description": "The machine's deploy" },
+        ] } },
+        "repos": [
+            { "name": "web", "path": "/tmp/web", "id": "github.com/o/web", "commands": [{ "name": "deploy", "description": "Ship web", "argument_hint": "[env]" }] },
+            { "name": "api", "path": "/tmp/api", "id": "github.com/o/api" },
+        ],
+    });
+    let r = api.worker(reqwest::Method::POST, "/v1/worker/register").json(&json!({"id": "w", "display_name": "w", "capabilities": caps, "active_runs": []})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let list: Value = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    let w = &list[0]["capabilities"];
+    assert!(w["agents"]["claude"].get("commands").is_none(), "polled list carries no commands: {w}");
+    assert!(w["repos"][0].get("commands").is_none());
+    assert_eq!(w["agents"]["claude"]["version"], "2");
+
+    let get = |q: &'static str| {
+        let api = &api;
+        async move { api.dev(reqwest::Method::GET, &format!("/v1/workers/w/commands{q}")).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    // The project's own come first and win a clash of names.
+    assert_eq!(
+        get("?repo=github.com/o/web").await,
+        json!([{ "name": "deploy", "description": "Ship web", "argument_hint": "[env]" }, { "name": "review", "description": "Review the diff" }])
+    );
+    let names = |v: Value| v.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(names(get("?repo=web").await), ["deploy", "review"], "by folder name too");
+    assert_eq!(names(get("").await), ["review", "deploy"]);
+    assert_eq!(names(get("?repo=api").await), ["review", "deploy"]);
+    let r = api.dev(reqwest::Method::GET, "/v1/workers/nope/commands").send().await.unwrap();
+    assert!(r.status().is_client_error());
+
+    // Heartbeats leave the machine's commands out until they change; the stored ones stay.
+    let beat = |caps: Value| {
+        let api = &api;
+        async move {
+            let r = api.worker(reqwest::Method::POST, "/v1/worker/heartbeat").json(&json!({"id": "w", "capabilities": caps, "active_runs": []})).send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+    };
+    beat(json!({ "agents": { "claude": { "version": "2", "signed_in": true } }, "repos": [] })).await;
+    assert_eq!(names(get("").await), ["review", "deploy"]);
+    beat(json!({ "agents": { "claude": { "version": "2", "signed_in": true, "commands": [{ "name": "qa" }] } }, "repos": [] })).await;
+    assert_eq!(names(get("").await), ["qa"]);
+    // Claude Code gone: nothing to keep.
+    beat(json!({ "agents": {}, "repos": [] })).await;
+    assert_eq!(names(get("").await), Vec::<String>::new());
 
     env.teardown().await;
 }

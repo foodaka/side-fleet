@@ -424,6 +424,22 @@ pub struct ClaudeAgent {
     /// older workers, and when Claude Code wouldn't say.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, String>,
+    /// The slash commands and skills Claude Code offers outside any project:
+    /// built in, the user's own and the plugins'. Empty from older workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<SlashCommand>,
+}
+
+/// A slash command or skill the composer can offer after `/`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// Without the slash: `review`, `stripe:test-cards`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// What it takes after its name, e.g. `[pr number]`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub argument_hint: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -467,6 +483,9 @@ pub struct RepoInfo {
     /// Empty from older workers; treat as `name`.
     #[serde(default)]
     pub id: String,
+    /// The project's own skills and slash commands (`.claude/skills`, `.claude/commands`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<SlashCommand>,
 }
 
 impl RepoInfo {

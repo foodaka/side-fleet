@@ -82,6 +82,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/{id}", axum::routing::delete(delete_worker))
         .route("/v1/workers/{id}/update", post(request_update))
+        .route("/v1/workers/{id}/commands", get(worker_commands))
         .route("/v1/workers/{id}/clean-worktrees", post(request_worktree_cleanup).get(worktree_cleanup_status))
         .route("/v1/repos", get(get_added_repos).put(put_added_repos))
         .route("/v1/setup", get(setup))
@@ -857,6 +858,16 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
         if owner_id.is_some() && owner_id != caller.user_id() {
             v["capabilities"]["repos"] = json!([]);
         }
+        // Slash commands are many and long, and this list is polled: the composer asks
+        // for one machine's with /v1/workers/{id}/commands when someone types `/`.
+        if let Some(c) = v["capabilities"]["agents"]["claude"].as_object_mut() {
+            c.remove("commands");
+        }
+        if let Some(repos) = v["capabilities"]["repos"].as_array_mut() {
+            for r in repos.iter_mut().filter_map(|r| r.as_object_mut()) {
+                r.remove("commands");
+            }
+        }
         v["owner"] = owner.map_or(json!(null), |(id, login)| json!({ "id": id, "login": login }));
         // Agents whose usage limit this machine hit: agent -> when it resets.
         v["limited_until"] = json!(limits.remove(&w.id).unwrap_or_default());
@@ -925,6 +936,36 @@ async fn worktree_cleanup_status(State(state): State<AppState>, Extension(caller
         }
     }
     Ok(Json(json!({ "pending": pending, "preview": preview, "cleanup": cleanup })))
+}
+
+#[derive(Deserialize)]
+struct CommandsQuery {
+    /// A repo key (or folder name) whose project commands come first.
+    #[serde(default)]
+    repo: String,
+}
+
+/// The slash commands and skills Claude Code offers on a machine: `repo`'s own
+/// first, then the machine's (built in, the user's and the plugins'). Only for
+/// the machine's owner, as its repos are.
+async fn worker_commands(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    Query(q): Query<CommandsQuery>,
+) -> Result<Json<Vec<sidefleet_core::SlashCommand>>, ApiError> {
+    may_look_after(&state, &caller, &id, "see the commands of").await?;
+    let Some(caps) = db::worker_capabilities(&state.pool, caller.org_id(), &id).await? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown machine".into()));
+    };
+    Ok(Json(slash_commands(&caps, &q.repo)))
+}
+
+fn slash_commands(caps: &sidefleet_core::Capabilities, repo: &str) -> Vec<sidefleet_core::SlashCommand> {
+    let project = if repo.is_empty() { None } else { caps.repos.iter().find(|r| r.name == repo).or_else(|| caps.repos.iter().find(|r| r.key() == repo)) };
+    let machine = caps.agents.claude.as_ref().map(|c| c.commands.as_slice()).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    project.map(|r| r.commands.as_slice()).unwrap_or_default().iter().chain(machine).filter(|c| seen.insert(c.name.clone())).cloned().collect()
 }
 
 /// Ask a machine to update itself and restart when it is idle.

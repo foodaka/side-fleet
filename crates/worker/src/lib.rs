@@ -7,6 +7,7 @@ pub mod approval;
 pub mod checkpoint;
 pub mod cleanup;
 pub mod client;
+pub mod commands;
 pub mod detect;
 pub mod diff;
 pub mod integrate;

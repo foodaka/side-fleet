@@ -185,6 +185,7 @@ is the normal case here.
 |---|---|
 | New task | `POST /v1/runs` `{task, agent, model, effort?, repo, permission_mode, isolation, worker_id?, failover, images, start_at?}` |
 | Reply, or switch agent | `POST /v1/runs/:root/messages` `{task, agent?, model?, effort?, permission_mode?, images?}`. Absent `effort` keeps it, `""` is the agent's default. |
+| Skills after `/` | `GET /v1/workers/:id/commands?repo=` the target machine's Claude Code skills and commands, the repo's own first. Only for its owner. |
 | Stop all | `POST /v1/runs/:id/stop` for every non-terminal run, newest first, so nothing queued starts |
 | Send now | Stop only the running one |
 | Start now, cancel scheduled | `POST /start-now`, `POST /stop` |
@@ -270,6 +271,9 @@ search, then the list, then nav.
   access, on a new branch so your checkout stays untouched." It covers every branch in the source,
   including scheduling, failover, sign-in warnings and no machine having the agent.
 - Live CPU, memory and disk chips when one machine is the target.
+- While the message is just `/` and a word (Claude Code only), a menu below the box lists the target
+  machine's skills and slash commands (`SlashMenu.svelte`). Arrows move, Return or Tab fills in
+  `/name `, Escape closes it. The reply box has the same menu, above it.
 - Remembered per agent: model and effort. Remembered: agent, repo, machine. Not remembered: failover,
   start time. Permission and workspace start from Settings each time.
 - Selection stays valid as machines come and go; if no machine with the repo has the agent, switch

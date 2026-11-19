@@ -18,6 +18,8 @@ struct MessageEditor: NSViewRepresentable {
     var accessibility: String
     /// Bump to put the cursor in the box.
     var focusTick = 0
+    /// Arrows, Tab, Return and Escape go here first (the slash menu); true when it took the key.
+    var onKey: ((SlashMenuModel.Key) -> Bool)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -68,6 +70,8 @@ struct MessageEditor: NSViewRepresentable {
         if tv.frame.width != scroll.contentSize.width { tv.frame.size.width = scroll.contentSize.width }
         if tv.string != text, !tv.hasMarkedText() {
             tv.string = text
+            // Text put in from outside (a pick from the slash menu, an example) is typed after.
+            tv.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             context.coordinator.remeasure(tv)
         }
         tv.isEditable = enabled
@@ -126,9 +130,23 @@ final class SendingTextView: NSTextView {
     weak var owner: MessageEditor.Coordinator?
 
     override func keyDown(with event: NSEvent) {
+        if !hasMarkedText(), let key = Self.menuKey(event), owner?.parent.onKey?(key) == true { return }
         // 36 is Return, 76 is Enter on the keypad. While composing, Return confirms the composition.
         if event.keyCode == 36 || event.keyCode == 76, !hasMarkedText(), owner?.handleReturn(event.modifierFlags) == true { return }
         super.keyDown(with: event)
+    }
+
+    /// The keys the slash menu may take, without modifiers.
+    private static func menuKey(_ event: NSEvent) -> SlashMenuModel.Key? {
+        guard event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else { return nil }
+        switch event.keyCode {
+        case 125: return .down
+        case 126: return .up
+        case 48: return .tab
+        case 53: return .escape
+        case 36, 76: return .enter
+        default: return nil
+        }
     }
 
     override func paste(_ sender: Any?) {

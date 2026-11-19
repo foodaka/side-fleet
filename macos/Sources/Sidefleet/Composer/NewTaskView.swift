@@ -31,6 +31,7 @@ private struct NewTaskForm: View {
     @Environment(Stores.self) private var stores
     @State private var height: CGFloat = 72
     @State private var focusTick = 1
+    @State private var slash = SlashMenuModel()
 
     private let examples = [
         "Find why the login test is flaky and fix it",
@@ -74,20 +75,30 @@ private struct NewTaskForm: View {
         .onChange(of: stores.prefs.permission) { _, _ in model.resetFromPrefs() }
         .onChange(of: stores.prefs.workspace) { _, _ in model.resetFromPrefs() }
         .focusedSceneValue(\.focusComposer) { focusTick += 1 }
+        .onChange(of: model.task) { _, _ in syncSlash() }
+        .onChange(of: model.repo) { _, _ in syncSlash() }
+        .onChange(of: model.agent) { _, _ in syncSlash() }
+        .onChange(of: model.target?.id) { _, _ in syncSlash() }
+    }
+
+    /// The menu after `/` lists what Claude Code offers on the machine the task lands on.
+    private func syncSlash() {
+        slash.update(text: model.task, worker: model.target?.id, repo: model.repo, enabled: model.agent == .claude, api: stores.api)
     }
 
     private func box(maxHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topLeading) {
                 if model.task.isEmpty {
-                    EditorPlaceholder(text: "Describe the task. It runs in a repo on one of your machines.", fontSize: 15, inset: CGSize(width: 16, height: 16))
+                    EditorPlaceholder(text: "Describe the task, or type / for skills. It runs in a repo on one of your machines.", fontSize: 15, inset: CGSize(width: 16, height: 16))
                 }
                 MessageEditor(
                     text: $model.task, height: $height, fontSize: 15, minHeight: 72, maxHeight: maxHeight,
                     inset: NSSize(width: 16, height: 16),
                     enterSends: { stores.prefs.enterSends(.task) }, onSend: run,
                     onPasteImages: { attach($0, to: &model.images, toasts: stores.toasts) },
-                    accessibility: "Task", focusTick: focusTick
+                    accessibility: "Task", focusTick: focusTick,
+                    onKey: { slash.take($0, into: &model.task) }
                 )
                 .frame(height: height)
             }
@@ -138,6 +149,15 @@ private struct NewTaskForm: View {
         .background(SF.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(SF.input))
         .shadow(color: .black.opacity(0.04), radius: 3, y: 1)
+        // Hangs below the box, over the lines under it.
+        .overlay(alignment: .bottom) {
+            SlashMenuView(menu: slash) { c in
+                model.task = SlashMenuModel.completion(c)
+                focusTick += 1
+            }
+            .alignmentGuide(.bottom) { $0[.top] - 8 }
+        }
+        .zIndex(1)
     }
 
     private var repoPicker: some View {

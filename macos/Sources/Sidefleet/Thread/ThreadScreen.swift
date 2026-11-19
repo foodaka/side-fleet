@@ -67,6 +67,7 @@ private struct ThreadContent: View {
     @State private var dontAskAgain = false
     @State private var opening = false
     @State private var composerFocus = 1
+    @State private var slash = SlashMenuModel()
     @State private var forkSource: String?
     /// The room this thread belongs to, by name.
     @State private var roomName: String?
@@ -143,7 +144,7 @@ private struct ThreadContent: View {
                      onFork: { forking = ForkRequest(run: $0.run, hasFiles: $0.hasSnapshot) },
                      onOpenPR: openPR, onSendNow: sendNow)
             Divider()
-            if let root, theirs { teammateBar(root) } else if root != nil { composer }
+            if let root, theirs { teammateBar(root) } else if root != nil { composer.zIndex(1) }
         }
         .modifier(DropTarget(enabled: reply.canReply && !theirs) { attach($0, to: &reply.images, toasts: stores.toasts) })
     }
@@ -287,7 +288,7 @@ private struct ThreadContent: View {
                     if reply.text.isEmpty {
                         EditorPlaceholder(text: reply.placeholder, fontSize: 14, inset: CGSize(width: 16, height: 12))
                     }
-                    ReplyEditor(reply: reply, focusTick: composerFocus, send: send)
+                    ReplyEditor(reply: reply, focusTick: composerFocus, send: send, onKey: { slash.take($0, into: &reply.text) })
                 }
                 AttachmentStrip(images: $reply.images).padding(.horizontal, 16).padding(.bottom, 6)
                 HStack(spacing: 2) {
@@ -327,6 +328,14 @@ private struct ThreadContent: View {
             }
             .background(SF.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(SF.input))
+            // Opens above the box, over the end of the conversation.
+            .overlay(alignment: .top) {
+                SlashMenuView(menu: slash) { c in
+                    reply.text = SlashMenuModel.completion(c)
+                    composerFocus += 1
+                }
+                .alignmentGuide(.top) { $0[.bottom] + 8 }
+            }
             .column()
             .padding(.horizontal, 24)
             .padding(.top, 12)
@@ -334,6 +343,14 @@ private struct ThreadContent: View {
         }
         .background(SF.background)
         .focusedSceneValue(\.focusComposer) { composerFocus += 1 }
+        .onChange(of: reply.text) { _, _ in syncSlash() }
+        .onChange(of: reply.agent) { _, _ in syncSlash() }
+        .onChange(of: thread.machine) { _, _ in syncSlash() }
+    }
+
+    /// The menu after `/` lists what Claude Code offers on the thread's machine, in its repo.
+    private func syncSlash() {
+        slash.update(text: reply.text, worker: host.first?.id, repo: root?.repo ?? "", enabled: reply.agent == .claude && reply.canReply, api: stores.api)
     }
 
     /// While it runs and the box is empty, Stop stands in for Send; a draft only gets Queue.
@@ -483,6 +500,7 @@ private struct ReplyEditor: View {
     @Bindable var reply: ReplyModel
     var focusTick: Int
     var send: () -> Void
+    var onKey: (SlashMenuModel.Key) -> Bool
     @Environment(Stores.self) private var stores
     @State private var height: CGFloat = 44
 
@@ -492,7 +510,7 @@ private struct ReplyEditor: View {
             inset: NSSize(width: 16, height: 12), enabled: reply.canReply,
             enterSends: { stores.prefs.enterSends(.reply) }, onSend: send,
             onPasteImages: { attach($0, to: &reply.images, toasts: stores.toasts) },
-            accessibility: "Reply", focusTick: focusTick
+            accessibility: "Reply", focusTick: focusTick, onKey: onKey
         )
         .frame(height: height)
     }

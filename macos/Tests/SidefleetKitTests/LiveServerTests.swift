@@ -28,8 +28,8 @@ final class LiveServerTests: XCTestCase {
             "id": .string(workerID), "display_name": .string(workerID), "active_runs": [],
             "capabilities": [
                 "hostname": "box.local", "os": "linux", "version": "0.1.0 (2026-11-06 abc1234)",
-                "repos": [["name": "proj", "path": "/tmp/proj", "id": "github.com/acme/proj"]],
-                "agents": ["claude": ["version": "2.4.1", "signed_in": true]],
+                "repos": [["name": "proj", "path": "/tmp/proj", "id": "github.com/acme/proj", "commands": [["name": "deploy", "argument_hint": "[env]"]]]],
+                "agents": ["claude": ["version": "2.4.1", "signed_in": true, "commands": [["name": "review", "description": "Review the diff"]]]],
                 "system": ["cpu_cores": 8, "cpu_percent": 12.5, "load_avg_1m": 0.5, "mem_total_mb": 16000, "mem_used_mb": 8000, "disk_total_gb": 100, "disk_free_gb": 50, "uptime_secs": 3600],
                 "slots": ["parallel": 4, "active": 0],
             ],
@@ -68,6 +68,15 @@ final class LiveServerTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(25))
         }
         XCTFail("never happened: \(what)")
+    }
+
+    func testSlashCommandsComeFromTheMachineWithTheRepoFirst() async throws {
+        let list = try await api.slashCommands(worker: workerID, repo: "github.com/acme/proj")
+        XCTAssertEqual(list, [SlashCommand(name: "deploy", argumentHint: "[env]"), SlashCommand(name: "review", description: "Review the diff")])
+        let menu = SlashMenuModel()
+        menu.update(text: "/rev", worker: workerID, repo: "proj", enabled: true, api: api)
+        await eventually("the menu loads") { menu.commands != nil }
+        XCTAssertEqual(menu.matches.map(\.name), ["review"])
     }
 
     func testEverythingTheFleetLoadsDecodes() async throws {

@@ -146,6 +146,14 @@ export interface WorktreeCleanupStatus {
 	cleanup: (WorktreeCleanupTotals & { items: WorktreeItem[] }) | null;
 }
 
+/** A slash command or skill Claude Code offers on a machine (see /v1/workers/{id}/commands). */
+export interface SlashCommand {
+	/** Without the slash: `review`, `stripe:test-cards`. */
+	name: string;
+	description?: string;
+	argument_hint?: string;
+}
+
 export interface Worker {
 	id: string;
 	display_name: string;

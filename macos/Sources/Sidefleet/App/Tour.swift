@@ -38,6 +38,13 @@ enum Tour {
                 stores.route = route
                 try? await Task.sleep(for: .seconds(2.5))
                 capture(folder.appendingPathComponent("\(name)-\(suffix).png"))
+                if name == "new-task" {
+                    // The menu of skills a slash opens.
+                    stores.newTask.task = "/"
+                    try? await Task.sleep(for: .seconds(2.5))
+                    capture(folder.appendingPathComponent("new-task-slash-\(suffix).png"))
+                    stores.newTask.task = ""
+                }
             }
             NSApp.terminate(nil)
         }

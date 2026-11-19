@@ -22,6 +22,7 @@
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
 	import StartAtPicker from '#lib/sf/ui/StartAtPicker.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
+	import SlashMenu from '#lib/sf/ui/SlashMenu.svelte';
 
 	const PICK = '__pick__';
 	let task = $state('');
@@ -57,6 +58,7 @@
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
+	let slash: SlashMenu | undefined = $state();
 	const attachments = new Attachments();
 
 	function load(k: string) { try { return localStorage.getItem(k) ?? ''; } catch { return ''; } }
@@ -149,6 +151,7 @@
 	}
 
 	function keydown(e: KeyboardEvent) {
+		if (slash?.keydown(e)) return;
 		if (prefs.sends(e, 'task')) run(e);
 	}
 	function grow() {
@@ -232,9 +235,11 @@
 					onkeydown={keydown}
 					onpaste={attachments.paste}
 					rows="2"
-					placeholder="Describe the task. It runs in a repo on one of your machines."
+					placeholder="Describe the task, or type / for skills. It runs in a repo on one of your machines."
+					aria-controls="task-slash"
 					class="block max-h-[55vh] min-h-[72px] w-full resize-none bg-transparent px-4 pt-4 pb-1 text-[15px] leading-relaxed outline-none placeholder:text-faint"
 				></textarea>
+				<SlashMenu bind:this={slash} bind:value={task} {box} worker={target?.id} {repo} enabled={agent === 'claude'} id="task-slash" />
 				<AttachedImages {attachments} class="px-4 pt-1 pb-3" />
 				<div class="flex items-end gap-2 px-2.5 pb-2.5">
 					<div class="flex min-w-0 flex-1 flex-wrap items-center gap-0.5">

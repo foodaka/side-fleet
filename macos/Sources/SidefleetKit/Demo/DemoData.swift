@@ -55,6 +55,30 @@ enum DemoData {
         ]
     }
 
+    /// A machine's skills and slash commands, `repo`'s own first, as `/v1/workers/{id}/commands` lists them.
+    static func slashCommands(repo: String) -> JSONValue {
+        var list: [JSONValue] = []
+        if repo.hasSuffix("storefront") {
+            list += [
+                ["name": "deploy", "description": "Build the storefront and deploy it to staging or production", "argument_hint": "[env]"],
+                ["name": "fix-flaky", "description": "Reproduce a flaky test until it fails, then fix it"],
+            ]
+        }
+        list += [
+            ["name": "review", "description": "Review the current branch's diff for bugs before it lands"],
+            ["name": "ship", "description": "Run the tests, push the branch and open a pull request"],
+            ["name": "qa", "description": "Click through the web app, file what breaks and fix it"],
+            ["name": "investigate", "description": "Find the root cause of a bug before changing any code"],
+            ["name": "release-notes", "description": "Write release notes from the commits since the last tag", "argument_hint": "[tag]"],
+            ["name": "simplify", "description": "Review changed code for reuse and simplification, then apply the fixes", "argument_hint": "[<target>]"],
+            ["name": "security-review", "description": "Complete a security review of the pending changes on the current branch"],
+            ["name": "init", "description": "Initialize a new CLAUDE.md file with codebase documentation"],
+            ["name": "compact", "description": "Free up context by summarizing the conversation so far", "argument_hint": "<optional custom summarization instructions>"],
+            ["name": "usage", "description": "Show session cost, plan usage, and what's contributing to your limits"],
+        ]
+        return .array(list)
+    }
+
     static func inbox(now: Date) -> [JSONValue] {
         [
             ["id": "demo-checkout", "run_id": "demo-checkout", "title": "The checkout e2e test is flaky on CI. Find out why and fix it", "repo": "github.com/acme/storefront", "agent": "claude", "reason": "finished", "label": "Finished, waiting for a reply", "since": iso(now.addingTimeInterval(-35 * 60))],

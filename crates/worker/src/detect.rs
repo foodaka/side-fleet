@@ -113,19 +113,24 @@ fn version_from(s: &str) -> String {
 
 pub async fn detect_claude(bin: &str, check_sign_in: bool) -> Option<ClaudeAgent> {
     let version = claude_version(bin).await?;
-    let (models, (signed_in, sign_in_error)) = tokio::join!(claude_aliases(bin), claude_sign_in(bin, check_sign_in));
-    Some(ClaudeAgent { version, signed_in, sign_in_error, models })
+    let (models, (signed_in, sign_in_error), commands) =
+        tokio::join!(claude_aliases(bin), claude_sign_in(bin, check_sign_in), crate::commands::claude_commands(bin));
+    Some(ClaudeAgent { version, signed_in, sign_in_error, models, commands })
 }
 
 /// Claude Code again when it changed since `current` was detected, as its
 /// auto-update does under a running worker: a new version can move the aliases.
-/// Also retries aliases that came back empty.
+/// Also retries aliases that came back empty, and lists its commands again:
+/// skills and plugins come and go without an update.
 pub async fn claude_updated(current: &ClaudeAgent, bin: &str) -> Option<ClaudeAgent> {
     let version = claude_version(bin).await?;
+    let commands = crate::commands::claude_commands(bin).await;
+    // A probe that failed keeps the list it had.
+    let commands = if commands.is_empty() { current.commands.clone() } else { commands };
     if version == current.version && !current.models.is_empty() {
-        return None;
+        return (commands != current.commands).then(|| ClaudeAgent { commands, ..current.clone() });
     }
-    Some(ClaudeAgent { version, models: claude_aliases(bin).await, ..current.clone() })
+    Some(ClaudeAgent { version, models: claude_aliases(bin).await, commands, ..current.clone() })
 }
 
 async fn claude_version(bin: &str) -> Option<String> {
@@ -386,7 +391,7 @@ pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
                 dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string()
             };
             let id = origin_url(dir).and_then(|u| identity_for(&u)).unwrap_or_else(|| name.clone());
-            out.push(RepoInfo { name, path: dir.to_string_lossy().to_string(), id });
+            out.push(RepoInfo { name, path: dir.to_string_lossy().to_string(), id, commands: crate::commands::project_commands(dir) });
             return; // do not descend into nested repos / submodules
         }
         if depth >= max_depth {

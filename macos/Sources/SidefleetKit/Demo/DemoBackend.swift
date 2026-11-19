@@ -138,6 +138,9 @@ private actor DemoWorld {
         case ("GET", "workers") where seg.last == "clean-worktrees" && seg.count == 4:
             let id = seg[2].removingPercentEncoding ?? seg[2]
             return try encode(["pending": .null, "preview": previews[id] ?? .null, "cleanup": cleanups[id] ?? .null])
+        case ("GET", "workers") where seg.last == "commands" && seg.count == 4:
+            let repo = query.split(separator: "&").first { $0.hasPrefix("repo=") }.map { String($0.dropFirst(5)).removingPercentEncoding ?? "" } ?? ""
+            return try encode(DemoData.slashCommands(repo: repo))
         case ("GET", "workers"):
             return try encode(.array(tickedWorkers(now).map(withCleanup)))
         case ("POST", "workers") where seg.last == "clean-worktrees" && seg.count == 4:

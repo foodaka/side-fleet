@@ -25,6 +25,23 @@ Never commit `crates/server/web-dist`: change `web/` only, and CI rebuilds and c
 main after merge. If you ran `pnpm build` to try a change, `git checkout crates/server/web-dist`
 before committing.
 
+## Keep the Mac app in step with the web app
+
+The Mac app in `macos/` is a native port of the web app, so a change to what someone sees or does in
+`web/` also goes into `macos/`, in the same pull request. That includes new controls, new menus, new
+keyboard behaviour and copy changes. Skip it only when the change has no counterpart there, and
+say why in the description.
+
+- **Logic goes in `macos/Sources/SidefleetKit`** (stores, models, API calls), with tests in
+  `macos/Tests/SidefleetKitTests`. It builds on Linux: `SWIFT_DOCKER=1 macos/scripts/test-live.sh`.
+- **Views go in `macos/Sources/Sidefleet`.** They only build on a Mac, so push and check that the
+  `macos` workflow passes. Its screenshot tour (`App/Tour.swift`, in demo mode) is how you see the
+  result: add a stop for a new state, give the demo (`SidefleetKit/Demo`) data for it, and keep the
+  count in `scripts/screenshots.sh` right.
+- **New endpoints** go in `macos/SPEC.md`'s API table, and the demo backend serves them.
+- Put the Mac screenshots from the workflow's `sidefleet-mac` artifact in the pull request next to
+  the web ones.
+
 ## Before and after shots for UI changes
 
 A pull request that changes what someone sees in `web/` shows a before and an after screenshot in

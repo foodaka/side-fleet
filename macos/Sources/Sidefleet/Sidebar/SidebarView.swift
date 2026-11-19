@@ -132,7 +132,7 @@ struct SidebarView: View {
     }
 
     private var searchResults: some View {
-        let matches = SidebarSections.matches(query: query, runs: fleet.runs, archived: fleet.archived)
+        let matches = SidebarSections.matches(query: query, runs: fleet.runs, archived: fleet.archived, workerName: fleet.workerName)
         return Group {
             SectionHeading(matches.isEmpty ? "No matches" : "\(matches.count) match\(matches.count == 1 ? "" : "es")")
             ForEach(matches) { RunRow(run: $0, onPick: { picking = $0 }) }
@@ -533,7 +533,7 @@ struct RunRow: View {
                 LiveText { now in
                     // Running, but the machine's first word hasn't arrived: there's no start to count from yet.
                     let took = Format.duration(start: run.run.startedAt, now: now)
-                    Text("\(run.latestWorkerID ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
+                    Text("\(run.latestWorkerID.map(fleet.workerName) ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
                 }
             } else if let start = run.run.startAt, run.run.isScheduled(now: fleet.now) {
                 Text("Scheduled · \(Format.startTime(start, now: fleet.now))" + (otherRepo ? " · \(Format.repoLabel(run.run.repo))" : ""))
@@ -543,7 +543,7 @@ struct RunRow: View {
         } else if asleep, let until = run.run.snoozedUntil {
             Text("Back \(Format.wakeLabel(until, now: fleet.now))" + (otherRepo ? " · \(Format.repoLabel(run.run.repo))" : ""))
         } else {
-            Text([otherRepo ? Format.repoLabel(run.run.repo) : nil, fleet.workers.count > 1 ? run.latestWorkerID : nil].compactMap { $0 }.joined(separator: " · "))
+            Text([otherRepo ? Format.repoLabel(run.run.repo) : nil, fleet.workers.count > 1 ? run.latestWorkerID.map(fleet.workerName) : nil].compactMap { $0 }.joined(separator: " · "))
         }
     }
 

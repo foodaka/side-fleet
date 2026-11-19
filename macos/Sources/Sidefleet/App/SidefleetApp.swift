@@ -138,6 +138,10 @@ private struct MainView: View {
                         .overlay(alignment: .bottom) { Rectangle().fill(SF.queue.opacity(0.3)).frame(height: 1) }
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
+                if stores.fleet.conn == .unreachable, !stores.fleet.loaded {
+                    // The first load failed: say what went wrong rather than show skeletons that never end.
+                    ConnectionErrorView(fleet: stores.fleet)
+                } else {
                 switch stores.route {
                 case .newTask:
                     NewTaskScreen()
@@ -157,6 +161,7 @@ private struct MainView: View {
                     JoinScreen(code: code).id(code)
                 case .thread(let id):
                     ThreadScreen(runID: id).id(id)
+                }
                 }
             }
             .animation(.easeOut(duration: 0.2), value: stores.fleet.conn)
@@ -250,7 +255,7 @@ struct MenuBarContent: View {
                         if !running.isEmpty {
                             MenuHeading("Running")
                             ForEach(running) { r in
-                                MenuRow(title: r.run.task, detail: r.latestWorkerID ?? "", live: r.run.startedAt, dot: AnyView(StatusDot(status: r.pendingApprovals > 0 ? .waiting : .run(.running)))) {
+                                MenuRow(title: r.run.task, detail: stores.fleet.workerName(r.latestWorkerID), live: r.run.startedAt, dot: AnyView(StatusDot(status: r.pendingApprovals > 0 ? .waiting : .run(.running)))) {
                                     show { $0.open(r.id) }
                                 }
                             }

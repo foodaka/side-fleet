@@ -23,11 +23,28 @@ enum DemoData {
         "status": "queued", "worker_id": .null, "stop_requested": false, "created_at": "2026-11-07T07:00:00Z", "started_at": .null,
         "finished_at": .null, "result": .null, "parent_id": .null, "session_id": .null, "resume_session_id": .null,
         "pinned_worker_id": .null, "permission_mode": "acceptEdits", "isolation": "worktree", "failover": false, "moved_from": .null,
-        "resume_from_branch": .null, "images": [], "kind": "agent", "restore_to": .null, "forked_from": .null, "fork_commit": .null,
+        "resume_from_branch": .null, "images": [], "files": [], "kind": "agent", "restore_to": .null, "forked_from": .null, "fork_commit": .null,
         "archived_at": .null, "snoozed_until": .null, "pr": .null, "created_by": "u-ada", "room_id": .null, "context": .null, "start_at": .null,
     ]
 
     private static func iso(_ d: Date) -> JSONValue { .string(Timestamp.format(d)) }
+
+    /// Files attached to the demo's messages, by id: made up, small, and they download.
+    static let files: [String: Data] = [
+        "demo-file-notes": Data("""
+        # Stripe v18 upgrade notes
+
+        - `PaymentIntent.confirm` takes `return_url` now
+        - Webhook events are typed; drop our own `StripeEvent` union
+        - `apiVersion` must be pinned to 2026-10-28
+
+        """.utf8),
+        "demo-file-log": Data((1...120).map { "npm http fetch GET 403 https://registry.example.com/stripe attempt \($0)" }.joined(separator: "\n").utf8),
+    ]
+
+    private static func fileRef(_ id: String, _ name: String, _ type: String) -> JSONValue {
+        ["id": .string(id), "name": .string(name), "media_type": .string(type), "bytes": .number(Double(files[id]?.count ?? 0))]
+    }
 
     static func workers(now: Date) -> [JSONValue] {
         func worker(_ id: String, _ name: String, os: String, cores: Int, cpu: Double, memUsed: Double, memTotal: Double, diskFree: Double, diskTotal: Double, up: Int, parallel: Int, online: Bool, agents: JSONValue, repos: [String], seen: Date) -> JSONValue {
@@ -226,7 +243,8 @@ enum DemoData {
         // A failure.
         let stripeAt = ago(70)
         out.append([SeedRun(
-            json: run("demo-stripe", "Upgrade Stripe SDK to v18 and fix the breaking changes", status: "failed", created: stripeAt, started: stripeAt, finished: ago(60), worker: "mac-mini"),
+            json: run("demo-stripe", "Upgrade Stripe SDK to v18 and fix the breaking changes", status: "failed", created: stripeAt, started: stripeAt, finished: ago(60), worker: "mac-mini",
+                      extra: ["files": [fileRef("demo-file-notes", "stripe-v18-notes.md", "text/markdown"), fileRef("demo-file-log", "npm-debug.log", "text/plain")]]),
             events: [
                 ("status", ["status": "running", "worker_id": "mac-mini"], stripeAt),
                 ("workspace", ["mode": "worktree", "branch": "sidefleet/c7f09e12", "from": ["ref": "origin/main", "commit": "e03b19d4c1"]], stripeAt),

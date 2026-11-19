@@ -291,7 +291,7 @@ final class LiveServerTests: XCTestCase {
     func testRepliesStopSnoozeArchiveAndImages() async throws {
         // A 1x1 PNG, attached, and read back through the authenticated image route.
         let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")!
-        let image = AttachedImage(name: "a.png", mediaType: "image/png", data: png)
+        let image = Attachment(name: "a.png", mediaType: "image/png", data: png)
         let id = try await newRun("With a picture", extra: ["images": .array([image.payload])])
         let thread = ThreadStore(api: api, liveInterval: .milliseconds(1))
         await thread.load(id)
@@ -308,8 +308,18 @@ final class LiveServerTests: XCTestCase {
         await eventually("the session is known") { thread.hasSession }
         reply.syncFromThread()
         reply.text = "And another thing"
-        await reply.send()
+        // A file goes along, and comes back as the control plane stored it.
+        let notes = Data("# Notes\n\n- one\n".utf8)
+        reply.attachments = [Attachment(name: "docs/notes.md", mediaType: "text/markdown", data: notes)]
+        reply.send()
+        await thread.delivered()
+        XCTAssertTrue(thread.outbox.isEmpty, thread.outbox.first?.error ?? "")
         XCTAssertEqual(thread.turns.count, 2)
+        let file = try XCTUnwrap(thread.turns[1].run.files.first)
+        XCTAssertEqual(file.name, "notes.md", "the name keeps only its last path part")
+        XCTAssertEqual(file.bytes, notes.count)
+        let downloaded = try await api.file(file.id)
+        XCTAssertEqual(downloaded, notes)
         XCTAssertEqual(thread.turns[1].run.parentID, id)
         XCTAssertTrue(thread.isWaiting(thread.turns[1].run.id))
 

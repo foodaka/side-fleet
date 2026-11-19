@@ -9,6 +9,23 @@ public final class DemoBackend: Backend, Sendable {
 
     public func setOrg(_ id: String) {}
 
+    /// Every request fails as if the control plane were down, until turned off: for showing what the app
+    /// does then.
+    public func setUnreachable(_ on: Bool) async { await world.setUnreachable(on) }
+
+    /// What the screenshot tour puts in the new-task box: a made-up plan and a small picture.
+    public static var composerAttachments: [Attachment] {
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==") ?? Data()
+        return [
+            Attachment(name: "plan.md", mediaType: "text/markdown", data: Data(String(repeating: "- Step\n", count: 1800).utf8)),
+            Attachment(name: "milestones.csv", mediaType: "text/csv", data: Data(String(repeating: "m1,2026-12-01,done\n", count: 120).utf8)),
+            Attachment(name: "checkout.png", mediaType: "image/png", data: png),
+        ]
+    }
+
+    /// Replies fail to send, as on a dropped connection, until turned off.
+    public func setFailingMessages(_ on: Bool) async { await world.setFailingMessages(on) }
+
     public func send(_ method: String, _ path: String, body: JSONValue?) async throws -> Data {
         try await world.handle(method, path, body)
     }
@@ -51,6 +68,9 @@ private actor DemoWorld {
     private var inbox: [JSONValue] = []
     private var repos: [String]
     private var images: [String: Data] = [:]
+    private var files: [String: Data] = DemoData.files
+    private var unreachable = false
+    private var failingMessages = false
     private var subscribers: [String: [UUID: AsyncThrowingStream<SSEFrame, Error>.Continuation]] = [:]
     private var inboxSubscribers: [UUID: AsyncThrowingStream<SSEFrame, Error>.Continuation] = [:]
     private var nextID = 1000
@@ -96,6 +116,9 @@ private actor DemoWorld {
         inbox = DemoData.inbox(now: Date())
     }
 
+    func setUnreachable(_ on: Bool) { unreachable = on }
+    func setFailingMessages(_ on: Bool) { failingMessages = on }
+
     // MARK: Routes
 
     func handle(_ method: String, _ rawPath: String, _ body: JSONValue?) async throws -> Data {
@@ -106,6 +129,7 @@ private actor DemoWorld {
         let seg = path.split(separator: "/").map(String.init)
         // A touch of latency, so loading states are real.
         try await Task.sleep(for: .milliseconds(Int(40 / max(speed, 0.01))))
+        if unreachable { throw APIError.transport("Could not connect to the server.") }
         let now = Date()
 
         // Rooms, the team and chat apps.
@@ -184,6 +208,9 @@ private actor DemoWorld {
         case ("GET", "images"):
             guard seg.count > 2, let data = images[seg[2]] else { throw APIError.status(404, "No such image") }
             return data
+        case ("GET", "files"):
+            guard seg.count > 2, let data = files[seg[2]] else { throw APIError.status(404, "File not found") }
+            return data
         case ("GET", "runs") where seg.count == 2:
             return try encode(.array(summaries(archived: query.contains("archived=true"), now: now)))
         case ("POST", "runs") where seg.count == 2:
@@ -205,6 +232,7 @@ private actor DemoWorld {
         case ("GET", "thread"):
             return try encode(.array(thread.compactMap { runs[$0].map { .object($0.json) } }))
         case ("POST", "messages"):
+            if failingMessages { throw APIError.transport("The network connection was lost.") }
             guard thread.contains(where: { runs[$0]?.json["session_id"]?.string != nil }) || thread.contains(where: { runs[$0]?.isLive ?? false }) else {
                 throw APIError.status(409, "This thread has no session to continue")
             }
@@ -307,6 +335,17 @@ private actor DemoWorld {
             refs.append(["id": .string(id), "media_type": image["media_type"] ?? "image/png", "bytes": .number(Double(data.count))])
         }
         json["images"] = .array(refs)
+        var fileRefs: [JSONValue] = []
+        for file in body?["files"]?.array ?? [] {
+            guard let b64 = file["data"]?.string, let data = Data(base64Encoded: b64) else { continue }
+            nextID += 1
+            let id = "demo-file-\(nextID)"
+            files[id] = data
+            // The name keeps only its last path part, as the control plane does.
+            let name = (file["name"]?.string ?? "file").split(separator: "/").last.map(String.init) ?? "file"
+            fileRefs.append(["id": .string(id), "name": .string(name), "media_type": file["media_type"] ?? "", "bytes": .number(Double(data.count))])
+        }
+        json["files"] = .array(fileRefs)
         return DemoRun(json: json)
     }
 

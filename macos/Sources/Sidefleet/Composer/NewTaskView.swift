@@ -67,7 +67,7 @@ private struct NewTaskForm: View {
                 .padding(.bottom, 40)
             }
         }
-        .modifier(DropTarget { attach($0, to: &model.images, toasts: stores.toasts) })
+        .modifier(DropTarget { attach($0, to: &model.attachments, toasts: stores.toasts) })
         .onChange(of: stores.fleet.workers) { _, _ in model.syncSelection() }
         .onChange(of: stores.fleet.added) { _, _ in model.syncSelection() }
         .onAppear { model.syncSelection() }
@@ -86,12 +86,12 @@ private struct NewTaskForm: View {
                     text: $model.task, height: $height, fontSize: 15, minHeight: 72, maxHeight: maxHeight,
                     inset: NSSize(width: 16, height: 16),
                     enterSends: { stores.prefs.enterSends(.task) }, onSend: run,
-                    onPasteImages: { attach($0, to: &model.images, toasts: stores.toasts) },
+                    onPasteImages: { attach($0, to: &model.attachments, toasts: stores.toasts) },
                     accessibility: "Task", focusTick: focusTick
                 )
                 .frame(height: height)
             }
-            AttachmentStrip(images: $model.images).padding(.horizontal, 16).padding(.bottom, 8)
+            AttachmentStrip(items: $model.attachments).padding(.horizontal, 16).padding(.bottom, 8)
             HStack(alignment: .bottom, spacing: 8) {
                 ControlRow {
                     AgentModelPicker(
@@ -113,13 +113,13 @@ private struct NewTaskForm: View {
                         Text("\(model.task.count.formatted()) characters").font(SF.font(12)).monospacedDigit().foregroundStyle(SF.faint)
                     }
                     Button {
-                        attach(ImageImport.pickFiles(), to: &model.images, toasts: stores.toasts)
+                        attach(ImageImport.pickFiles(), to: &model.attachments, toasts: stores.toasts)
                     } label: {
                         Image(systemName: "paperclip").font(.system(size: 13)).frame(width: 32, height: 32)
                     }
                     .buttonStyle(QuietButtonStyle())
-                    .help("Attach images (or drop or paste them)")
-                    .accessibilityLabel("Attach images")
+                    .help("Attach images or files: markdown, text, code, PDFs (or drop or paste them)")
+                    .accessibilityLabel("Attach files")
                     if !model.task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Kbd(text: stores.prefs.sendKeys(.task)).help("Change which key sends in Settings").transition(.opacity)
                     }

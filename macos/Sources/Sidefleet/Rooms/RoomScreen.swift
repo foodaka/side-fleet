@@ -103,7 +103,7 @@ private struct RoomContent: View {
                 }
             }
         }
-        .modifier(DropTarget(enabled: room.archivedAt == nil) { attach($0, to: &model.images, toasts: stores.toasts) })
+        .modifier(DropTarget(enabled: room.archivedAt == nil) { attach($0, to: &model.attachments, toasts: stores.toasts) })
         .onAppear { model.sync(room) }
         .onChange(of: stores.fleet.workers) { _, _ in model.sync(room) }
         .onChange(of: stores.prefs.roomPermission) { _, _ in model.resetFromPrefs() }
@@ -318,26 +318,26 @@ private struct RoomComposer: View {
                         text: $model.task, height: $height, fontSize: 14, minHeight: 44, maxHeight: 240,
                         inset: NSSize(width: 12, height: 12),
                         enterSends: { stores.prefs.enterSends(.task) }, onSend: start,
-                        onPasteImages: { if canAttach { attach($0, to: &model.images, toasts: stores.toasts) } },
+                        onPasteImages: { if canAttach { attach($0, to: &model.attachments, toasts: stores.toasts) } },
                         accessibility: "New task in this room"
                     )
                     .frame(height: height)
                 }
-                AttachmentStrip(images: $model.images).padding(.horizontal, 14).padding(.bottom, 8)
+                AttachmentStrip(items: $model.attachments).padding(.horizontal, 14).padding(.bottom, 8)
                 HStack(alignment: .bottom, spacing: 6) {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 2) { pickers }.frame(maxWidth: .infinity, alignment: .leading)
                         VStack(alignment: .leading, spacing: 2) { pickers }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                     Button {
-                        attach(ImageImport.pickFiles(), to: &model.images, toasts: stores.toasts)
+                        attach(ImageImport.pickFiles(), to: &model.attachments, toasts: stores.toasts)
                     } label: {
                         Image(systemName: "paperclip").font(.system(size: 12)).frame(width: 28, height: 28)
                     }
                     .buttonStyle(QuietButtonStyle())
                     .disabled(!canAttach)
-                    .help("Attach images (or drop or paste them)")
-                    .accessibilityLabel("Attach images")
+                    .help("Attach images or files: markdown, text, code, PDFs (or drop or paste them)")
+                    .accessibilityLabel("Attach files")
                     Button(action: start) {
                         Image(systemName: "arrow.up")
                     }

@@ -3,12 +3,14 @@
   "hermes": "mcp_servers:\n  sidefleet:\n    url: \"https://fleet.example.com/mcp\"\n    headers:\n      Authorization: \"Bearer sfa_\"q\\uo'te\"",
   "openclaw": "openclaw mcp set sidefleet '{\"url\":\"https://fleet.example.com/mcp\",\"transport\":\"streamable-http\",\"headers\":{\"Authorization\":\"Bearer sfa_\\\"q\\\\uo'te\"}}'",
   "claude": "claude mcp add --transport http --scope user sidefleet https://fleet.example.com/mcp --header \"Authorization: Bearer sfa_\"q\\uo'te\"",
+  "grok": "URL: https://fleet.example.com/mcp\nHeader: Authorization: Bearer sfa_\"q\\uo'te",
   "other": "URL: https://fleet.example.com/mcp\nHeader: Authorization: Bearer sfa_\"q\\uo'te"
  },
  "message": {
   "hermes": "Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.\n\nAdd this MCP server to your config in ~/.hermes/config.yaml (under mcp_servers), then reload your MCP servers:\n\nmcp_servers:\n  sidefleet:\n    url: \"https://fleet.example.com/mcp\"\n    headers:\n      Authorization: \"Bearer sfa_\"q\\uo'te\"\n\nWhen it's connected, use Sidefleet's fleet_overview tool and tell me which machines you can see.",
   "openclaw": "Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.\n\nRun this command to add the Sidefleet MCP server:\n\nopenclaw mcp set sidefleet '{\"url\":\"https://fleet.example.com/mcp\",\"transport\":\"streamable-http\",\"headers\":{\"Authorization\":\"Bearer sfa_\\\"q\\\\uo'te\"}}'\n\nWhen it's connected, use Sidefleet's fleet_overview tool and tell me which machines you can see.",
   "claude": "Please connect yourself to my Sidefleet, so you can run coding tasks on my machines for me.\n\nRun this command to add the Sidefleet MCP server for all my projects:\n\nclaude mcp add --transport http --scope user sidefleet https://fleet.example.com/mcp --header \"Authorization: Bearer sfa_\"q\\uo'te\"\n\nWhen it's connected, use Sidefleet's fleet_overview tool and tell me which machines you can see.",
+  "grok": "URL: https://fleet.example.com/mcp\nHeader: Authorization: Bearer sfa_\"q\\uo'te",
   "other": "URL: https://fleet.example.com/mcp\nHeader: Authorization: Bearer sfa_\"q\\uo'te"
  },
  "steps": {
@@ -23,6 +25,10 @@
   "claude": {
    "before": "Run this in a terminal:",
    "after": "Then start Claude Code (or a new session). Sidefleet shows up in /mcp."
+  },
+  "grok": {
+   "before": "In Grok Bot, add a remote MCP server (name it Sidefleet) with this address and a custom header. Choose Streamable HTTP if it asks for a transport, and no OAuth: the header is the sign-in. Grok Bot connects from the internet, so this needs a Sidefleet reachable from the public internet (the hosted one is; a self-hosted one behind Tailscale is not).",
+   "after": "Once it is added, Grok Bot lists Sidefleet’s tools. Ask it what is on your fleet to check."
   },
   "other": {
    "before": "Add an MCP server to your app with this address and header (Streamable HTTP). A script can call the API at the same address with the same header.",
@@ -41,6 +47,11 @@
    "after": "Then press Send a test update below."
   },
   "claude": {
+   "before": "Sidefleet POSTs JSON (event_type, text, task) to your address. To check it came from Sidefleet: X-Webhook-Signature-V2 is the hex HMAC-SHA256 of \"<X-Webhook-Timestamp>.<body>\" with this secret:",
+   "snippet": "sec",
+   "after": ""
+  },
+  "grok": {
    "before": "Sidefleet POSTs JSON (event_type, text, task) to your address. To check it came from Sidefleet: X-Webhook-Signature-V2 is the hex HMAC-SHA256 of \"<X-Webhook-Timestamp>.<body>\" with this secret:",
    "snippet": "sec",
    "after": ""
@@ -71,6 +82,11 @@
    "https://h.example.com/webhooks/x",
    "https://h.example.com/hooks/y"
   ],
+  "grok": [
+   "https://h.example.com:8644",
+   "https://h.example.com/webhooks/x",
+   "https://h.example.com/hooks/y"
+  ],
   "other": [
    "https://h.example.com:8644",
    "https://h.example.com/webhooks/x",
@@ -93,6 +109,11 @@
    "https://h.example.com/hooks/agent",
    "https://h.example.com"
   ],
+  "grok": [
+   "https://h.example.com/webhooks/sidefleet",
+   "https://h.example.com/hooks/agent",
+   "https://h.example.com"
+  ],
   "other": [
    "https://h.example.com/webhooks/sidefleet",
    "https://h.example.com/hooks/agent",
@@ -103,13 +124,29 @@
   "hermes": "hermes",
   "openclaw": "openclaw",
   "claude": "webhook",
+  "grok": "webhook",
   "other": "webhook"
  },
  "appOf": {
   "Hermes": "hermes",
   "openclaw": "openclaw",
   "Claude Code": "claude",
+  "Grok Bot": "grok",
   "Other app": "other",
   "Something else": "other"
+ },
+ "hasUpdates": {
+  "hermes": true,
+  "openclaw": true,
+  "claude": false,
+  "grok": false,
+  "other": true
+ },
+ "placeholder": {
+  "hermes": "https://my-server.example.com:8644",
+  "openclaw": "https://my-server.example.com:18789",
+  "claude": "",
+  "grok": "",
+  "other": "https://example.com/sidefleet-webhook"
  }
 }

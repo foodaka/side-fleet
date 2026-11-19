@@ -44,6 +44,23 @@ public enum AgentID: String, Sendable, Hashable, Decodable, CaseIterable, Identi
     }
 }
 
+/// A file the user attached to a message (markdown, text, code, PDFs), stored on the control plane.
+/// `GET /v1/files/:id` always serves it as a download.
+public struct FileRef: Sendable, Hashable, Decodable, Identifiable {
+    public var id: String
+    public var name: String
+    public var mediaType: String
+    public var bytes: Int
+
+    public init(from decoder: Decoder) throws {
+        let f = try Fields(decoder)
+        id = try f.req("id")
+        name = f.str("name")
+        mediaType = f.str("media_type")
+        bytes = f.int("bytes")
+    }
+}
+
 public struct ImageRef: Sendable, Hashable, Decodable, Identifiable {
     public var id: String
     public var mediaType: String
@@ -103,6 +120,8 @@ public struct Run: Sendable, Hashable, Decodable, Identifiable {
     public var movedFrom: String?
     public var resumeFromBranch: String?
     public var images: [ImageRef]
+    /// Other files the user attached; older control planes don't send these.
+    public var files: [FileRef]
     public var kind: RunKind
     public var forkedFrom: String?
     public var archivedAt: Date?
@@ -137,6 +156,7 @@ public struct Run: Sendable, Hashable, Decodable, Identifiable {
         movedFrom = f.opt("moved_from")
         resumeFromBranch = f.opt("resume_from_branch")
         images = f.opt("images") ?? []
+        files = f.opt("files") ?? []
         kind = f.opt("kind", String.self).flatMap(RunKind.init(rawValue:)) ?? .agent
         forkedFrom = f.opt("forked_from")
         archivedAt = f.date("archived_at")

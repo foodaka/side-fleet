@@ -1,6 +1,16 @@
 import Foundation
 import Observation
 
+/// A message you just sent that the control plane hasn't taken yet, or couldn't. It shows at once, in
+/// place of its turn.
+public struct Outgoing: Sendable, Hashable, Identifiable {
+    public enum Status: Sendable, Hashable { case sending, failed }
+    public let id: UUID
+    public var text: String
+    public var status: Status
+    public var error: String?
+}
+
 /// A conversation: the root run plus its follow-ups, each streamed into a turn. A port of `Thread` from
 /// web/src/lib/sf/thread.svelte.ts.
 @MainActor
@@ -9,9 +19,13 @@ public final class ThreadStore {
     public private(set) var turns: [Turn] = []
     public private(set) var error: String?
     public private(set) var loaded = false
+    /// Messages on their way: shown straight away, then replaced by their turn once the server has them.
+    public private(set) var outbox: [Outgoing] = []
 
     /// A run that was live just ended; lists and machine slots have changed.
     @ObservationIgnored public var onRunEnded: (@MainActor () -> Void)?
+    /// A message went through: the list has a new message in this thread.
+    @ObservationIgnored public var onSent: (@MainActor () -> Void)?
 
     @ObservationIgnored private let api: API
     @ObservationIgnored private var tasks: [String: Task<Void, Never>] = [:]
@@ -20,6 +34,11 @@ public final class ThreadStore {
     @ObservationIgnored private var flushing = false
     @ObservationIgnored private let liveInterval: Duration
     @ObservationIgnored private let retryAfter: Duration
+    @ObservationIgnored private var bodies: [UUID: JSONValue] = [:]
+    /// The id the server gave a message that went through, if loading its run failed: a retry must not send it twice.
+    @ObservationIgnored private var sent: [UUID: String] = [:]
+    /// Messages go out one at a time, so they queue in the order they were sent.
+    @ObservationIgnored private var lastSend: Task<Void, Never>?
 
     /// `assistant_live` can come in fast; the view only needs a few redraws a second.
     public init(api: API, liveInterval: Duration = .milliseconds(100), retryAfter: Duration = .milliseconds(1500)) {
@@ -171,6 +190,7 @@ public final class ThreadStore {
     }
 
     private func append(_ run: Run) {
+        guard !turns.contains(where: { $0.run.id == run.id }) else { return }
         turns.append(Turn(run: run))
         follow(run.id, wasLive: true)
     }
@@ -178,9 +198,10 @@ public final class ThreadStore {
     // MARK: Actions
 
     /// Send a follow-up on the same session. While a message runs, it waits behind it. With another
-    /// agent the thread switches to it.
-    public func reply(_ text: String, permission: String?, images: [AttachedImage] = [], agent: (AgentID, String)? = nil, effort: String? = nil) async throws {
-        guard let root else { return }
+    /// agent the thread switches to it. Returns at once: the message sits in `outbox` until the server
+    /// has it, or says why it couldn't.
+    @discardableResult
+    public func reply(_ text: String, permission: String?, attachments: [Attachment] = [], agent: (AgentID, String)? = nil, effort: String? = nil) -> UUID {
         var body: [String: JSONValue] = ["task": .string(text)]
         if let permission, !permission.isEmpty { body["permission_mode"] = .string(permission) }
         // "" goes back to the agent's default; absent keeps the thread's.
@@ -189,9 +210,68 @@ public final class ThreadStore {
             body["agent"] = .string(agent.0.rawValue)
             body["model"] = .string(agent.1)
         }
-        if !images.isEmpty { body["images"] = .array(images.map(\.payload)) }
-        let id = try await api.sendMessage(root: root.id, body: .object(body))
-        append(try await api.run(id))
+        body.merge(Attachments.body(attachments)) { $1 }
+        let key = UUID()
+        bodies[key] = .object(body)
+        outbox.append(Outgoing(id: key, text: text, status: .sending, error: nil))
+        deliver(key)
+        return key
+    }
+
+    /// Try a message that failed again.
+    public func retry(_ key: UUID) {
+        guard let i = outbox.firstIndex(where: { $0.id == key }), outbox[i].status == .failed else { return }
+        outbox[i].status = .sending
+        outbox[i].error = nil
+        deliver(key)
+    }
+
+    /// Drop a message that failed. Returns its text, so it can go back in the box.
+    @discardableResult
+    public func discard(_ key: UUID) -> String? {
+        let text = outbox.first { $0.id == key }?.text
+        outbox.removeAll { $0.id == key }
+        bodies[key] = nil
+        sent[key] = nil
+        return text
+    }
+
+    /// Waits until every message sent so far has gone through or failed.
+    public func delivered() async {
+        await lastSend?.value
+    }
+
+    private func deliver(_ key: UUID) {
+        let previous = lastSend
+        lastSend = Task { [weak self] in
+            await previous?.value
+            await self?.send(key)
+        }
+    }
+
+    private func send(_ key: UUID) async {
+        guard !disposed, let root, let body = bodies[key] else { return }
+        do {
+            let id: String
+            if let done = sent[key] {
+                id = done
+            } else {
+                id = try await api.sendMessage(root: root.id, body: body)
+                sent[key] = id
+            }
+            let run = try await api.run(id)
+            guard !disposed else { return }
+            // Swap in one go, so the bubble never blinks out or shows twice.
+            append(run)
+            outbox.removeAll { $0.id == key }
+            bodies[key] = nil
+            sent[key] = nil
+            onSent?()
+        } catch {
+            guard let i = outbox.firstIndex(where: { $0.id == key }) else { return }
+            outbox[i].status = .failed
+            outbox[i].error = error.localizedDescription
+        }
     }
 
     /// Put the files back to how they were before `runID` started; the session carries on.
@@ -237,48 +317,84 @@ public final class ThreadStore {
     }
 }
 
-/// An image attached to a task or reply.
-public struct AttachedImage: Sendable, Hashable, Identifiable {
+/// An image or file attached to a task or reply. Images (PNG, JPEG, GIF, WebP) go to the agent as
+/// images; anything else (markdown, text, code, PDFs) as a file it reads.
+public struct Attachment: Sendable, Hashable, Identifiable {
+    public enum Kind: Sendable, Hashable { case image, file }
+
     public let id: UUID
     public var name: String
     public var mediaType: String
     public var data: Data
+    public var kind: Kind
+    /// Its size. A file too big to send is never read, so its data stays empty and this says how big it is.
+    public var bytes: Int
 
-    public init(name: String, mediaType: String, data: Data) {
+    /// An image when its type is one the agent takes as an image, else a file.
+    public init(name: String, mediaType: String, data: Data, kind: Kind? = nil, bytes: Int? = nil) {
         id = UUID()
         self.name = name
         self.mediaType = mediaType
         self.data = data
+        self.kind = kind ?? (Attachments.imageTypes.contains(mediaType) ? .image : .file)
+        self.bytes = bytes ?? data.count
     }
 
-    var payload: JSONValue { ["media_type": .string(mediaType), "data": .string(data.base64EncodedString())] }
+    /// One entry of the request body's `images` or `files`.
+    public var payload: JSONValue {
+        switch kind {
+        case .image:
+            ["media_type": .string(mediaType), "data": .string(data.base64EncodedString())]
+        case .file:
+            ["name": .string(name.isEmpty ? "file" : name), "media_type": .string(mediaType), "data": .string(data.base64EncodedString())]
+        }
+    }
 }
 
-/// What the control plane accepts (raster only: an SVG could run script), with its limits.
+/// What a message may carry: a port of web/src/lib/sf/attach.svelte.ts.
 public enum Attachments {
-    public static let types = ["image/png", "image/jpeg", "image/gif", "image/webp"]
-    public static let maxCount = 8
+    /// Sent as images (raster only: an SVG could run script, so it goes as a file).
+    public static let imageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"]
+    public static let maxImages = 8
+    public static let maxFiles = 8
     public static let maxBytes = 10 * 1024 * 1024
+    /// Everything a message carries together, well under the request limit once base64.
     public static let maxTotalBytes = 40 * 1024 * 1024
 
     /// Adds what fits and says why the rest didn't.
-    public static func add(_ new: [AttachedImage], to items: inout [AttachedImage]) -> [String] {
+    public static func add(_ new: [Attachment], to items: inout [Attachment]) -> [String] {
         var skipped: [String] = []
-        for image in new {
-            let name = image.name.isEmpty ? nil : image.name
-            if !types.contains(image.mediaType) {
-                skipped.append("\(name ?? "That file") is not a PNG, JPEG, GIF or WebP image")
-            } else if image.data.count > maxBytes {
-                skipped.append("\(name ?? "That image") is over 10 MB")
-            } else if items.count >= maxCount {
-                skipped.append("At most \(maxCount) images per message")
-            } else if items.reduce(image.data.count, { $0 + $1.data.count }) > maxTotalBytes {
-                skipped.append("The images add up to more than 40 MB")
+        for a in new {
+            let count = items.filter { $0.kind == a.kind }.count
+            if a.bytes > maxBytes {
+                skipped.append("\(a.name.isEmpty ? "That file" : a.name) is over 10 MB")
+            } else if a.kind == .image, count >= maxImages {
+                skipped.append("At most \(maxImages) images per message")
+            } else if a.kind == .file, count >= maxFiles {
+                skipped.append("At most \(maxFiles) files per message")
+            } else if items.reduce(a.bytes, { $0 + $1.bytes }) > maxTotalBytes {
+                skipped.append("The attachments add up to more than 40 MB")
             } else {
-                items.append(image)
+                items.append(a)
             }
         }
         var seen = Set<String>()
         return skipped.filter { seen.insert($0).inserted }
+    }
+
+    /// The request body's `images` and `files`, each only when there are any.
+    public static func body(_ items: [Attachment]) -> [String: JSONValue] {
+        var out: [String: JSONValue] = [:]
+        let images = items.filter { $0.kind == .image }, files = items.filter { $0.kind == .file }
+        if !images.isEmpty { out["images"] = .array(images.map(\.payload)) }
+        if !files.isEmpty { out["files"] = .array(files.map(\.payload)) }
+        return out
+    }
+
+    /// `12 KB`, `3.4 MB`, as the page writes a file's size.
+    public static func size(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(Int((Double(bytes) / 1024).rounded())) KB" }
+        return String(format: "%.1f MB", Double(bytes) / 1024 / 1024)
     }
 }

@@ -19,22 +19,42 @@ enum Tour {
         let suffix = args.contains("--dark") ? "dark" : "light"
 
         Task {
-            let stops: [(String, Route)] = [
-                ("new-task", .newTask),
-                ("thread-finished", .thread("demo-checkout")),
-                ("thread-approval", .thread("demo-rate")),
-                ("thread-live", .thread("demo-guide")),
-                ("thread-failed", .thread("demo-stripe")),
-                ("thread-scheduled", .thread("demo-audit")),
-                ("machines", .machines),
-                ("overview", .overview),
-                ("rooms", .rooms),
-                ("room", .room("room-applepay")),
-                ("team", .team),
-                ("chat-apps", .chatApps),
+            let demo = stores.api.backend as? DemoBackend
+            let stops: [(String, Route, (@MainActor () async -> Void)?)] = [
+                ("new-task", .newTask, nil),
+                // A task with a file and a picture attached, before it's sent.
+                ("new-task-files", .newTask, {
+                    stores.newTask.task = "Follow the plan in plan.md and match the screenshot"
+                    stores.newTask.attachments = DemoBackend.composerAttachments
+                }),
+                ("thread-finished", .thread("demo-checkout"), {
+                    stores.newTask.task = ""
+                    stores.newTask.attachments = []
+                }),
+                ("thread-approval", .thread("demo-rate"), nil),
+                ("thread-live", .thread("demo-guide"), nil),
+                ("thread-failed", .thread("demo-stripe"), nil),
+                // A reply that couldn't go: it stays in the thread with Retry and Discard.
+                ("thread-send-failed", .thread("demo-tax"), {
+                    await demo?.setFailingMessages(true)
+                    stores.tourReply = "Also check the shipping tax for Canada"
+                }),
+                ("thread-scheduled", .thread("demo-audit"), { await demo?.setFailingMessages(false) }),
+                ("machines", .machines, nil),
+                ("overview", .overview, nil),
+                ("rooms", .rooms, nil),
+                ("room", .room("room-applepay"), nil),
+                ("team", .team, nil),
+                ("chat-apps", .chatApps, nil),
+                // Last: the first load failing, as when the control plane is down.
+                ("connection-error", .newTask, {
+                    await demo?.setUnreachable(true)
+                    stores.fleet.switchOrg(stores.fleet.orgID)
+                }),
             ]
             try? await Task.sleep(for: .seconds(2))
-            for (name, route) in stops {
+            for (name, route, setup) in stops {
+                await setup?()
                 stores.route = route
                 try? await Task.sleep(for: .seconds(2.5))
                 capture(folder.appendingPathComponent("\(name)-\(suffix).png"))

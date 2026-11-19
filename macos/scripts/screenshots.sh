@@ -15,15 +15,15 @@ for mode in --light --dark; do
   kill "$watchdog" 2>/dev/null || true
 done
 ls "$out"
-# Twelve stops in two appearances. Without this, a tour that saves nothing still passes.
+# Fifteen stops in two appearances. Without this, a tour that saves nothing still passes.
 count="$(find "$out" -name '*.png' | wc -l | tr -d ' ')"
-if [ "$count" -ne 24 ]; then
-  echo "expected 24 screenshots, got $count" >&2
+if [ "$count" -ne 30 ]; then
+  echo "expected 30 screenshots, got $count" >&2
   exit 1
 fi
 # A locked or sleeping screen captures as the same blank image every time.
 distinct="$(find "$out" -name '*.png' -exec md5 -q {} + | sort -u | wc -l | tr -d ' ')"
-if [ "$distinct" -lt 12 ]; then
+if [ "$distinct" -lt 15 ]; then
   echo "only $distinct different screenshots: is the screen locked?" >&2
   exit 1
 fi

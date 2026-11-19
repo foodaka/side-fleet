@@ -238,7 +238,7 @@ public final class RoomTaskModel {
     public var effort = ""
     public var perm: String
     public var machine = ""
-    public var images: [AttachedImage] = []
+    public var attachments: [Attachment] = []
     public private(set) var starting = false
 
     @ObservationIgnored private let fleet: FleetStore
@@ -329,11 +329,11 @@ public final class RoomTaskModel {
         ]
         if !effort.isEmpty { body["effort"] = .string(effort) }
         if let id = pinned(room)?.id { body["worker_id"] = .string(id) }
-        if !images.isEmpty { body["images"] = .array(images.map(\.payload)) }
+        body.merge(Attachments.body(attachments)) { $1 }
         do {
             let id = try await fleet.api.startRoomTask(room: room.id, body: .object(body))
             task = ""
-            images = []
+            attachments = []
             await fleet.refresh()
             return id
         } catch {

@@ -49,6 +49,8 @@ final class Stores {
     @ObservationIgnored var onSignOut: (@MainActor () -> Void)?
     /// A thread whose screen should open its fork sheet (asked from the sidebar).
     var forkThread: String?
+    /// A reply the screenshot tour sends in the next thread it opens (demo mode only).
+    var tourReply: String?
     /// The app is in front, so what's on screen counts as seen.
     private(set) var appActive = true
 

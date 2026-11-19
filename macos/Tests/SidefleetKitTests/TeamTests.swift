@@ -46,9 +46,15 @@ final class TeamTests: XCTestCase {
         for app in [ChatAppID.hermes, .openclaw] {
             XCTAssertEqual(ChatApps.updatesMessage(app, secret: "sec", platform: "slack"), g["updatesMessage"]?[app.rawValue]?.string)
         }
-        for name in ["Hermes", "openclaw", "Claude Code", "Other app", "Something else"] {
+        for name in ["Hermes", "openclaw", "Claude Code", "Grok Bot", "Other app", "Something else"] {
             XCTAssertEqual(ChatApps.appOf(name: name).rawValue, g["appOf"]?[name]?.string, name)
         }
+        for app in ChatAppID.allCases {
+            XCTAssertEqual(ChatApps.hasUpdates(app), g["hasUpdates"]?[app.rawValue]?.bool, "hasUpdates \(app)")
+            XCTAssertEqual(ChatApps.updatesPlaceholder(app), g["placeholder"]?[app.rawValue]?.string, "placeholder \(app)")
+        }
+        // Every app the page offers, in its order.
+        XCTAssertEqual(ChatApps.apps.map(\.id.rawValue), ["hermes", "openclaw", "claude", "grok", "other"])
     }
 
     // MARK: Rooms

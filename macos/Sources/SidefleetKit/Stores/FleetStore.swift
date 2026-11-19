@@ -56,6 +56,10 @@ public final class FleetStore {
     public private(set) var setup: Setup?
     public private(set) var conn: Connection = .connecting
     public private(set) var loaded = false
+    /// Why the last refresh failed, in words; empty while it works.
+    public private(set) var connError = ""
+    /// A refresh you asked for (Try again) is on its way.
+    public private(set) var retrying = false
     public private(set) var archived: [RunSummary]?
     public private(set) var me: Me?
     public private(set) var pending: [Enrollment] = []
@@ -121,6 +125,13 @@ public final class FleetStore {
     /// Online machines on an older build that you may update and haven't asked to yet.
     public var updatable: [Worker] { workers.filter { $0.online && $0.outdated && !$0.updateRequested && canUpdate($0) } }
     public var updateNotice: Bool { !updatable.isEmpty && updatesCleared != (setup?.build ?? "") }
+
+    /// A machine's name for people; its id when it isn't in the list (gone, or not loaded yet).
+    public func workerName(_ id: String?) -> String {
+        guard let id else { return "" }
+        let name = workers.first { $0.id == id }?.displayName ?? ""
+        return name.isEmpty ? id : name
+    }
 
     /// A user's login, if they are in this org.
     public func login(_ id: String?) -> String? { id.flatMap { id in members.first { $0.id == id }?.login } }
@@ -210,6 +221,7 @@ public final class FleetStore {
             if setup == nil { setup = try? await api.setup() }
             await loadMembers()
             conn = .ok
+            connError = ""
             loaded = true
             onRefreshed?()
         } catch APIError.status(403, _) where !orgID.isEmpty && retry {
@@ -221,7 +233,21 @@ public final class FleetStore {
             return
         } catch {
             conn = .unreachable
+            connError = Self.describe(error)
         }
+    }
+
+    /// What went wrong reaching the control plane, as the first-load error says it.
+    static func describe(_ error: Error) -> String {
+        if case APIError.status(let code, let message) = error { return "The control plane answered \(code): \(message)" }
+        return "The app couldn't reach the control plane. Check that it is running and that this Mac can get to it."
+    }
+
+    /// Try again now instead of waiting for the next poll.
+    public func retry() async {
+        retrying = true
+        defer { retrying = false }
+        await refresh()
     }
 
     private func loadMembers(force: Bool = false) async {
@@ -373,6 +399,7 @@ public final class FleetStore {
         setup = nil
         loaded = false
         conn = .connecting
+        connError = ""
         beats = [:]
         runStates = [:]
         cpu = [:]
@@ -445,12 +472,13 @@ public struct SidebarSections: Sendable {
         }
     }
 
-    /// Search covers title, repo and machine, and archived tasks once their list has been opened.
-    public static func matches(query: String, runs: [RunSummary], archived: [RunSummary]?) -> [RunSummary] {
+    /// Search covers title, repo and machine (its id and its name), and archived tasks once their list
+    /// has been opened.
+    public static func matches(query: String, runs: [RunSummary], archived: [RunSummary]?, workerName: (String?) -> String = { $0 ?? "" }) -> [RunSummary] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return [] }
         return (runs + (archived ?? [])).filter { r in
-            [r.run.task, Format.repoLabel(r.run.repo), r.run.workerID ?? ""].contains { $0.lowercased().contains(q) }
+            [r.run.task, Format.repoLabel(r.run.repo), r.run.workerID ?? "", workerName(r.latestWorkerID)].contains { $0.lowercased().contains(q) }
         }
     }
 }

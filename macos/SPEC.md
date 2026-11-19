@@ -183,8 +183,9 @@ is the normal case here.
 
 | Action | Call |
 |---|---|
-| New task | `POST /v1/runs` `{task, agent, model, effort?, repo, permission_mode, isolation, worker_id?, failover, images, start_at?}` |
-| Reply, or switch agent | `POST /v1/runs/:root/messages` `{task, agent?, model?, effort?, permission_mode?, images?}`. Absent `effort` keeps it, `""` is the agent's default. |
+| New task | `POST /v1/runs` `{task, agent, model, effort?, repo, permission_mode, isolation, worker_id?, failover, images?, files?, start_at?}` |
+| Reply, or switch agent | `POST /v1/runs/:root/messages` `{task, agent?, model?, effort?, permission_mode?, images?, files?}`. Absent `effort` keeps it, `""` is the agent's default. Shown in the thread at once; one at a time, in order; a failed one stays with Retry and Discard. |
+| Download an attached file | `GET /v1/files/:id`, always bytes, saved where you choose |
 | Stop all | `POST /v1/runs/:id/stop` for every non-terminal run, newest first, so nothing queued starts |
 | Send now | Stop only the running one |
 | Start now, cancel scheduled | `POST /start-now`, `POST /stop` |
@@ -206,10 +207,11 @@ reasons and kinds decode to `.other(String)` and display their label. Timestamps
 `DateTime<Utc>`, usually with more fractional digits than the standard formatter reliably parses, so
 they get a dedicated parser, tested against real server output.
 
-**Images.** `GET /v1/images/:id` needs auth, so `AsyncImage` can't be used. A small loader caches
-them; they never change. Limits for attaching: 8 images, 10 MB each, 40 MB per message; PNG, JPEG,
-GIF or WebP. Clipboard TIFF becomes PNG, and HEIC from an iPhone becomes JPEG (the page rejects
-HEIC; here it just works).
+**Images and files.** `GET /v1/images/:id` needs auth, so `AsyncImage` can't be used. A small loader
+caches them; they never change. Any file can be attached: PNG, JPEG, GIF and WebP go as images,
+anything else (markdown, text, code, PDFs, SVG) as a file with its name. Limits: 8 images and 8 files,
+10 MB each, 40 MB per message. Clipboard TIFF becomes PNG, and HEIC from an iPhone becomes JPEG (the
+page sends HEIC as a file; here it goes as an image). Files on a message are chips that download.
 
 ## 6. Thread model
 
@@ -239,6 +241,7 @@ and match the page's rendered sizes unless noted.
 **Window.** `NavigationSplitView`: a 266 pt sidebar, collapsible, and a detail column. Default window
 1280×820, minimum 900×600. Lost contact shows the page's amber banner at the top of the detail:
 "Lost contact with the control plane. Retrying every few seconds; what you see may be out of date."
+If the first load fails, "Can't reach the control plane" with the cause and Try again replaces the screen.
 
 **Sign-in** (`SignIn.svelte`). Asks for the control plane URL first (new, since the page knows its
 own origin), defaulting to the hosted one, then calls `/v1/auth`. Offers GitHub and/or a developer
@@ -249,7 +252,7 @@ search, then the list, then nav.
 - Sections: Active (with a count), Today, Yesterday, Previous 7 days, Older, then collapsed Snoozed
   and Archived. Archived loads on first open.
 - Active sorts: waiting on you, running, queued, scheduled soonest first.
-- Row: status dot, title, then a detail line. Active rows show machine and duration, "Waiting on
+- Row: status dot, title, then a detail line. Active rows show the machine's name and duration, "Waiting on
   you · 2 tool calls", "Scheduled · Tue 07:00" or "Waiting for a machine". Others show repo (only if
   it isn't the most common one), machine (only if there are several), model and agent icon.
 - Markers: a coloured dot when waiting on you, an ink dot when unread and finished, PR number and
@@ -257,7 +260,7 @@ search, then the list, then nav.
 - Context menu in place of the hover ⋯: Fork, Snooze with presets and wake times, Pick a date and
   time, Archive or Unarchive, Open in New Window.
 - Mine and Team switch when the org has several members. The choice sticks.
-- Search covers title, repo and machine, plus archived once loaded.
+- Search covers title, repo and machine (id or name), plus archived once loaded.
 - Nav: Overview, Machines with `● 2/3` and an update icon, Rooms, Team (GitHub sign-in only), Chat
   apps, Settings.
 
@@ -284,7 +287,12 @@ PR state, message count, forked-from link, changes button.
   Attached images. A line of meta. "Started on … with …", which expands to the exact command.
 - Items: markdown, tool groups, approval cards, notes, stderr log.
 - Activity line with a breathing dot and shimmer: "Thinking", "Ran…", "Waiting for you to approve".
-- End of turn: changes card, stats ("431.0s  18 turns  $1.1200"), Restore to before (asks for a
+  It keeps its 32 pt slot while text streams, hidden, so nothing jumps.
+- A code block still being written shows its finished lines a few times a second, and is highlighted
+  in full once its fence closes; Copy waits until then.
+- A reply shows at once, faded, until the server has it; if it can't go it says why, with Retry and
+  Discard (which puts the text back in an empty box).
+- End of turn: changes card, stats ("7m 11s  18 turns  $1.12"), Restore to before (asks for a
   second click within 4 s), Fork from here.
 - Queued messages show "Send now" and "Cancel". Scheduled tasks show "Start now" and "Cancel".
 - End of thread: the dashed note about the branch, with Open pull request or Push changes.

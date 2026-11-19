@@ -72,6 +72,8 @@ public struct API: Sendable {
     }
 
     public func image(_ id: String) async throws -> Data { try await backend.send("GET", "/v1/images/\(id)", body: nil) }
+    /// A file attached to a message: its bytes, whatever they are.
+    public func file(_ id: String) async throws -> Data { try await backend.send("GET", "/v1/files/\(id)", body: nil) }
 
     // MARK: Inbox
 

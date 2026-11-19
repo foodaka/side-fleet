@@ -27,6 +27,7 @@ struct ThreadScreen: View {
             thread?.dispose()
             let t = ThreadStore(api: stores.api)
             t.onRunEnded = { [fleet = stores.fleet] in Task { await fleet.refresh() } }
+            t.onSent = { [fleet = stores.fleet] in Task { await fleet.refresh() } }
             thread = t
             let model = ReplyModel(thread: t, toasts: stores.toasts)
             model.text = stores.replyDrafts[runID] ?? ""
@@ -120,6 +121,15 @@ private struct ThreadContent: View {
             if let id = root?.roomID, let detail = try? await stores.api.room(id) { roomName = detail.room.name }
         }
         .sheet(isPresented: $askingStop) { stopSheet }
+        .task(id: thread.loaded) { sendTourReply() }
+    }
+
+    /// The screenshot tour's made-up reply, sent as if typed (demo mode only).
+    private func sendTourReply() {
+        guard stores.isDemo, thread.loaded, let text = stores.tourReply else { return }
+        stores.tourReply = nil
+        reply.text = text
+        send()
     }
 
     private func askForkFromSidebar(_ id: String?) {
@@ -141,11 +151,12 @@ private struct ThreadContent: View {
                          reviewing = ReviewRequest(scope: run ?? "all", focus: path)
                      },
                      onFork: { forking = ForkRequest(run: $0.run, hasFiles: $0.hasSnapshot) },
-                     onOpenPR: openPR, onSendNow: sendNow)
+                     onOpenPR: openPR, onSendNow: sendNow,
+                     onRetry: { thread.retry($0) }, onDiscard: { reply.discard($0) })
             Divider()
             if let root, theirs { teammateBar(root) } else if root != nil { composer }
         }
-        .modifier(DropTarget(enabled: reply.canReply && !theirs) { attach($0, to: &reply.images, toasts: stores.toasts) })
+        .modifier(DropTarget(enabled: reply.canReply && !theirs) { attach($0, to: &reply.attachments, toasts: stores.toasts) })
     }
 
     // MARK: Header
@@ -289,7 +300,7 @@ private struct ThreadContent: View {
                     }
                     ReplyEditor(reply: reply, focusTick: composerFocus, send: send)
                 }
-                AttachmentStrip(images: $reply.images).padding(.horizontal, 16).padding(.bottom, 6)
+                AttachmentStrip(items: $reply.attachments).padding(.horizontal, 16).padding(.bottom, 6)
                 HStack(spacing: 2) {
                     AgentModelPicker(
                         agent: reply.agent, model: reply.model, effort: reply.effort, models: Format.machineModels(host, agent: reply.agent), small: true,
@@ -312,14 +323,14 @@ private struct ThreadContent: View {
                         ContextRing(fill: context.fill, agent: context.agent)
                     }
                     Button {
-                        attach(ImageImport.pickFiles(), to: &reply.images, toasts: stores.toasts)
+                        attach(ImageImport.pickFiles(), to: &reply.attachments, toasts: stores.toasts)
                     } label: {
                         Image(systemName: "paperclip").font(.system(size: 13)).frame(width: 32, height: 32)
                     }
                     .buttonStyle(QuietButtonStyle())
                     .disabled(!reply.canReply)
-                    .help("Attach images (or drop or paste them)")
-                    .accessibilityLabel("Attach images")
+                    .help("Attach images or files: markdown, text, code, PDFs (or drop or paste them)")
+                    .accessibilityLabel("Attach files")
                     sendOrStop
                 }
                 .padding(.horizontal, 8)
@@ -359,11 +370,9 @@ private struct ThreadContent: View {
 
     private var host: [Worker] { fleet.workers.filter { $0.id == thread.machine } }
 
+    /// The message shows in the thread at once; if it can't go, it says so there, with Retry.
     private func send() {
-        Task {
-            await reply.send()
-            await fleet.refresh()
-        }
+        reply.send()
     }
 
     private func sendNow() {
@@ -491,7 +500,7 @@ private struct ReplyEditor: View {
             text: $reply.text, height: $height, fontSize: 14, minHeight: 44, maxHeight: 220,
             inset: NSSize(width: 16, height: 12), enabled: reply.canReply,
             enterSends: { stores.prefs.enterSends(.reply) }, onSend: send,
-            onPasteImages: { attach($0, to: &reply.images, toasts: stores.toasts) },
+            onPasteImages: { attach($0, to: &reply.attachments, toasts: stores.toasts) },
             accessibility: "Reply", focusTick: focusTick
         )
         .frame(height: height)
@@ -502,6 +511,8 @@ private struct ReplyEditor: View {
 struct FlowRow: Layout {
     var spacing: CGFloat = 8
     var lineSpacing: CGFloat = 8
+    /// Each line sits against the right edge instead of the left.
+    var trailing = false
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width = proposal.width ?? .infinity
@@ -534,7 +545,8 @@ struct FlowRow: Layout {
             x += size.width + spacing
         }
         for row in rows {
-            x = bounds.minX
+            let used = row.reduce(0) { $0 + $1.1.width } + spacing * CGFloat(max(0, row.count - 1))
+            x = trailing ? max(bounds.minX, bounds.maxX - used) : bounds.minX
             line = row.map(\.1.height).max() ?? 0
             for (view, size) in row {
                 view.place(at: CGPoint(x: x, y: y + (line - size.height) / 2), proposal: ProposedViewSize(size))

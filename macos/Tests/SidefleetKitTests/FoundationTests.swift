@@ -362,16 +362,72 @@ final class FormatTests: XCTestCase {
     }
 
     func testAttachmentLimits() {
-        func image(_ name: String, type: String = "image/png", mb: Double = 1) -> AttachedImage {
-            AttachedImage(name: name, mediaType: type, data: Data(count: Int(mb * 1024 * 1024)))
+        func attachment(_ name: String, type: String = "image/png", mb: Double = 1) -> Attachment {
+            Attachment(name: name, mediaType: type, data: Data(count: Int(mb * 1024 * 1024)))
         }
-        var items: [AttachedImage] = []
-        XCTAssertEqual(Attachments.add([image("a.svg", type: "image/svg+xml")], to: &items), ["a.svg is not a PNG, JPEG, GIF or WebP image"])
-        XCTAssertEqual(Attachments.add([image("big", mb: 11)], to: &items), ["big is over 10 MB"])
-        XCTAssertEqual(Attachments.add((0..<9).map { image("\($0)") }, to: &items), ["At most 8 images per message"])
-        XCTAssertEqual(items.count, 8)
-        items = (0..<4).map { image("\($0)", mb: 10) }
-        XCTAssertEqual(Attachments.add([image("over", mb: 1)], to: &items), ["The images add up to more than 40 MB"])
+        var items: [Attachment] = []
+        // An SVG could run script, so it goes as a file, not an image; anything else is a file too.
+        XCTAssertEqual(Attachments.add([attachment("a.svg", type: "image/svg+xml"), attachment("notes.md", type: "text/markdown")], to: &items), [])
+        XCTAssertEqual(items.map(\.kind), [.file, .file])
+        XCTAssertEqual(Attachments.add([attachment("big", mb: 11)], to: &items), ["big is over 10 MB"])
+        XCTAssertEqual(Attachments.add([Attachment(name: "", mediaType: "", data: Data(), bytes: 11 * 1024 * 1024)], to: &items), ["That file is over 10 MB"], "a file too big to read")
+        items = []
+        XCTAssertEqual(Attachments.add((0..<9).map { attachment("\($0)") }, to: &items), ["At most 8 images per message"])
+        XCTAssertEqual(Attachments.add((0..<9).map { attachment("\($0).txt", type: "text/plain", mb: 0.1) }, to: &items), ["At most 8 files per message"])
+        XCTAssertEqual(items.count, 16, "eight of each")
+        items = (0..<4).map { attachment("\($0)", mb: 10) }
+        XCTAssertEqual(Attachments.add([attachment("over.pdf", type: "application/pdf", mb: 1)], to: &items), ["The attachments add up to more than 40 MB"])
+    }
+
+    func testAttachmentPayloadsAndSizes() {
+        let file = Attachment(name: "plan.md", mediaType: "text/markdown", data: Data("hi".utf8))
+        let image = Attachment(name: "a.png", mediaType: "image/png", data: Data([1]))
+        XCTAssertEqual(file.payload, ["name": "plan.md", "media_type": "text/markdown", "data": "aGk="])
+        XCTAssertEqual(image.payload, ["media_type": "image/png", "data": "AQ=="])
+        XCTAssertEqual(Attachment(name: "", mediaType: "", data: Data()).payload["name"], "file")
+        let body = Attachments.body([file, image])
+        XCTAssertEqual(body["files"]?.array?.count, 1)
+        XCTAssertEqual(body["images"]?.array?.count, 1)
+        XCTAssertTrue(Attachments.body([]).isEmpty, "nothing to send, no keys")
+        XCTAssertEqual(Attachments.size(512), "512 B")
+        XCTAssertEqual(Attachments.size(12 * 1024 + 300), "12 KB")
+        XCTAssertEqual(Attachments.size(Int(3.4 * 1024 * 1024)), "3.4 MB")
+    }
+
+    func testRunStatsDuration() {
+        // As format.ts's durationMs: the same style as every other duration.
+        XCTAssertEqual(Format.durationMs(42_000), "42s")
+        XCTAssertEqual(Format.durationMs(1_500_000), "25m 00s")
+        XCTAssertEqual(Format.durationMs(431_000), "7m 11s")
+        XCTAssertEqual(Format.durationMs(3_900_000), "1h 05m")
+        XCTAssertEqual(Format.durationMs(400), "0s")
+    }
+
+    func testStreamingCodeShowsFinishedLinesAtAPace() {
+        XCTAssertEqual(StreamingCode.finished("let a = 1\nlet b"), "let a = 1")
+        XCTAssertEqual(StreamingCode.finished("let a"), "")
+        XCTAssertEqual(StreamingCode.gap("a"), 0.154, accuracy: 0.0001)
+        XCTAssertEqual(StreamingCode.gap(Array(repeating: "x", count: 200).joined(separator: "\n")), 0.5)
+
+        // Open: the finished lines, once enough time has passed; the line being written waits.
+        XCTAssertEqual(StreamingCode.next(shown: "", text: "a\nb", open: true, sinceShown: 1), .show("a"))
+        XCTAssertEqual(StreamingCode.next(shown: "a", text: "a\nbc", open: true, sinceShown: 0), .keep, "only the unfinished line changed")
+        guard case .wait(let w) = StreamingCode.next(shown: "a", text: "a\nb\nc", open: true, sinceShown: 0.05) else { return XCTFail() }
+        XCTAssertEqual(w, 0.158 - 0.05, accuracy: 0.0001)
+        // Closed: all of it, now.
+        XCTAssertEqual(StreamingCode.next(shown: "a", text: "a\nb", open: false, sinceShown: 0), .show("a\nb"))
+        XCTAssertEqual(StreamingCode.next(shown: "a\nb", text: "a\nb", open: false, sinceShown: 0), .keep)
+    }
+
+    func testOpenFences() {
+        XCTAssertFalse(StreamingCode.endsInOpenFence("Just text"))
+        XCTAssertTrue(StreamingCode.endsInOpenFence("Here:\n\n```ts\nconst a = 1;"))
+        XCTAssertFalse(StreamingCode.endsInOpenFence("```ts\nconst a = 1;\n```\nDone."))
+        XCTAssertTrue(StreamingCode.endsInOpenFence("````md\n```\nstill inside\n"), "a shorter fence doesn't close a longer one")
+        XCTAssertFalse(StreamingCode.endsInOpenFence("~~~\nx\n~~~"))
+        XCTAssertTrue(StreamingCode.endsInOpenFence("~~~\nx\n```"), "only its own kind closes it")
+        XCTAssertFalse(StreamingCode.endsInOpenFence("Use ```inline``` code"), "a backtick run with more backticks after isn't a fence")
+        XCTAssertFalse(StreamingCode.endsInOpenFence("    ```\n    indented code"), "four spaces in is indented code")
     }
 }
 

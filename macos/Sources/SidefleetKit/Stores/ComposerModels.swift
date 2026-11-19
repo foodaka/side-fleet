@@ -30,7 +30,7 @@ public final class NewTaskModel {
     /// Not remembered: each task picks its own.
     public var startAt: Date?
     public var busy = false
-    public var images: [AttachedImage] = []
+    public var attachments: [Attachment] = []
 
     @ObservationIgnored private let fleet: FleetStore
     @ObservationIgnored private let prefs: PrefsStore
@@ -200,7 +200,7 @@ public final class NewTaskModel {
         ]
         if !effort.isEmpty { b["effort"] = .string(effort) }
         if let id = pinned?.id { b["worker_id"] = .string(id) }
-        if !images.isEmpty { b["images"] = .array(images.map(\.payload)) }
+        b.merge(Attachments.body(attachments)) { $1 }
         if let startAt { b["start_at"] = .string(Timestamp.format(startAt)) }
         return .object(b)
     }
@@ -214,7 +214,7 @@ public final class NewTaskModel {
             let id = try await fleet.api.createRun(body)
             task = ""
             startAt = nil
-            images = []
+            attachments = []
             await fleet.refresh()
             return id
         } catch {
@@ -252,9 +252,8 @@ public final class ReplyModel {
     public var agent: AgentID = .claude
     public var model = ""
     public var effort = ""
-    public var sending = false
     public var stopping = false
-    public var images: [AttachedImage] = []
+    public var attachments: [Attachment] = []
 
     @ObservationIgnored private let thread: ThreadStore
     @ObservationIgnored private let toasts: ToastCenter
@@ -281,7 +280,7 @@ public final class ReplyModel {
     /// A new agent starts a session of its own, so a thread without one can carry on that way.
     public var canReply: Bool { thread.hasSession || thread.live || switching }
     public var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending && Format.modelValid(agent: agent, model: model)
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Format.modelValid(agent: agent, model: model)
     }
 
     public var placeholder: String {
@@ -304,18 +303,19 @@ public final class ReplyModel {
         effort = last?.effort ?? ""
     }
 
-    public func send() async {
+    /// It shows in the thread at once; if the server can't take it, it says so there, with Retry.
+    public func send() {
         guard canSend else { return }
-        sending = true
-        defer { sending = false }
-        do {
-            let pick: (AgentID, String)? = switching || model != thread.latest?.model ? (agent, model) : nil
-            try await thread.reply(text.trimmingCharacters(in: .whitespacesAndNewlines), permission: replyPerm, images: images, agent: pick, effort: effort)
-            text = ""
-            images = []
-        } catch {
-            toasts.error("Could not send", error)
-        }
+        let pick: (AgentID, String)? = switching || model != thread.latest?.model ? (agent, model) : nil
+        thread.reply(text.trimmingCharacters(in: .whitespacesAndNewlines), permission: replyPerm, attachments: attachments, agent: pick, effort: effort)
+        text = ""
+        attachments = []
+    }
+
+    /// A message that couldn't go: its text comes back to the box, unless you've started another.
+    public func discard(_ key: UUID) {
+        let old = thread.discard(key)
+        if let old, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { text = old }
     }
 }
 

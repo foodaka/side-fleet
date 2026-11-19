@@ -105,7 +105,8 @@ struct ChatAppsScreen: View {
                 }
             }
             step(1, on: true, title: "Which assistant do you chat with?") {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 136), spacing: 8)], spacing: 8) {
+                // Three across, as on the page, so the five apps wrap into two even rows.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                     ForEach(ChatApps.apps) { a in
                         Tile(on: store.app == a.id, disabled: store.fresh != nil, action: { store.pick(a.id) }) {
                             Text(a.name).font(SF.font(13, .medium))

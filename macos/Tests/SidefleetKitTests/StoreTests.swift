@@ -54,6 +54,119 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(s.groups.flatMap(\.runs).contains { $0.id == "demo-old" }, "archived stays out")
         XCTAssertEqual(SidebarSections.matches(query: "STRIPE", runs: fleet.runs, archived: nil).map(\.id), ["demo-stripe"])
         XCTAssertEqual(SidebarSections.matches(query: " ", runs: fleet.runs, archived: nil).count, 0)
+        // A machine by its name too, not only its id.
+        XCTAssertEqual(SidebarSections.matches(query: "hetzner vps", runs: fleet.runs, archived: nil).count, 0)
+        XCTAssertTrue(SidebarSections.matches(query: "hetzner vps", runs: fleet.runs, archived: nil, workerName: fleet.workerName).contains { $0.id == "demo-rate" })
+        XCTAssertEqual(fleet.workerName("hetzner-vps"), "Hetzner VPS")
+        XCTAssertEqual(fleet.workerName("gone-box"), "gone-box", "a machine that isn't listed keeps its id")
+        XCTAssertEqual(fleet.workerName(nil), "")
+    }
+
+    // MARK: Sending, from web/src/lib/sf/thread.svelte.ts's outbox
+
+    func testAFailedReplySaysWhyAndRetries() async throws {
+        let backend = DemoBackend(speed: 50)
+        let api = API(backend: backend)
+        let thread = ThreadStore(api: api, liveInterval: .milliseconds(1))
+        var sent = 0
+        thread.onSent = { sent += 1 }
+        await thread.load("demo-tax")
+        let reply = ReplyModel(thread: thread, toasts: ToastCenter())
+        reply.syncFromThread()
+
+        await backend.setFailingMessages(true)
+        reply.text = "First"
+        reply.send()
+        reply.text = "Second"
+        reply.send()
+        XCTAssertEqual(thread.outbox.map(\.text), ["First", "Second"])
+        XCTAssertEqual(thread.outbox.map(\.status), [.sending, .sending])
+        await thread.delivered()
+        XCTAssertEqual(thread.outbox.map(\.status), [.failed, .failed])
+        XCTAssertEqual(thread.outbox[0].error, "The network connection was lost.")
+        XCTAssertEqual(thread.turns.count, 1)
+        XCTAssertEqual(sent, 0)
+
+        // Retry sends it; the other stays failed until asked.
+        await backend.setFailingMessages(false)
+        thread.retry(thread.outbox[0].id)
+        XCTAssertEqual(thread.outbox[0].status, .sending)
+        await thread.delivered()
+        XCTAssertEqual(thread.outbox.map(\.text), ["Second"])
+        XCTAssertEqual(thread.turns.count, 2)
+        XCTAssertEqual(thread.turns[1].run.task, "First")
+        XCTAssertEqual(sent, 1)
+
+        // Discard puts the text back in an empty box, and leaves a box you've started typing in alone.
+        reply.discard(thread.outbox[0].id)
+        XCTAssertTrue(thread.outbox.isEmpty)
+        XCTAssertEqual(reply.text, "Second")
+        reply.send()
+        await thread.delivered()
+        await backend.setFailingMessages(true)
+        _ = thread.reply("Third", permission: nil)
+        await thread.delivered()
+        let failed = try XCTUnwrap(thread.outbox.first { $0.text == "Third" })
+        reply.text = "Something new"
+        reply.discard(failed.id)
+        XCTAssertEqual(reply.text, "Something new")
+        XCTAssertTrue(thread.outbox.isEmpty)
+        XCTAssertEqual(thread.turns.map(\.run.task), ["Where do we compute shipping tax?", "First", "Second"], "in the order they were sent")
+        thread.dispose()
+    }
+
+    // MARK: Attached files
+
+    func testFilesGoAlongAndComeBack() async throws {
+        let (api, fleet, prefs, d) = world()
+        await fleet.refresh()
+        let model = NewTaskModel(fleet: fleet, prefs: prefs, defaults: d)
+        model.syncSelection()
+        model.task = "Follow the plan"
+        let notes = Attachment(name: "plan.md", mediaType: "text/markdown", data: Data("# Plan".utf8))
+        let shot = Attachment(name: "shot.png", mediaType: "image/png", data: Data([0x89, 0x50]))
+        XCTAssertEqual(notes.kind, .file)
+        XCTAssertEqual(shot.kind, .image)
+        model.attachments = [notes, shot]
+        XCTAssertEqual(model.body["files"]?.array?.first?["name"]?.string, "plan.md")
+        XCTAssertEqual(model.body["images"]?.array?.count, 1)
+        let started = await model.run()
+        let id = try XCTUnwrap(started)
+        XCTAssertTrue(model.attachments.isEmpty)
+
+        let run = try await api.run(id)
+        XCTAssertEqual(run.files.map(\.name), ["plan.md"])
+        XCTAssertEqual(run.files.first?.mediaType, "text/markdown")
+        XCTAssertEqual(run.files.first?.bytes, 6)
+        XCTAssertEqual(run.images.count, 1)
+        let back = try await api.file(try XCTUnwrap(run.files.first?.id))
+        XCTAssertEqual(String(decoding: back, as: UTF8.self), "# Plan")
+
+        // The demo's own: a failed task with two files on it, which download.
+        let stripe = try await api.run("demo-stripe")
+        XCTAssertEqual(stripe.files.map(\.name), ["stripe-v18-notes.md", "npm-debug.log"])
+        let log = try await api.file(stripe.files[1].id)
+        XCTAssertEqual(log.count, stripe.files[1].bytes)
+    }
+
+    // MARK: Reaching the control plane
+
+    func testAFirstLoadThatFailsSaysWhyAndTriesAgain() async {
+        let backend = DemoBackend(speed: 50)
+        let fleet = FleetStore(api: API(backend: backend), toasts: ToastCenter(), defaults: defaults())
+        await backend.setUnreachable(true)
+        await fleet.refresh()
+        XCTAssertEqual(fleet.conn, .unreachable)
+        XCTAssertFalse(fleet.loaded)
+        XCTAssertEqual(fleet.connError, "The app couldn't reach the control plane. Check that it is running and that this Mac can get to it.")
+        XCTAssertEqual(FleetStore.describe(APIError.status(502, "Bad gateway")), "The control plane answered 502: Bad gateway")
+
+        await backend.setUnreachable(false)
+        await fleet.retry()
+        XCTAssertFalse(fleet.retrying)
+        XCTAssertEqual(fleet.conn, .ok)
+        XCTAssertTrue(fleet.loaded)
+        XCTAssertEqual(fleet.connError, "")
     }
 
     func testAFinishedThreadReplays() async {
@@ -133,9 +246,12 @@ final class StoreTests: XCTestCase {
         reply.syncFromThread()
         XCTAssertTrue(reply.hint.hasPrefix("Continues the same session on mac-mini"), reply.hint)
         reply.text = "One more thing"
-        await reply.send()
+        reply.send()
+        XCTAssertEqual(reply.text, "", "the box empties at once")
+        XCTAssertEqual(thread.outbox.map(\.text), ["One more thing"], "and the message shows at once")
+        await thread.delivered()
         XCTAssertEqual(thread.turns.count, 2)
-        XCTAssertEqual(reply.text, "")
+        XCTAssertTrue(thread.outbox.isEmpty, "its turn took its place")
         await eventually("the reply finishes") { thread.turns[1].run.status == .succeeded }
         thread.dispose()
     }
@@ -149,7 +265,8 @@ final class StoreTests: XCTestCase {
         reply.syncFromThread()
         XCTAssertEqual(reply.placeholder, "Queue your next message…")
         reply.text = "Then this"
-        await reply.send()
+        reply.send()
+        await thread.delivered()
         XCTAssertEqual(thread.turns.count, 2)
         XCTAssertTrue(thread.isWaiting(thread.turns[1].run.id))
         XCTAssertEqual(thread.queuedCount, 1)

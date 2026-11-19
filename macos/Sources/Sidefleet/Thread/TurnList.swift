@@ -23,6 +23,8 @@ struct TurnList: View {
     var onFork: (Turn) -> Void
     var onOpenPR: () -> Void
     var onSendNow: () -> Void
+    var onRetry: (UUID) -> Void
+    var onDiscard: (UUID) -> Void
     @Environment(Stores.self) private var stores
     @State private var pinned = true
     @State private var viewport: CGFloat = 0
@@ -38,6 +40,7 @@ struct TurnList: View {
             h.combine(t.activity)
             h.combine(t.result != nil)
         }
+        for m in thread.outbox { h.combine(m) }
         return h.finalize()
     }
 
@@ -51,6 +54,9 @@ struct TurnList: View {
                             live: turn.id == thread.current?.id && thread.live, waiting: thread.isWaiting(turn.id), theirs: theirs,
                             thread: thread, onOpenDiff: onOpenDiff, onFork: onFork, onSendNow: onSendNow
                         )
+                    }
+                    ForEach(thread.outbox) { msg in
+                        PendingMessage(msg: msg, onRetry: { onRetry(msg.id) }, onDiscard: { onDiscard(msg.id) })
                     }
                     closingNote
                     bottomMarker.id(Self.bottomID)
@@ -95,6 +101,12 @@ struct TurnList: View {
                 proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 pinned = true
             }
+            .onChange(of: thread.outbox.count) { old, new in
+                // You just sent it: bring it into view, even if you had scrolled up.
+                guard new > old else { return }
+                pinned = true
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            }
         }
     }
 
@@ -115,7 +127,7 @@ struct TurnList: View {
 
     /// The dashed note at the end, saying where the work is and what to do with it.
     @ViewBuilder private var closingNote: some View {
-        if !thread.live, !thread.turns.isEmpty, let branch = thread.branch, (thread.changes?.fileCount ?? 0) > 0 || pr != nil {
+        if !thread.live, thread.outbox.isEmpty, !thread.turns.isEmpty, let branch = thread.branch, (thread.changes?.fileCount ?? 0) > 0 || pr != nil {
             HStack(spacing: 12) {
                 closingText(branch: branch)
                     .font(SF.font(12))
@@ -194,6 +206,9 @@ private struct TurnRows: View {
             if first, !run.images.isEmpty {
                 ImageStrip(images: run.images).padding(.bottom, 12)
             }
+            if first, !run.files.isEmpty {
+                AttachedFiles(files: run.files).padding(.bottom, 12)
+            }
             if run.roomID != nil, run.kind == .agent, run.forkedFrom == nil, let brief = run.context, !brief.isEmpty {
                 RoomBrief(text: brief).padding(.bottom, 8)
             }
@@ -204,16 +219,21 @@ private struct TurnRows: View {
             }
             if live, !turn.liveText.isEmpty {
                 // Takes the place of the final message, which lands here when it is complete.
-                MarkdownView(text: turn.liveText).padding(.vertical, 6)
+                MarkdownView(text: turn.liveText, streaming: true).padding(.vertical, 6)
             }
-            if live, let activity = turn.activity, activity != "queued", turn.liveText.isEmpty {
+            if live, let activity = turn.activity, activity != "queued" {
+                // A fixed-height slot: while the agent is writing, the indicator hides but keeps its
+                // room, so nothing pops in and out (and moves) with every paragraph.
+                let writing = !turn.liveText.isEmpty
                 HStack(spacing: 8) {
                     StatusDot(status: .run(.running))
                     Shimmer(text: activity)
                     if turn.reconnecting { Text("reconnecting…").font(SF.font(12)).foregroundStyle(SF.queueInk) }
                 }
-                .padding(.vertical, 6)
+                .frame(height: 32)
+                .opacity(writing ? 0 : 1)
                 .accessibilityElement(children: .combine)
+                .accessibilityHidden(writing)
             }
             if let text = turn.result?.text, !text.isEmpty {
                 MarkdownView(text: text).padding(.vertical, 6)
@@ -261,6 +281,7 @@ private struct TurnRows: View {
                     .background(SF.ink, in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18, style: .continuous))
                     .frame(maxWidth: SF.column * 0.85, alignment: .trailing)
                 if !run.images.isEmpty { ImageStrip(images: run.images) }
+                if !run.files.isEmpty { AttachedFiles(files: run.files, trailing: true).frame(maxWidth: SF.column * 0.85) }
                 if waiting {
                     HStack(spacing: 8) {
                         Text("Queued, sends when the current message finishes").font(SF.font(11)).foregroundStyle(SF.muted)
@@ -327,10 +348,10 @@ private struct TurnRows: View {
                 if !result.ok {
                     Text("\(Format.agentName(run.agent)) reported an error\(!result.subtype.isEmpty && result.subtype != "error" ? " (\(result.subtype))" : "")").foregroundStyle(SF.errInk)
                 }
-                if let ms = result.durationMs { Text(String(format: "%.1fs", ms / 1000)) }
+                if let ms = result.durationMs { Text(Format.durationMs(ms)) }
                 if let turns = result.turns { Text("\(turns) turn\(turns == 1 ? "" : "s")") }
                 if let cost = result.cost {
-                    Text(String(format: "$%.4f", cost))
+                    Text(Format.money(cost))
                 } else if let tokens = result.tokens {
                     Text("\(tokens.formatted()) tokens")
                 }
@@ -412,6 +433,45 @@ private struct TurnRows: View {
                 stores.toasts.error("Could not start it", error)
             }
         }
+    }
+}
+
+/// A message you just sent, in the same bubble its turn will have, so nothing moves when the server
+/// confirms it. If it couldn't go, it says why, with Retry and Discard.
+private struct PendingMessage: View {
+    var msg: Outgoing
+    var onRetry: () -> Void
+    var onDiscard: () -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            Color.clear.frame(height: 22)
+            Text(msg.text)
+                .font(SF.font(14))
+                .lineSpacing(5)
+                .foregroundStyle(SF.inkInverse)
+                .textSelection(.enabled)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(SF.ink, in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18, style: .continuous))
+                .opacity(msg.status == .failed ? 0.6 : 0.75)
+                .frame(maxWidth: SF.column * 0.85, alignment: .trailing)
+            if msg.status == .failed {
+                HStack(spacing: 8) {
+                    Text("Couldn't send\(msg.error.map { ": \($0)" } ?? "")")
+                        .font(SF.font(11))
+                        .foregroundStyle(SF.errInk)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Retry", action: onRetry).buttonStyle(PrimaryButtonStyle(height: 22))
+                    Button("Discard", action: onDiscard).buttonStyle(SecondaryButtonStyle(height: 22))
+                }
+                .accessibilityElement(children: .contain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.bottom, 12)
+        .animation(.easeOut(duration: 0.15), value: msg.status)
     }
 }
 

@@ -243,6 +243,11 @@ public enum Format {
         return "\(total / 3600)h \(pad(Int((Double(total % 3600) / 60).rounded(.down))))m"
     }
 
+    /// A length of time given in milliseconds, in the same style: `42s`, `25m 00s`, `1h 05m`.
+    public static func durationMs(_ ms: Double) -> String {
+        duration(start: Date(timeIntervalSince1970: 0), end: Date(timeIntervalSince1970: ms / 1000), now: Date())
+    }
+
     private static func pad(_ n: Int) -> String { n < 10 ? "0\(n)" : "\(n)" }
 
     private static func hm(_ date: Date, _ calendar: Calendar) -> String {

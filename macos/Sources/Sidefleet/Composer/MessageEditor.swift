@@ -14,7 +14,7 @@ struct MessageEditor: NSViewRepresentable {
     var enabled = true
     var enterSends: () -> Bool
     var onSend: () -> Void
-    var onPasteImages: ([AttachedImage]) -> Void
+    var onPasteImages: ([Attachment]) -> Void
     var accessibility: String
     /// Bump to put the cursor in the box.
     var focusTick = 0

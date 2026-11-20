@@ -41,6 +41,7 @@ fn row_to_run(r: &PgRow) -> Run {
         context: r.get("context"),
         archived_at: r.get("archived_at"),
         snoozed_until: r.get("snoozed_until"),
+        pinned_at: r.get("pinned_at"),
         pr: r.get::<Option<Value>, _>("pr").and_then(|v| serde_json::from_value(v).ok()),
         created_by: r.get("created_by"),
         room_id: r.get("room_id"),
@@ -175,7 +176,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, files, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pr, created_by, room_id, start_at";
+    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, files, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pinned_at, pr, created_by, room_id, start_at";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -302,6 +303,20 @@ pub async fn set_archived(pool: &PgPool, org: Uuid, run_id: Uuid, archived: bool
     ))
     .bind(run_id)
     .bind(archived)
+    .bind(org)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_run))
+}
+
+/// Pin or unpin the thread `run_id` belongs to. Returns its root, or None if there is no such run.
+pub async fn set_pinned(pool: &PgPool, org: Uuid, run_id: Uuid, pinned: bool) -> sqlx::Result<Option<Run>> {
+    let row = sqlx::query(&format!(
+        "UPDATE runs SET pinned_at = CASE WHEN $2 THEN COALESCE(pinned_at, now()) END
+         WHERE id = (SELECT COALESCE(parent_id, id) FROM runs WHERE id = $1 AND org_id = $3) RETURNING {RUN_COLS}"
+    ))
+    .bind(run_id)
+    .bind(pinned)
     .bind(org)
     .fetch_optional(pool)
     .await?;
@@ -858,7 +873,7 @@ pub async fn get_run(pool: &PgPool, org: Uuid, id: Uuid) -> sqlx::Result<Option<
     Ok(row.as_ref().map(row_to_run))
 }
 
-/// Root runs (threads), newest activity first, with thread status (the running
+/// Root runs (threads), pinned ones first (so the limit never drops them), then newest activity first, with thread status (the running
 /// message if any, else the latest), follow-up count, and what that message runs with.
 pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> sqlx::Result<Vec<RunSummary>> {
     let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
@@ -879,7 +894,8 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
              WHERE (l.id = r.id OR l.parent_id = r.id) AND l.kind = 'agent'
              ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1
          ) latest ON true
-         WHERE r.parent_id IS NULL AND r.org_id = $3 AND (r.archived_at IS NOT NULL) = $2 ORDER BY last_activity_at DESC LIMIT $1"
+         WHERE r.parent_id IS NULL AND r.org_id = $3 AND (r.archived_at IS NOT NULL) = $2
+         ORDER BY (r.pinned_at IS NOT NULL) DESC, last_activity_at DESC LIMIT $1"
     ))
     .bind(limit)
     .bind(archived)

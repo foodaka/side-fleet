@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use sidefleet_core::{
-    Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
+    Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, PinRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, FileUpload, ImageUpload, LiveTextRequest, WorktreeCleanupRequest, WorktreeCleanupResult, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_FILES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
@@ -74,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/pr", post(open_pr))
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/runs/{id}/snooze", post(snooze_run))
+        .route("/v1/runs/{id}/pin", post(pin_run))
         .route("/v1/runs/{id}/approvals", get(list_approvals))
         .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
         .route("/v1/runs/{id}/approvals/{approval}/deny", post(deny_tool))
@@ -1034,6 +1035,22 @@ async fn archive_run(
     let root = db::set_archived(&state.pool, caller.org_id(), id, req.archived).await?.ok_or_else(not_found)?;
     tracing::info!(run_id = %root.id, archived = req.archived, "thread archive set");
     state.inbox.signal(caller.org_id()); // archived tasks leave the inbox
+    Ok(Json(root))
+}
+
+/// Keep a thread at the top of the list (or let it go back to its place). Any run of
+/// the thread may be named. A pin is the thread's, so the whole org sees it, like an archive.
+async fn pin_run(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PinRequest>,
+) -> Result<Json<Run>, ApiError> {
+    if !caller.is_owner() {
+        own_thread(&state, &caller, id).await?;
+    }
+    let root = db::set_pinned(&state.pool, caller.org_id(), id, req.pinned).await?.ok_or_else(not_found)?;
+    tracing::info!(run_id = %root.id, pinned = req.pinned, "thread pin set");
     Ok(Json(root))
 }
 

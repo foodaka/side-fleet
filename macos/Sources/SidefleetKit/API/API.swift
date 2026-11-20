@@ -63,6 +63,10 @@ public struct API: Sendable {
         try await call("POST", "/v1/runs/\(run)/archive", ["archived": .bool(archived)])
     }
 
+    public func setPinned(run: String, pinned: Bool) async throws {
+        try await call("POST", "/v1/runs/\(run)/pin", ["pinned": .bool(pinned)])
+    }
+
     public func snooze(run: String, until: Date?) async throws {
         try await call("POST", "/v1/runs/\(run)/snooze", ["until": until.map { .string(Timestamp.format($0)) } ?? .null])
     }

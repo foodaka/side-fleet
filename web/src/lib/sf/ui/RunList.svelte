@@ -18,6 +18,8 @@
 	import ChevronRight from '@lucide/svelte/icons/chevron-right';
 	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
 	import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
+	import Pin from '@lucide/svelte/icons/pin';
+	import PinOff from '@lucide/svelte/icons/pin-off';
 	import * as Dialog from '#lib/components/ui/dialog';
 	import { Button } from '#lib/components/ui/button';
 	import { prefs } from '../prefs.svelte';
@@ -63,14 +65,17 @@
 	const filtering = $derived(fleet.multi && !!fleet.userId);
 	const scoped = $derived(filtering && scope === 'mine' ? fleet.runs.filter((r) => r.created_by === fleet.userId) : fleet.runs);
 	// Snoozed threads wait in their own section and come back on their own when the time comes.
-	const runs = $derived(scoped.filter((r) => !isSnoozed(r, fleet.now)));
+	const awake = $derived(scoped.filter((r) => !isSnoozed(r, fleet.now)));
+	// Pinned threads stay at the top, in the order they were pinned; the rest go by what they're doing and when.
+	const pinned = $derived(awake.filter((r) => r.pinned_at).sort((a, b) => a.pinned_at!.localeCompare(b.pinned_at!)));
+	const runs = $derived(awake.filter((r) => !r.pinned_at));
 	const snoozed = $derived(scoped.filter((r) => isSnoozed(r, fleet.now)).sort((a, b) => a.snoozed_until!.localeCompare(b.snoozed_until!)));
 	const theirs = $derived(filtering ? fleet.runs.filter((r) => r.created_by !== fleet.userId && !isSnoozed(r, fleet.now)).length : 0);
 
 	/** The repo most runs are in; rows from any other repo say which one. */
 	const homeRepo = $derived.by(() => {
 		const n = new Map<string, number>();
-		runs.forEach((r) => n.set(r.repo, (n.get(r.repo) ?? 0) + 1));
+		awake.forEach((r) => n.set(r.repo, (n.get(r.repo) ?? 0) + 1));
 		return [...n.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
 	});
 
@@ -181,6 +186,11 @@
 			<DropdownMenu.Item onclick={() => { fleet.forkThread = r.id; void goto('#/runs/' + r.id); }}>
 				<GitFork class="size-3.5" /><span class="flex flex-col"><span>{fleet.othersRun(r) ? 'Continue on my machine…' : 'Fork…'}</span><span class="text-xs text-muted-foreground">New thread from its latest message, any agent, model or machine{fleet.othersRun(r) ? ' of yours' : ''}</span></span>
 			</DropdownMenu.Item>
+			{#if r.pinned_at}
+				<DropdownMenu.Item onclick={() => fleet.setPinned(r, false)}><PinOff class="size-3.5" />Unpin</DropdownMenu.Item>
+			{:else}
+				<DropdownMenu.Item onclick={() => fleet.setPinned(r, true)}><Pin class="size-3.5" />Pin to top</DropdownMenu.Item>
+			{/if}
 			{#if r.archived_at}
 				<DropdownMenu.Item onclick={() => fleet.setArchived(r, false)}><ArchiveRestore class="size-3.5" />Unarchive</DropdownMenu.Item>
 			{:else}
@@ -247,7 +257,7 @@
 			</div>
 		{/if}
 	{/if}
-	{#if fleet.loaded && !q && !runs.length}
+	{#if fleet.loaded && !q && !awake.length}
 		<div class="mx-1 mt-4 rounded-lg border border-dashed border-sidebar-border px-3 py-4 text-xs leading-relaxed text-muted-foreground">
 			{#if filtering && scope === 'mine' && fleet.runs.length}
 				You haven't started a task here yet. Switch to Team to see what everyone else is running.
@@ -256,6 +266,10 @@
 			{/if}
 		</div>
 	{:else if fleet.loaded && !q}
+		{#if pinned.length}
+			{@render heading('Pinned')}
+			{#each pinned as r (r.id)}{@render row(r, live(r))}{/each}
+		{/if}
 		{#if active.length}
 			{@render heading('Active', active.length)}
 			{#each active as r (r.id)}{@render row(r, true)}{/each}

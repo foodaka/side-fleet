@@ -24,7 +24,7 @@ enum DemoData {
         "finished_at": .null, "result": .null, "parent_id": .null, "session_id": .null, "resume_session_id": .null,
         "pinned_worker_id": .null, "permission_mode": "acceptEdits", "isolation": "worktree", "failover": false, "moved_from": .null,
         "resume_from_branch": .null, "images": [], "kind": "agent", "restore_to": .null, "forked_from": .null, "fork_commit": .null,
-        "archived_at": .null, "snoozed_until": .null, "pr": .null, "created_by": "u-ada", "room_id": .null, "context": .null, "start_at": .null,
+        "archived_at": .null, "snoozed_until": .null, "pinned_at": .null, "pr": .null, "created_by": "u-ada", "room_id": .null, "context": .null, "start_at": .null,
     ]
 
     private static func iso(_ d: Date) -> JSONValue { .string(Timestamp.format(d)) }
@@ -283,7 +283,7 @@ enum DemoData {
             ]),
         ])
 
-        // Earlier this week, one snoozed, one archived.
+        // Earlier this week, one pinned, one snoozed, one archived.
         func simple(_ id: String, _ task: String, hours: Double, machine: String, repo: String = "github.com/acme/storefront", extra: [String: JSONValue] = [:]) -> [SeedRun] {
             let at = now.addingTimeInterval(-hours * 3600)
             return [SeedRun(json: run(id, task, status: "succeeded", created: at, started: at, finished: at.addingTimeInterval(240), worker: machine, repo: repo, model: "sonnet", extra: extra), events: [
@@ -293,7 +293,7 @@ enum DemoData {
                 ("status", ["status": "succeeded"], at.addingTimeInterval(240)),
             ])]
         }
-        out.append(simple("demo-images", "Compress hero images in the marketing pages", hours: 51, machine: "hetzner-vps"))
+        out.append(simple("demo-images", "Compress hero images in the marketing pages", hours: 51, machine: "hetzner-vps", extra: ["pinned_at": iso(now.addingTimeInterval(-40 * 3600))]))
         out.append(simple("demo-sitemap", "Generate the sitemap from the route table", hours: 76, machine: "mac-mini", repo: "github.com/acme/docs"))
         out.append(simple("demo-review", "Summarise what changed on main this week", hours: 30, machine: "mac-mini", extra: ["snoozed_until": iso(now.addingTimeInterval(3 * 3600))]))
         out.append(simple("demo-old", "Remove the old feature flag for guest checkout", hours: 200, machine: "hetzner-vps", extra: ["archived_at": iso(now.addingTimeInterval(-100 * 3600))]))

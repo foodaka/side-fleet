@@ -162,6 +162,10 @@ struct SidebarView: View {
                 .padding(.horizontal, 4)
                 .padding(.top, 16)
         } else {
+            if !s.pinned.isEmpty {
+                SectionHeading("Pinned")
+                ForEach(s.pinned) { RunRow(run: $0, detail: $0.isLive, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
+            }
             if !s.active.isEmpty {
                 SectionHeading("Active", count: s.active.count)
                 ForEach(s.active) { RunRow(run: $0, detail: true, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
@@ -558,6 +562,11 @@ struct RunRow: View {
             // A second line of text is a menu item's subtitle.
             Text(theirs ? "Continue on My Machine…" : "Fork…")
             Text("New thread from its latest message, any agent, model or machine\(theirs ? " of yours" : "")")
+        }
+        if run.run.pinnedAt != nil {
+            Button("Unpin") { Task { await fleet.setPinned(run, pinned: false) } }
+        } else {
+            Button("Pin to Top") { Task { await fleet.setPinned(run, pinned: true) } }
         }
         if run.run.archivedAt != nil {
             Button("Unarchive") { Task { await fleet.setArchived(run, archived: false) } }

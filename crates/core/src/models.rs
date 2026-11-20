@@ -132,6 +132,9 @@ pub struct Run {
     /// Something new in the thread (a reply, or it starting to wait on you) ends it early.
     #[serde(default)]
     pub snoozed_until: Option<DateTime<Utc>>,
+    /// On a root run: when its thread was pinned (kept at the top of the list).
+    #[serde(default)]
+    pub pinned_at: Option<DateTime<Utc>>,
     /// On a root run: the pull request opened from its branch, as last checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PullRequest>,
@@ -641,6 +644,12 @@ pub struct ForkRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveRequest {
     pub archived: bool,
+}
+
+/// Pin a thread to the top of the list, or unpin it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinRequest {
+    pub pinned: bool,
 }
 
 /// Snooze a thread until a time, or wake it now (`until` null).

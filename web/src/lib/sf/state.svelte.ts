@@ -225,6 +225,22 @@ class Fleet {
 		void this.refresh();
 	}
 
+	/** Pin a thread to the top of the list (or unpin it), at once. */
+	async setPinned(r: RunSummary, pinned: boolean) {
+		const at = pinned ? (r.pinned_at ?? new Date().toISOString()) : null;
+		const before = { runs: this.runs, archived: this.archived };
+		const mark = (list: RunSummary[]) => list.map((x) => (x.id === r.id ? { ...x, pinned_at: at } : x));
+		this.runs = mark(this.runs);
+		if (this.archived) this.archived = mark(this.archived);
+		try {
+			await api(`/v1/runs/${r.id}/pin`, { method: 'POST', body: JSON.stringify({ pinned }) });
+		} catch (e) {
+			Object.assign(this, before);
+			toast.error(pinned ? 'Could not pin' : 'Could not unpin', { description: (e as Error).message });
+		}
+		void this.refresh();
+	}
+
 	/** Rename the org the page acts in (owners). */
 	async renameOrg(name: string) {
 		const org = this.org;

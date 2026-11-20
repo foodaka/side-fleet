@@ -257,6 +257,11 @@ private actor DemoWorld {
             inbox.removeAll { $0["id"]?.string == rootID }
             broadcastInbox()
             return try encode(.object(runs[rootID]?.json ?? run.json))
+        case ("POST", "pin"):
+            let pinned = body?["pinned"]?.bool ?? true
+            let was = runs[rootID]?.json["pinned_at"] ?? .null
+            runs[rootID]?.json["pinned_at"] = pinned ? (was.isNull ? .string(Timestamp.format(now)) : was) : .null
+            return try encode(.object(runs[rootID]?.json ?? run.json))
         case ("POST", "snooze"):
             runs[rootID]?.json["snoozed_until"] = body?["until"] ?? .null
             if body?["until"]?.string != nil { inbox.removeAll { $0["id"]?.string == rootID } }
@@ -294,6 +299,7 @@ private actor DemoWorld {
         json["pr"] = .null
         json["archived_at"] = .null
         json["snoozed_until"] = .null
+        json["pinned_at"] = .null
         json["start_at"] = .null
         json["kind"] = "agent"
         json["images"] = .array([])

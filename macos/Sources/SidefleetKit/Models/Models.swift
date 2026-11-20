@@ -107,6 +107,8 @@ public struct Run: Sendable, Hashable, Decodable, Identifiable {
     public var forkedFrom: String?
     public var archivedAt: Date?
     public var snoozedUntil: Date?
+    /// On a thread's first run: when it was pinned to the top of the list.
+    public var pinnedAt: Date?
     public var pr: PullRequest?
     public var createdBy: String?
     public var roomID: String?
@@ -141,6 +143,7 @@ public struct Run: Sendable, Hashable, Decodable, Identifiable {
         forkedFrom = f.opt("forked_from")
         archivedAt = f.date("archived_at")
         snoozedUntil = f.date("snoozed_until")
+        pinnedAt = f.date("pinned_at")
         pr = f.opt("pr")
         createdBy = f.opt("created_by")
         roomID = f.opt("room_id")

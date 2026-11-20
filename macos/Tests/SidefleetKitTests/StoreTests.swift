@@ -49,6 +49,9 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(s.active.first?.id, "demo-rate", "waiting on you comes first")
         XCTAssertEqual(s.active.map(\.id), ["demo-rate", "demo-guide", "demo-audit"], "then running, then scheduled")
         XCTAssertEqual(s.snoozed.map(\.id), ["demo-review"])
+        XCTAssertEqual(s.pinned.map(\.id), ["demo-images"], "pinned sits apart, at the top")
+        XCTAssertFalse(s.groups.flatMap(\.runs).contains { $0.id == "demo-images" })
+        XCTAssertEqual(s.order.first?.id, "demo-images")
         XCTAssertEqual(s.homeRepo, "github.com/acme/storefront")
         XCTAssertFalse(s.groups.isEmpty)
         XCTAssertFalse(s.groups.flatMap(\.runs).contains { $0.id == "demo-old" }, "archived stays out")
@@ -222,6 +225,23 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(fleet.toasts.toasts.last?.title, "Archived")
         await fleet.setArchived(r, archived: false)
         XCTAssertTrue(fleet.runs.contains { $0.id == "demo-tax" })
+    }
+
+    func testPinMovesAThreadToTheTopAndBack() async {
+        let (_, fleet, _, _) = world()
+        await fleet.refresh()
+        let r = fleet.runs.first { $0.id == "demo-tax" }!
+        await fleet.setPinned(r, pinned: true)
+        let pinnedAt = fleet.runs.first { $0.id == "demo-tax" }?.run.pinnedAt
+        XCTAssertNotNil(pinnedAt, "the demo backend kept it")
+        var s = SidebarSections(runs: fleet.runs, userID: nil, teamScope: true, filtering: false, now: Date())
+        XCTAssertEqual(s.pinned.map(\.id), ["demo-images", "demo-tax"], "in the order they were pinned")
+        await fleet.setPinned(fleet.runs.first { $0.id == "demo-tax" }!, pinned: true)
+        XCTAssertEqual(fleet.runs.first { $0.id == "demo-tax" }?.run.pinnedAt, pinnedAt, "pinning again keeps the first time")
+        await fleet.setPinned(r, pinned: false)
+        XCTAssertNil(fleet.runs.first { $0.id == "demo-tax" }?.run.pinnedAt)
+        s = SidebarSections(runs: fleet.runs, userID: nil, teamScope: true, filtering: false, now: Date())
+        XCTAssertEqual(s.pinned.map(\.id), ["demo-images"])
     }
 
     func testSnoozeHidesThenWakes() async {

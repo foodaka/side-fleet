@@ -58,7 +58,7 @@ estimate for Swift, leaving Rooms, Team and Chat apps for later: 3,000 lines of 
 |---|---|
 | `lib/sf/thread.svelte.ts` | The event reducer: `apply()` turns each stream event into a turn's items. The heart of the client. |
 | `lib/sf/format.ts` | Agents, models, efforts, permissions, every time and number format |
-| `lib/sf/state.svelte.ts` | Polling, derived fleet state, archive and snooze with rollback, org switching |
+| `lib/sf/state.svelte.ts` | Polling, derived fleet state, archive, snooze and pin with rollback, org switching |
 | `lib/sf/diff/parse.ts` | Patch parsing, word-level marks, split rows, whitespace hiding, diffstat blocks |
 | `lib/sf/snooze.ts`, `prefs.svelte.ts`, `seen.svelte.ts`, `telemetry.svelte.ts` | Presets, send-key rules, unread marks, CPU history and fleet events |
 
@@ -192,6 +192,7 @@ is the normal case here.
 | Restore, fork, open PR | `POST /restore`, `POST /fork`, `POST /:root/pr` |
 | Approve, deny | `POST /approvals/:id/approve`, `/deny` |
 | Archive, snooze | `POST /archive {archived}`, `POST /snooze {until}`, optimistic with rollback and Undo |
+| Pin | `POST /pin {pinned}`, optimistic with rollback; the list puts pinned threads first |
 | Inbox | `POST /v1/inbox/:id/dismiss`, `POST /v1/inbox/dismiss-all` |
 | Machines | `POST /v1/workers/:id/update`, `DELETE /v1/workers/:id`, `POST /v1/enrollments/lookup`, `/approve`, `/deny` |
 | Repos | `PUT /v1/repos {added}` |
@@ -247,7 +248,7 @@ key accordingly. Warns if plain HTTP is going to a public address. Animated logo
 
 **Sidebar** (`Sidebar.svelte`, `RunList.svelte`). Logo and name, inbox bell, org switcher, New task,
 search, then the list, then nav.
-- Sections: Active (with a count), Today, Yesterday, Previous 7 days, Older, then collapsed Snoozed
+- Sections: Pinned (in the order they were pinned), Active (with a count), Today, Yesterday, Previous 7 days, Older, then collapsed Snoozed
   and Archived. Archived loads on first open.
 - Active sorts: waiting on you, running, queued, scheduled soonest first.
 - Row: status dot, title, then a detail line. Active rows show machine and duration, "Waiting on
@@ -255,7 +256,7 @@ search, then the list, then nav.
   it isn't the most common one), machine (only if there are several), model and agent icon.
 - Markers: a coloured dot when waiting on you, an ink dot when unread and finished, PR number and
   icon when there is one. Finished and read runs dim their dot.
-- Context menu in place of the hover ⋯: Fork, Snooze with presets and wake times, Pick a date and
+- Context menu in place of the hover ⋯: Fork, Pin to Top or Unpin, Snooze with presets and wake times, Pick a date and
   time, Archive or Unarchive, Open in New Window.
 - Mine and Team switch when the org has several members. The choice sticks.
 - Search covers title, repo and machine, plus archived once loaded.

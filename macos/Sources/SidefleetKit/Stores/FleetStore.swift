@@ -297,6 +297,22 @@ public final class FleetStore {
         await refresh()
     }
 
+    /// Pin a thread to the top of the list (or unpin it), at once.
+    public func setPinned(_ r: RunSummary, pinned: Bool) async {
+        let beforeRuns = runs, beforeArchived = archived
+        let at: Date? = pinned ? (r.run.pinnedAt ?? Date()) : nil
+        if let i = runs.firstIndex(where: { $0.id == r.id }) { runs[i].run.pinnedAt = at }
+        if let i = archived?.firstIndex(where: { $0.id == r.id }) { archived?[i].run.pinnedAt = at }
+        do {
+            try await api.setPinned(run: r.id, pinned: pinned)
+        } catch {
+            runs = beforeRuns
+            archived = beforeArchived
+            toasts.error(pinned ? "Could not pin" : "Could not unpin", error)
+        }
+        await refresh()
+    }
+
     /// Snooze a thread until a time (or wake it with nil), at once; snoozing offers an undo.
     public func setSnoozed(_ r: RunSummary, until: Date?) async {
         let before = runs
@@ -403,6 +419,8 @@ public struct SidebarSections: Sendable {
         public var id: String { label }
     }
 
+    /// Kept at the top, in the order they were pinned.
+    public var pinned: [RunSummary] = []
     public var active: [RunSummary] = []
     public var groups: [Group] = []
     public var snoozed: [RunSummary] = []
@@ -410,7 +428,9 @@ public struct SidebarSections: Sendable {
     public var homeRepo = ""
     /// Teammates' tasks, for the Team tab's count.
     public var theirs = 0
-    public var isEmpty: Bool { active.isEmpty && groups.isEmpty }
+    public var isEmpty: Bool { pinned.isEmpty && active.isEmpty && groups.isEmpty }
+    /// Top to bottom, as the sidebar shows them (snoozed aside).
+    public var order: [RunSummary] { pinned + active + groups.flatMap(\.runs) }
 
     public init(runs all: [RunSummary], userID: String?, teamScope: Bool, filtering: Bool, now: Date, calendar: Calendar = .current) {
         let scoped = filtering && !teamScope ? all.filter { $0.run.createdBy == userID } : all
@@ -422,20 +442,23 @@ public struct SidebarSections: Sendable {
         for r in awake { counts[r.run.repo, default: 0] += 1 }
         homeRepo = counts.max { ($0.value, $1.key) < ($1.value, $0.key) }?.key ?? ""
 
+        pinned = awake.filter { $0.run.pinnedAt != nil }.sorted { ($0.run.pinnedAt ?? now) < ($1.run.pinnedAt ?? now) }
+        let rest = awake.filter { $0.run.pinnedAt == nil }
+
         // Threads waiting on you first, then running, then queued, then those scheduled for later (soonest first).
         func rank(_ r: RunSummary) -> Int {
             if r.pendingApprovals > 0 { return 0 }
             if r.threadStatus == .running { return 1 }
             return r.run.isScheduled(now: now) ? 3 : 2
         }
-        active = awake.filter(\.isLive).enumerated().sorted { a, b in
+        active = rest.filter(\.isLive).enumerated().sorted { a, b in
             let (ra, rb) = (rank(a.element), rank(b.element))
             if ra != rb { return ra < rb }
             if ra == 3, let x = a.element.run.startAt, let y = b.element.run.startAt, x != y { return x < y }
             return a.offset < b.offset
         }.map(\.element)
 
-        for r in awake where !r.isLive {
+        for r in rest where !r.isLive {
             let label = Format.dayGroup(r.lastActivityAt, now: now, calendar: calendar).rawValue
             if groups.last?.label == label {
                 groups[groups.count - 1].runs.append(r)

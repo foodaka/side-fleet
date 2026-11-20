@@ -341,6 +341,11 @@ final class LiveServerTests: XCTestCase {
         await fleet.setSnoozed(summary, until: nil)
         XCTAssertNil(fleet.runs.first { $0.id == id }?.run.snoozedUntil)
 
+        await fleet.setPinned(summary, pinned: true)
+        XCTAssertNotNil(fleet.runs.first { $0.id == id }?.run.pinnedAt, "the server kept the pin")
+        await fleet.setPinned(summary, pinned: false)
+        XCTAssertNil(fleet.runs.first { $0.id == id }?.run.pinnedAt)
+
         await fleet.setArchived(summary, archived: true)
         XCTAssertFalse(fleet.runs.contains { $0.id == id })
         await fleet.loadArchived()

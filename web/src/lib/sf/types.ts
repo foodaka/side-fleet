@@ -47,6 +47,8 @@ export interface Run {
 	archived_at?: string | null;
 	/** On a thread's first run: hidden from the list and the inbox until then (see `snooze.ts`). */
 	snoozed_until?: string | null;
+	/** On a thread's first run: when it was pinned to the top of the list. */
+	pinned_at?: string | null;
 	/** On a thread's first run: the pull request opened from its branch, as last checked. */
 	pr?: PullRequest | null;
 	/** Who sent this message (a user id); null for the developer key and older runs. */

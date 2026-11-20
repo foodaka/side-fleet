@@ -1886,6 +1886,55 @@ async fn threads_can_be_archived_and_come_back_with_a_new_message() {
     env.teardown().await;
 }
 
+#[tokio::test]
+async fn pinned_threads_come_first_and_the_limit_keeps_them() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let mut ids = Vec::new();
+    for task in ["oldest", "middle", "newest"] {
+        let (_, body) = api.create_run(task, "r").await;
+        let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(api.claim("w1", &["r"]).await.unwrap().id, id);
+        api.post_events("w1", id, json!([{"kind": "agent_init", "payload": {"session_id": format!("sess-{task}")}}])).await;
+        api.finish("w1", id, "succeeded", json!({})).await;
+        ids.push(id);
+    }
+    let (oldest, middle, newest) = (ids[0], ids[1], ids[2]);
+    let list = |limit: i64| {
+        let api = &api;
+        async move {
+            let v: Vec<RunSummary> = api.dev(reqwest::Method::GET, &format!("/v1/runs?limit={limit}")).send().await.unwrap().json().await.unwrap();
+            v.into_iter().map(|s| s.run.id).collect::<Vec<_>>()
+        }
+    };
+    let pin = |id: Uuid, pinned: bool| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/pin")).json(&json!({"pinned": pinned})).send();
+    assert_eq!(list(10).await, vec![newest, middle, oldest]);
+
+    let r = pin(oldest, true).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let got = r.json::<Run>().await.unwrap();
+    assert_eq!(got.id, oldest);
+    let at = got.pinned_at.expect("pinned_at set");
+    assert_eq!(list(10).await, vec![oldest, newest, middle]);
+    // The list's limit never leaves a pinned thread out.
+    assert_eq!(list(1).await, vec![oldest]);
+    // Pinning again keeps when it was first pinned.
+    assert_eq!(pin(oldest, true).await.unwrap().json::<Run>().await.unwrap().pinned_at, Some(at));
+
+    // A follow-up names the thread too, and the root comes back.
+    let f = send_message(&api, middle, "one more thing").await;
+    api.stop(f).await;
+    let got = pin(f, true).await.unwrap().json::<Run>().await.unwrap();
+    assert_eq!(got.id, middle);
+    assert_eq!(list(10).await, vec![middle, oldest, newest]);
+
+    assert!(pin(oldest, false).await.unwrap().json::<Run>().await.unwrap().pinned_at.is_none());
+    assert_eq!(list(10).await, vec![middle, newest, oldest]);
+    assert_eq!(pin(Uuid::new_v4(), true).await.unwrap().status(), StatusCode::NOT_FOUND);
+    env.teardown().await;
+}
+
 // ---- tool approvals ("Ask me") ----
 
 async fn ask(api: &Api, worker: &str, run: Uuid, body: Value) -> (StatusCode, Value) {

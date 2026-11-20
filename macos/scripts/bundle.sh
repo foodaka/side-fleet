@@ -27,9 +27,19 @@ fi
 # SwiftPM resource bundles sit beside the binary; the app has none today, but a dependency could.
 for b in "$bin"/*.bundle; do [ -e "$b" ] && cp -R "$b" "$app/Contents/Resources/"; done
 
+# Sparkle, the updater, is a framework: it goes in Contents/Frameworks, where the binary must look.
+# Its macOS build is already universal, so the arm64 build's copy serves both.
+mkdir -p "$app/Contents/Frameworks"
+ditto "$bin/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
+if ! otool -l "$app/Contents/MacOS/Sidefleet" | grep -q "@executable_path/../Frameworks"; then
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/Sidefleet"
+fi
+
+# Sparkle compares CFBundleVersion to tell whether a release is newer, so it has to be the version
+# itself, not a commit hash; the commit goes in a key of its own.
 version="${VERSION:-0.1.0}"
-build="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
-sed -e "s/__VERSION__/$version/" -e "s/__BUILD__/$build/" Resources/Info.plist > "$app/Contents/Info.plist"
+commit="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+sed -e "s/__VERSION__/$version/" -e "s/__BUILD__/$version/" -e "s/__COMMIT__/$commit/" Resources/Info.plist > "$app/Contents/Info.plist"
 
 # Every icon size from the one master.
 iconset="$(mktemp -d)/AppIcon.iconset"
@@ -41,9 +51,19 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 
+# Sign from the inside out: Sparkle's helpers, then the framework, then the app. The downloader keeps
+# the entitlements Sparkle gave it.
 if [ -n "${SIGN_ID:-}" ]; then
-  codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"
+  sign() { codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$@"; }
 else
-  codesign --force --sign - "$app"
+  sign() { codesign --force --sign - "$@"; }
 fi
+fw="$app/Contents/Frameworks/Sparkle.framework/Versions/B"
+for xpc in "$fw"/XPCServices/*.xpc; do
+  [ -e "$xpc" ] && sign --preserve-metadata=entitlements "$xpc"
+done
+sign "$fw/Autoupdate"
+sign "$fw/Updater.app"
+sign "$app/Contents/Frameworks/Sparkle.framework"
+sign "$app"
 echo "$app"

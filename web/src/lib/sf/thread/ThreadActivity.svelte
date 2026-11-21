@@ -49,7 +49,8 @@
 			<Dialog.Title>Activity</Dialog.Title>
 			<Dialog.Description>
 				{fleet.isOwner ? 'Who did what in this thread, newest first.' : 'What you did in this thread and what happened on your machines. Owners of the org see all of it.'}
-				<a href="#/team/activity" class="underline underline-offset-2 hover:text-foreground" onclick={() => (open = false)}>Activity log</a>
+				{' '}
+				<a href="#/team/activity" class="underline underline-offset-2 hover:text-foreground" onclick={() => (open = false)}>Open the activity log</a>
 			</Dialog.Description>
 		</Dialog.Header>
 		{#if error}

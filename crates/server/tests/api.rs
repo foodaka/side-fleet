@@ -2328,10 +2328,10 @@ async fn a_task_scheduled_for_later_waits_for_its_time_or_start_now() {
 async fn a_budget_goes_from_key_offer_to_authorization_to_recorded_payments() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);
-    // Claude Code only for now, and at most $100.
+    // At most $100, and not for opencode yet.
     for body in [
-        json!({"task": "t", "agent": "codex", "model": "", "repo": "r", "budget_micros": 1_000_000}),
         json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r", "budget_micros": 101_000_000}),
+        json!({"task": "t", "agent": "opencode", "model": "", "repo": "r", "budget_micros": 1_000_000}),
     ] {
         let r = api.dev(reqwest::Method::POST, "/v1/runs").json(&body).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{body}");

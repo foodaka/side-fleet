@@ -44,7 +44,7 @@
 		oniso?: (w: string) => void;
 		/** "Move if it drops"; only offered on its own branch. */
 		failover?: boolean;
-		/** Agent budgets (Claude Code): the most the agent may pay for APIs, in micros; 0 is none. Leave out to hide. */
+		/** Agent budgets (Claude Code, Codex): the most the agent may pay for APIs, in micros; 0 is none. Leave out to hide. */
 		budget?: number;
 		/** Payments above this ask first. */
 		askAbove?: number;
@@ -56,7 +56,8 @@
 	const pinned = $derived(machines.find((w) => w.id === machine));
 	const showMachines = $derived(machines.length > 1);
 	const showFailover = $derived(iso === 'worktree');
-	const showBudget = $derived(agent === 'claude' && budget !== undefined);
+	// opencode can't be given the pay tool yet (see check_budget on the server).
+	const showBudget = $derived(agent !== 'opencode' && budget !== undefined);
 
 	/** What differs from the defaults, in the order the menu lists it. */
 	const changed = $derived(

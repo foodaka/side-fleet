@@ -3,8 +3,8 @@
 A task can carry a budget, so its agent can pay for APIs that charge per call over the
 [Machine Payments Protocol](https://mpp.dev) (HTTP 402) on [Tempo](https://tempo.xyz)'s
 testnet. Payments under the task's threshold go through on their own; larger ones wait for
-Approve on the page, like an "Ask me" tool call. This is a spike: testnet only, Claude Code
-only, behind `SIDEFLEET_PAYMENTS=1` on each machine.
+Approve on the page, like an "Ask me" tool call. This is a spike: testnet only, Claude Code and
+Codex, behind `SIDEFLEET_PAYMENTS=1` on each machine.
 
 ## Who holds what
 
@@ -33,9 +33,11 @@ against what is left before paying, and asks above the threshold, but nothing de
    `SIDEFLEET_API_TOKEN`). Either posts to `POST /v1/runs/{id}/pay-key/authorize`: a
    `budget_authorized` event, and the approval is approved.
 4. The worker checks the authorization (this key, this chain, signed by the wallet, limit at
-   most the budget) and starts Claude Code with a `pay` MCP tool (`sidefleet pay-mcp`, allowed
-   with `--allowedTools mcp__sidefleet_pay__pay`) and a line in its system prompt about the
-   budget. Nobody authorizing within the approval timeout starts the agent without the tool
+   most the budget) and starts the agent with a `pay` MCP tool (`sidefleet pay-mcp`) and a note
+   about the budget: Claude Code in `--mcp-config`, allowed with `--allowedTools
+   mcp__sidefleet_pay__pay`, the note in its system prompt; Codex in `-c mcp_servers.sidefleet_pay.*`
+   for that run only, with `default_tools_approval_mode="approve"` (the tool asks the user itself)
+   and a tool timeout past the approval wait, the note after the task. Nobody authorizing within the approval timeout starts the agent without the tool
    (`budget_skipped`).
 5. The agent calls `pay` with a URL. The worker makes the request; on a 402 it reads the Tempo
    charge, refuses it if it is over what is left, asks on the page above the threshold (an
@@ -88,7 +90,9 @@ wallet's authorization pays on chain (`SIDEFLEET_TEST_PASSKEY_AUTH`, see the tes
 
 - A passkey made on one site works only there (WebAuthn binds it to the domain), so a wallet
   made on a self-hosted control plane can't sign on the hosted one.
-- Codex and opencode (both can load MCP servers; neither is given the tool yet).
+- opencode: 2.x reads MCP servers only from a project config file (not the environment, nor a
+  config file or folder named in it), which would have to go in the task's own worktree. A task
+  with opencode can't have a budget yet.
 - Call scopes on the access key (TIP-1011), so it can only call the token's transfer functions,
   and only to pinned addresses.
 - Choosing services per task in the composer; today a task takes your whole list.

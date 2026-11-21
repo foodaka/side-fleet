@@ -509,8 +509,9 @@ fn check_ask_agent(mode: Option<&str>, agent: Agent) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// A task's budget: positive, at most `MAX_BUDGET_MICROS`, Claude Code only for now (the pay
-/// tool is an MCP server, which only Claude Code is given). The threshold defaults to $1.
+/// A task's budget: positive, at most `MAX_BUDGET_MICROS`, not for opencode: opencode 2.x reads
+/// MCP servers only from a project config file, which would have to go in the task's own worktree.
+/// The threshold defaults to $1.
 fn check_budget(budget: Option<i64>, ask_above: Option<i64>, agent: Agent) -> Result<(Option<i64>, Option<i64>), ApiError> {
     let Some(budget) = budget.filter(|b| *b != 0) else {
         return Ok((None, None));
@@ -518,8 +519,8 @@ fn check_budget(budget: Option<i64>, ask_above: Option<i64>, agent: Agent) -> Re
     if !(1..=sidefleet_core::MAX_BUDGET_MICROS).contains(&budget) {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("budget must be between $0.000001 and ${}", sidefleet_core::MAX_BUDGET_MICROS / 1_000_000)));
     }
-    if agent != Agent::Claude {
-        return Err(ApiError(StatusCode::BAD_REQUEST, format!("budgets work with Claude Code only for now, not {}", agent.display_name())));
+    if agent == Agent::Opencode {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "budgets work with Claude Code and Codex, not opencode yet".into()));
     }
     let ask_above = ask_above.unwrap_or(sidefleet_core::DEFAULT_ASK_ABOVE_MICROS);
     if ask_above < 0 {

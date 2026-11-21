@@ -140,7 +140,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined, budget_micros: agent === 'claude' && budget ? budget : undefined, ask_above_micros: agent === 'claude' && budget ? askAbove : undefined })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined, budget_micros: agent !== 'opencode' && budget ? budget : undefined, ask_above_micros: agent !== 'opencode' && budget ? askAbove : undefined })
 			});
 			task = '';
 			startAt = '';

@@ -824,7 +824,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
 
     // A budget: make the run's key, wait for the user to authorize it, then serve the pay tool.
     let (mut pay_bridge, mut pay_hook) = (None, None);
-    if run.budget_micros.is_some() && run.agent == Agent::Claude {
+    if run.budget_micros.is_some() && run.agent != Agent::Opencode {
         let skip = match &cfg.payments {
             None => Some("payments are off on this machine (set SIDEFLEET_PAYMENTS=1 in its worker.env), so the agent runs without its budget".to_string()),
             Some(pcfg) => match start_payments(client, cfg, pcfg, &run, &stop_tx).await {

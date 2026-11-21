@@ -69,7 +69,7 @@ pub struct AgentSpec {
     pub files: Vec<PathBuf>,
     /// "Ask me" with Claude Code: where its permission prompts go (see [`crate::approval`]).
     pub approval: Option<ApprovalHook>,
-    /// A budget with Claude Code: the pay tool (see [`crate::pay`]).
+    /// A budget: the pay tool (see [`crate::pay`]), for Claude Code and Codex.
     pub pay: Option<PayHook>,
 }
 
@@ -115,6 +115,7 @@ impl AgentSpec {
                 if !self.files.is_empty() {
                     p.push_str(&Self::attached_note("a file", "files", "read", "", &self.files));
                 }
+                p.push_str(&self.budget_note());
                 return p;
             }
             Agent::Claude => {}
@@ -129,6 +130,11 @@ impl AgentSpec {
             p.push_str(&Self::attached_note("a file", "files", "read", " with the Read tool", &self.files));
         }
         p
+    }
+
+    /// Codex has no system prompt to append to: the budget goes with the task.
+    fn budget_note(&self) -> String {
+        self.pay.as_ref().map(|p| format!("\n\n---\n{}", p.hint)).unwrap_or_default()
     }
 
     fn attached_note(one: &str, many: &str, verb: &str, how: &str, paths: &[PathBuf]) -> String {
@@ -229,6 +235,23 @@ impl AgentSpec {
         }
         if let Some(e) = &self.effort {
             a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
+        }
+        // The pay tool for this run only (TOML values; paths quoted like TOML basic strings). Codex
+        // would ask before each call and, run headless, refuse it: the tool asks the user itself.
+        // Its calls may wait for that approval, past Codex's 60 s default.
+        if let Some(p) = &self.pay {
+            let server = crate::pay::MCP_SERVER;
+            let toml = |s: &std::path::Path| format!("{:?}", s.to_string_lossy());
+            a.extend([
+                "-c".into(),
+                format!("mcp_servers.{server}.command={}", toml(&p.exe)),
+                "-c".into(),
+                format!("mcp_servers.{server}.args=[\"pay-mcp\", \"--socket\", {}]", toml(&p.socket)),
+                "-c".into(),
+                format!("mcp_servers.{server}.tool_timeout_sec={}", (p.timeout + Duration::from_secs(60)).as_secs()),
+                "-c".into(),
+                format!("mcp_servers.{server}.default_tools_approval_mode=\"approve\""),
+            ]);
         }
         for img in &self.images {
             a.push(format!("--image={}", img.to_string_lossy()));

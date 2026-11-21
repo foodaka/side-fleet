@@ -375,3 +375,34 @@ fn ask_me_relays_claude_codes_permission_prompts() {
     let s = AgentSpec { permission_mode: "ask".into(), ..agent_spec(Agent::Opencode, "t") };
     assert!(s.env().contains(&("OPENCODE_PERMISSION", r#"{"bash":"deny"}"#.to_string())));
 }
+
+fn pay_hook() -> sidefleet_worker::agent::PayHook {
+    sidefleet_worker::agent::PayHook {
+        exe: "/opt/sidefleet".into(),
+        socket: "/tmp/sf-pay-1/a.sock".into(),
+        hint: "You have a budget of $5.00 for paid APIs.".into(),
+        timeout: Duration::from_secs(900),
+    }
+}
+
+#[test]
+fn claude_code_and_codex_get_the_pay_tool_and_their_budget() {
+    // Claude Code: the server in --mcp-config, allowed, the budget in its system prompt.
+    let claude = AgentSpec { pay: Some(pay_hook()), ..spec("look it up") }.args();
+    let config = &claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1];
+    assert!(config.contains("\"sidefleet_pay\"") && config.contains("pay-mcp"), "{config}");
+    assert!(claude.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "mcp__sidefleet_pay__pay"));
+    assert!(claude.iter().any(|a| a.contains("budget of $5.00")));
+
+    // Codex: the server for this run only, a tool timeout that outlasts an approval, the budget in the task.
+    let codex = AgentSpec { agent: Agent::Codex, model: String::new(), pay: Some(pay_hook()), ..spec("look it up") }.args();
+    assert!(codex.contains(&r#"mcp_servers.sidefleet_pay.command="/opt/sidefleet""#.to_string()), "{codex:?}");
+    assert!(codex.contains(&r#"mcp_servers.sidefleet_pay.args=["pay-mcp", "--socket", "/tmp/sf-pay-1/a.sock"]"#.to_string()), "{codex:?}");
+    assert!(codex.contains(&"mcp_servers.sidefleet_pay.tool_timeout_sec=960".to_string()), "{codex:?}");
+    assert!(codex.contains(&r#"mcp_servers.sidefleet_pay.default_tools_approval_mode="approve""#.to_string()), "{codex:?}");
+    let task = codex.last().unwrap();
+    assert!(task.starts_with("look it up") && task.ends_with("budget of $5.00 for paid APIs."), "{task}");
+
+    // No budget, no tool.
+    assert!(!AgentSpec { agent: Agent::Codex, model: String::new(), ..spec("t") }.args().iter().any(|a| a.contains("mcp_servers")));
+}

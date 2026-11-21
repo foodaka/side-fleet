@@ -6,8 +6,8 @@
 //! an expiry and a spending limit (`sidefleet wallet authorize`); Tempo itself
 //! refuses anything past that limit, whatever happens here.
 //!
-//! The agent gets one MCP tool, `pay` (`sidefleet pay-mcp --socket <path>`, the
-//! same shape as "Ask me"'s prompt tool): it asks for a URL, and the worker
+//! The agent (Claude Code or Codex) gets one MCP tool, `pay`
+//! (`sidefleet pay-mcp --socket <path>`, the same shape as "Ask me"'s prompt tool): it asks for a URL, and the worker
 //! ([`Payer`]) makes the request. When the service answers 402 the worker checks
 //! the price against what is left of the budget, asks on the page above the
 //! run's threshold, for a service that isn't one of the user's approved ones, or
@@ -107,8 +107,8 @@ pub fn mcp_server(exe: &Path, socket: &Path) -> Value {
 pub fn agent_hint(budget_micros: i64, ask_above_micros: i64) -> String {
     format!(
         "You have a budget of {} for paid APIs in this task. When a service needs payment (HTTP 402, \
-         the Machine Payments Protocol), call the `{PAY_TOOL}` tool with the URL instead of fetching it \
-         yourself: it pays from the budget and returns the response. Payments over {} wait for the user \
+         the Machine Payments Protocol), call the `pay` tool of the `{MCP_SERVER}` MCP server with the URL \
+         instead of fetching it yourself: it pays from the budget and returns the response. Payments over {} wait for the user \
          to approve them. Say what each payment is for in `reason`, and don't spend more than the task needs.",
         usd(budget_micros),
         usd(ask_above_micros)

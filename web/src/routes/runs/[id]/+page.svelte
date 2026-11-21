@@ -30,6 +30,8 @@
 	import PendingMessage from '#lib/sf/thread/PendingMessage.svelte';
 	import ForkDialog from '#lib/sf/thread/ForkDialog.svelte';
 	import StopDialog from '#lib/sf/thread/StopDialog.svelte';
+	import ThreadActivity from '#lib/sf/thread/ThreadActivity.svelte';
+	import History from '@lucide/svelte/icons/history';
 	import ContextMeter from '#lib/sf/thread/ContextMeter.svelte';
 	import { prefs } from '#lib/sf/prefs.svelte';
 	import DiffViewer, { type DiffScope } from '#lib/sf/diff/DiffViewer.svelte';
@@ -58,6 +60,7 @@
 
 	// Fork asked for from the sidebar: from the latest finished message, once the thread has loaded.
 	let forkOpen = $state(false);
+	let activityOpen = $state(false);
 	const forkTurn = $derived(thread?.turns.findLast((t) => ['succeeded', 'failed', 'stopped'].includes(t.run.status)));
 	$effect(() => {
 		if (!loaded || !fleet.forkThread || fleet.forkThread !== thread?.root?.id) return;
@@ -303,6 +306,9 @@
 							<DiffStat add={thread.changes.additions} del={thread.changes.deletions} blocks={false} class="text-[11px]" />
 						</button>
 					{/if}
+					<button type="button" class="inline-flex items-center gap-1 hover:text-foreground" onclick={() => (activityOpen = true)} title="Who started, stopped, approved and ran this thread">
+						<History class="size-3" />Activity
+					</button>
 				</div>
 			{:else}
 				<div class="h-6 w-2/3 animate-pulse rounded bg-muted"></div>
@@ -313,6 +319,7 @@
 
 	<StopDialog bind:open={stopAsk} agent={agentName(threadAgent ?? agent)} {queued} onstop={stop} />
 	{#if forkTurn}<ForkDialog bind:open={forkOpen} run={forkTurn.run} hasFiles={!!forkTurn.snapshot} />{/if}
+	{#if root}<ThreadActivity bind:open={activityOpen} thread={root.id} />{/if}
 
 	<Conversation class="min-h-0 flex-1">
 		<div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain" data-scroller>

@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::audit::{self, Actor, Entry};
+
 fn row_to_run(r: &PgRow) -> Run {
     let status: String = r.get("status");
     Run {
@@ -965,6 +967,11 @@ pub async fn append_events(
     }
     let mut stored = Vec::with_capacity(events.len());
     let mut session: Option<String> = None;
+    // The agent reporting its session is when the run really starts (the claim only reserved it).
+    if run.session_id.is_none() && events.iter().any(|e| e.kind == "agent_init") {
+        let entry = Entry::new("run.started").run(run_id).worker(Some(worker_id)).detail(json!({ "agent": run.agent.as_str(), "model": run.model }));
+        audit::record(&mut *tx, org, &Actor::worker(worker_id), entry).await?;
+    }
     for e in events {
         // Images skip redaction (it would only mangle base64) and go to their own table.
         let mut payload = e.payload.clone();
@@ -1354,6 +1361,8 @@ pub async fn claim_run(
                     .execute(&mut *tx)
                     .await?;
                 let ev = append_event_locked(&mut tx, run.id, "status", &json!({"status": "failed", "reason": reason})).await?;
+                let entry = Entry::new("run.finished").run(run.id).worker(Some(worker_id)).detail(json!({ "status": "failed", "reason": reason }));
+                audit::record(&mut *tx, org, &Actor::system(), entry).await?;
                 tx.commit().await?;
                 failed.push(ev);
                 continue;
@@ -1372,6 +1381,11 @@ pub async fn claim_run(
             &json!({"status": "running", "worker_id": worker_id}),
         )
         .await?;
+        let entry = Entry::new("run.claimed")
+            .run(run.id)
+            .worker(Some(worker_id))
+            .detail(json!({ "kind": run.kind, "repo": run.repo, "agent": run.agent.as_str(), "created_by": run.created_by }));
+        audit::record(&mut *tx, org, &Actor::worker(worker_id), entry).await?;
         tx.commit().await?;
         return Ok(Claimed { run: Some((run, ev)), failed });
     }
@@ -1463,6 +1477,11 @@ pub async fn finish_run(
                 )
                 .await?,
             );
+            let entry = Entry::new("run.requeued")
+                .run(run_id)
+                .worker(Some(worker_id))
+                .detail(json!({ "reason": "usage_limit", "agent": run.agent.as_str(), "limited_until": until }));
+            audit::record(&mut *tx, org, &Actor::worker(worker_id), entry).await?;
             tx.commit().await?;
             return Ok(FinishOutcome::Requeued(row_to_run(&row), events));
         }
@@ -1477,6 +1496,12 @@ pub async fn finish_run(
     .fetch_one(&mut *tx)
     .await?;
     events.push(append_event_locked(&mut tx, run_id, "status", &status_payload(status)).await?);
+    let entry = Entry::new("run.finished").run(run_id).worker(Some(worker_id)).detail(json!({
+        "status": status.as_str(),
+        "usage_limit": usage_limit.is_some().then_some(true),
+        "stop_requested": run.stop_requested.then_some(true),
+    }));
+    audit::record(&mut *tx, org, &Actor::worker(worker_id), entry).await?;
     tx.commit().await?;
     Ok(FinishOutcome::Finished(row_to_run(&row), events))
 }
@@ -1502,7 +1527,7 @@ pub async fn reconcile_worker_runs(pool: &PgPool, org: Uuid, worker_id: &str, ac
         }
         out.extend(crate::approvals::cancel_pending(&mut tx, id).await?);
         let reason = format!("the worker {worker_id} restarted while this run was in progress");
-        if let Some(evs) = move_lost_run(&mut tx, &run, worker_id, &reason).await? {
+        if let Some(evs) = move_lost_run(&mut tx, org, &run, worker_id, &reason).await? {
             tx.commit().await?;
             out.extend(evs);
             continue;
@@ -1515,6 +1540,8 @@ pub async fn reconcile_worker_runs(pool: &PgPool, org: Uuid, worker_id: &str, ac
             .execute(&mut *tx)
             .await?;
         let ev = append_event_locked(&mut tx, id, "status", &json!({"status": status.as_str(), "reason": "worker restarted"})).await?;
+        let entry = Entry::new("run.finished").run(id).worker(Some(worker_id)).detail(json!({ "status": status.as_str(), "reason": "worker restarted" }));
+        audit::record(&mut *tx, org, &Actor::system(), entry).await?;
         tx.commit().await?;
         out.push(ev);
     }
@@ -1525,7 +1552,7 @@ pub async fn reconcile_worker_runs(pool: &PgPool, org: Uuid, worker_id: &str, ac
 /// failover run is moved to another machine instead.
 pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<Vec<RunEvent>> {
     let rows = sqlx::query(
-        "SELECT r.id FROM runs r JOIN workers w ON w.id = r.worker_id AND w.org_id = r.org_id
+        "SELECT r.id, r.org_id FROM runs r JOIN workers w ON w.id = r.worker_id AND w.org_id = r.org_id
          WHERE r.status = 'running' AND w.last_heartbeat_at < now() - make_interval(secs => $1)",
     )
     .bind(stale_secs as f64)
@@ -1534,15 +1561,16 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
     let mut out = Vec::new();
     for row in rows {
         let id: Uuid = row.get("id");
+        let org: Uuid = row.get("org_id");
         let mut tx = pool.begin().await?;
-        let Some(run) = lock_run(&mut tx, None, id).await? else { continue };
+        let Some(run) = lock_run(&mut tx, Some(org), id).await? else { continue };
         if run.status != RunStatus::Running {
             continue;
         }
         out.extend(crate::approvals::cancel_pending(&mut tx, id).await?);
         let reason = "worker stopped heart-beating while the run was in progress";
         let worker = run.worker_id.clone().unwrap_or_default();
-        if let Some(evs) = move_lost_run(&mut tx, &run, &worker, reason).await? {
+        if let Some(evs) = move_lost_run(&mut tx, org, &run, &worker, reason).await? {
             tx.commit().await?;
             out.extend(evs);
             continue;
@@ -1555,6 +1583,8 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
         .execute(&mut *tx)
         .await?;
         let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "failed", "reason": "worker lost"})).await?;
+        let entry = Entry::new("run.finished").run(id).worker(run.worker_id.as_deref()).detail(json!({ "status": "failed", "reason": "worker lost" }));
+        audit::record(&mut *tx, org, &Actor::system(), entry).await?;
         tx.commit().await?;
         out.push(ev);
     }
@@ -1567,7 +1597,7 @@ pub async fn reap_orphaned_runs(pool: &PgPool, stale_secs: i64) -> sqlx::Result<
 /// A late finish from the worker is then ignored.
 pub async fn stop_unresponsive_runs(pool: &PgPool, grace_secs: i64) -> sqlx::Result<Vec<RunEvent>> {
     let rows = sqlx::query(
-        "SELECT id FROM runs
+        "SELECT id, org_id FROM runs
          WHERE status = 'running' AND stop_requested AND stop_requested_at < now() - make_interval(secs => $1)",
     )
     .bind(grace_secs as f64)
@@ -1576,8 +1606,9 @@ pub async fn stop_unresponsive_runs(pool: &PgPool, grace_secs: i64) -> sqlx::Res
     let mut out = Vec::new();
     for row in rows {
         let id: Uuid = row.get("id");
+        let org: Uuid = row.get("org_id");
         let mut tx = pool.begin().await?;
-        let Some(run) = lock_run(&mut tx, None, id).await? else { continue };
+        let Some(run) = lock_run(&mut tx, Some(org), id).await? else { continue };
         if run.status != RunStatus::Running {
             continue;
         }
@@ -1588,6 +1619,8 @@ pub async fn stop_unresponsive_runs(pool: &PgPool, grace_secs: i64) -> sqlx::Res
             .execute(&mut *tx)
             .await?;
         let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "stopped", "reason": "worker unresponsive"})).await?;
+        let entry = Entry::new("run.finished").run(id).worker(run.worker_id.as_deref()).detail(json!({ "status": "stopped", "reason": "worker unresponsive" }));
+        audit::record(&mut *tx, org, &Actor::system(), entry).await?;
         tx.commit().await?;
         out.push(ev);
     }
@@ -1609,6 +1642,7 @@ const DIGEST_MAX_BYTES: usize = 8 * 1024;
 /// and had no stop pending. Returns the events to broadcast.
 async fn move_lost_run(
     tx: &mut Transaction<'_, Postgres>,
+    org: Uuid,
     run: &Run,
     lost_worker: &str,
     why: &str,
@@ -1689,6 +1723,11 @@ async fn move_lost_run(
         &json!({"status": "queued", "moved_from": run.id, "lost_worker": lost_worker, "branch": branch, "sha": sha}),
     )
     .await?;
+    let entry = Entry::new("run.moved")
+        .run(run.id)
+        .worker(Some(lost_worker))
+        .detail(json!({ "moved_to": new_id, "from_checkpoint": branch.is_some(), "reason": "worker lost" }));
+    audit::record(&mut **tx, org, &Actor::system(), entry).await?;
     tracing::info!(lost = %run.id, moved = %moved.id, worker = lost_worker, branch = ?moved.resume_from_branch, "moved a lost run");
     Ok(Some(vec![lost_ev, queued_ev]))
 }
@@ -1774,7 +1813,7 @@ pub async fn upsert_worker(
             slots_parallel = EXCLUDED.slots_parallel, slots_active = EXCLUDED.slots_active
          -- A machine id registered by one person can't be taken over with another person's token.
          WHERE workers.owner_id IS NOT DISTINCT FROM EXCLUDED.owner_id
-         RETURNING id, display_name, capabilities, last_heartbeat_at",
+         RETURNING id, display_name, capabilities, last_heartbeat_at, owner_id, (xmax = 0) AS inserted",
     )
     .bind(id)
     .bind(display_name)
@@ -1785,7 +1824,25 @@ pub async fn upsert_worker(
     .bind(org)
     .fetch_optional(pool)
     .await?;
-    Ok(row.as_ref().map(row_to_worker))
+    let Some(row) = row else { return Ok(None) };
+    let worker = row_to_worker(&row);
+    // A machine id seen in this org for the first time: it joined.
+    if row.get::<bool, _>("inserted") {
+        let owner: Option<Uuid> = row.get("owner_id");
+        let login: Option<String> = match owner {
+            Some(o) => sqlx::query_scalar("SELECT login FROM users WHERE id = $1").bind(o).fetch_optional(pool).await?,
+            None => None,
+        };
+        let entry = Entry::new("machine.enrolled").worker(Some(id)).detail(json!({
+            "display_name": display_name,
+            "owner_id": owner,
+            "owner": login,
+            "os": caps.os,
+            "version": caps.version,
+        }));
+        audit::record_after(pool, org, &Actor::worker(id), entry).await;
+    }
+    Ok(Some(worker))
 }
 
 /// Returns false when the worker is unknown or registered with a different token.

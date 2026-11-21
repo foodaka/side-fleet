@@ -95,7 +95,7 @@ what it can call; anything else answers `403`:
 | `full` | also approve or deny tool calls, and use full access |
 
 No token manages orgs, members, worker or API tokens, enrollments or machines, or reads
-`/v1/setup`. Tokens are made on the Chat apps page, or with these routes (session cookie or
+`/v1/setup` or the audit log. Tokens are made on the Chat apps page, or with these routes (session cookie or
 developer key only; the developer key's tokens act in the default org):
 
 | Method | Path | |
@@ -182,6 +182,9 @@ go into a path.
 | `GET` `POST` | `/v1/orgs/:org/tokens` `{name}` | per-org worker tokens; the value is only in the `201` response; owners only |
 | `DELETE` | `/v1/orgs/:org/tokens/:id` | revoke; workers using it get `401` from then on |
 | `GET` `POST` | `/v1/orgs/:org/members` `{login, role?}` | members; adding needs an owner and a user who signed in once |
+| `GET` | `/v1/orgs/:org/audit?run=&thread=&machine=&actor=&action=&target=&since=&until=&before=&limit=50` | `{events, next}`: the org's [audit log](#audit-log), newest first; pass `next` as `before` for the older page (`null` on the last). Owners see everything; members what happened on their machines and what they did |
+| `GET` | `/v1/orgs/:org/audit/export?format=csv\|json&…` | the same filtered entries as a download (CSV by default), newest first, at most 10,000; `X-Sidefleet-Truncated: true` when there were more |
+| `GET` | `/v1/workers/:id/audit?…` | `{events, next}`: one machine's entries, for its owner and the org's owners (`403` otherwise), whoever caused them |
 | `GET` | `/v1/enrollments` | machines waiting for approval in this org |
 | `POST` | `/v1/enrollments/lookup` `{code}` | find a waiting machine by the code it printed |
 | `POST` | `/v1/enrollments/:id/approve` `{code?}`, `/deny` | approve (mints a per-machine token) or deny; `402` over the plan's machine limit |
@@ -215,6 +218,33 @@ the database), `GET /v1/auth` (which sign-in methods are on), `GET /v1/me` (the 
 their orgs; `401` when signed out), `GET /auth/github/login` and `/auth/github/callback`,
 `POST /auth/logout`, `POST /v1/enroll` and `GET /v1/enroll/:id` (a machine asking to join, and
 polling with its secret).
+
+## Audit log
+
+Who did what in an org, appended as it happens and never changed (the table rejects updates;
+deleting the org deletes its log). The page shows it at **Team → Activity log** and in a thread's
+**Activity**. API tokens can't read it.
+
+Each entry is `{id, at, actor, actor_id, action, target, run_id, worker_id, detail}`. `actor` is a
+login, `developer key`, `worker:<machine id>` (the machine did it) or `system` (a deadline passed,
+a machine went quiet); `actor_id` is the person's user id, else `null`. `detail` is a JSON object,
+redacted like run events with strings clipped to 500 bytes, and `detail.api_token` names the token
+an action came through. It never holds task text, agent output, tool input (an approval carries
+the same one-line redacted `summary` its card shows), invite codes or token values.
+
+| Area | `action` |
+|---|---|
+| Tasks | `run.created` (`via`: `task`, `reply`, `fork`, `restore`, `pr`, `integrate`, with agent, model, mode, repo), `run.claimed`, `run.started` (the agent reported its session), `run.finished` (`status`, `reason`), `run.stopped`, `run.stopped_by_other` (someone stopped a task another person started), `run.requeued` (usage limit; another machine takes it), `run.moved` (failover off a lost machine), `run.permission_mode_changed` (a reply in another mode: `from`, `to`) |
+| Approvals | `approval.requested`, `approval.approved`, `approval.denied` (`with_message`, never the message), `approval.timed_out`, `approval.cancelled` (the run ended first) |
+| Machines | `machine.enrolled` (first registration in the org, with its owner), `machine.enrollment_approved`, `machine.enrollment_denied`, `machine.removed` |
+| Tokens | `worker_token.created`, `.revoked`, `api_token.created`, `.revoked` |
+| People | `org.created`, `org.renamed`, `invite.created`, `invite.revoked`, `member.added`, `member.joined`, `member.role_changed`, `member.removed`, `member.left` |
+| Reserved | `budget.authorized`, `budget.exceeded`, `payment.requested`, `payment.made`, `payment.refused`, `payment.refunded`, `handoff.created`, `.accepted`, `.declined`, `machine.claimed`, `.reassigned`, `.moved`, `thread.made_private`, `.made_team`: not written yet, accepted by the filter, and carrying what they need (amount, currency, payee, decision) in `detail` when they are |
+
+Filters: `run` (one run), `thread` (every run of the thread rooted there), `machine` (a machine
+id), `actor` (a login, `worker:<id>`, `system`, `developer key` or a user id), `action` (a name, or
+a group such as `run.*` or `run.`; unknown names answer `400`), `target`, `since` (inclusive) and
+`until` (exclusive), RFC 3339 (encode `+` as `%2B`). `limit` is 1 to 200.
 
 ## Tool approvals ("Ask me")
 

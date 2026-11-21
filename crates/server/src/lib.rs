@@ -3,6 +3,7 @@
 
 pub mod approvals;
 pub mod attention;
+pub mod audit;
 pub mod auth;
 pub mod chat_updates;
 pub mod claims;

@@ -12,6 +12,7 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::audit::{self, Actor, Entry};
 use crate::auth::{self, sha256_hex, Caller, Identity};
 use crate::tenancy::{self, OrgMembership, DEFAULT_ORG};
 use crate::AppState;
@@ -133,7 +134,8 @@ pub async fn revoke_invite(pool: &PgPool, org: Uuid, id: Uuid) -> sqlx::Result<b
 }
 
 pub enum Accept {
-    Joined(OrgMembership),
+    /// A member now; with the invite used, or None if they already were one.
+    Joined(OrgMembership, Option<Uuid>),
     Unusable(&'static str),
     NotFound,
 }
@@ -166,13 +168,14 @@ pub async fn accept(pool: &PgPool, code: &str, user: Uuid) -> sqlx::Result<Accep
     }
     tx.commit().await?;
     match tenancy::memberships(pool, user).await?.into_iter().find(|o| o.id == org) {
-        Some(m) => Ok(Accept::Joined(m)),
+        Some(m) => Ok(Accept::Joined(m, (!member).then_some(invite.id))),
         None => Ok(Accept::NotFound),
     }
 }
 
 pub enum Remove {
-    Removed,
+    /// Removed; their login, for the record.
+    Removed(Option<String>),
     NotMember,
     LastOwner,
 }
@@ -219,8 +222,9 @@ pub async fn remove_member(pool: &PgPool, org: Uuid, user: Uuid) -> sqlx::Result
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE runs SET stop_requested = true, stop_requested_at = COALESCE(stop_requested_at, now()) WHERE org_id = $1 AND created_by = $2 AND status = 'running'").bind(org).bind(user).execute(&mut *tx).await?;
+    let login: Option<String> = sqlx::query_scalar("SELECT login FROM users WHERE id = $1").bind(user).fetch_optional(&mut *tx).await?;
     tx.commit().await?;
-    Ok(Remove::Removed)
+    Ok(Remove::Removed(login))
 }
 
 // ---- HTTP ----
@@ -292,6 +296,9 @@ async fn post_invite(
         return Err(ApiError(StatusCode::BAD_REQUEST, "max_uses must be at least 1".into()));
     }
     let (invite, code) = create_invite(&state.pool, org.id, caller.user_id(), role, days, req.max_uses).await?;
+    // Never the code: it is the invite.
+    let entry = Entry::new("invite.created").target(invite.id).detail(json!({ "role": role, "expires_at": invite.expires_at, "max_uses": invite.max_uses }));
+    audit::record_after(&state.pool, org.id, &Actor::caller(&caller), entry).await;
     tracing::info!(org = %org.id, invite = %invite.id, "invite created");
     Ok((StatusCode::CREATED, Json(json!({ "invite": invite, "code": code }))))
 }
@@ -304,6 +311,7 @@ async fn get_invites(State(state): State<AppState>, Extension(caller): Extension
 async fn delete_invite(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path((org, id)): Path<(String, Uuid)>) -> Result<StatusCode, ApiError> {
     let org = owner_of(&caller, &org)?;
     if revoke_invite(&state.pool, org.id, id).await? {
+        audit::record_after(&state.pool, org.id, &Actor::caller(&caller), Entry::new("invite.revoked").target(id)).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError(StatusCode::NOT_FOUND, "invite not found".into()))
@@ -318,7 +326,9 @@ async fn delete_member(State(state): State<AppState>, Extension(caller): Extensi
         return Err(forbidden("only an owner of this org can remove people"));
     }
     match remove_member(&state.pool, m.id, user).await? {
-        Remove::Removed => {
+        Remove::Removed(login) => {
+            let action = if me == Some(user) { "member.left" } else { "member.removed" };
+            audit::record_after(&state.pool, m.id, &Actor::caller(&caller), Entry::new(action).target(user).detail(json!({ "login": login }))).await;
             tracing::info!(org = %m.id, user = %user, by = ?me, "member removed");
             state.claims.signal(m.id);
             Ok(StatusCode::NO_CONTENT)
@@ -357,7 +367,12 @@ async fn post_accept(State(state): State<AppState>, headers: HeaderMap, Path(cod
         Err(r) => return Ok(r),
     };
     match accept(&state.pool, &code, user.id).await? {
-        Accept::Joined(org) => {
+        Accept::Joined(org, invite) => {
+            if let Some(invite) = invite {
+                let actor = Actor { id: Some(user.id), name: user.login.clone(), token: None };
+                let entry = Entry::new("member.joined").target(user.id).detail(json!({ "login": user.login, "role": org.role, "invite_id": invite }));
+                audit::record_after(&state.pool, org.id, &actor, entry).await;
+            }
             tracing::info!(org = %org.id, user = %user.login, "joined with an invite");
             Ok(Json(json!({ "org": org })).into_response())
         }

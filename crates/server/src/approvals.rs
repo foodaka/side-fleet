@@ -16,6 +16,7 @@ use sidefleet_core::{
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::audit::{self, Actor, Entry};
 use crate::db::{append_event_locked, lock_run};
 
 /// Strings in a stored tool input are clipped to this many bytes.
@@ -97,21 +98,31 @@ pub async fn request(pool: &PgPool, org: Uuid, run_id: Uuid, worker_id: &str, re
     .fetch_one(&mut *tx)
     .await?;
     let approval = row_to_approval(&row);
-    let ev = append_event_locked(&mut tx, run_id, "approval_requested", &requested_payload(&approval)).await?;
+    let payload = requested_payload(&approval);
+    let ev = append_event_locked(&mut tx, run_id, "approval_requested", &payload).await?;
+    let entry = audit_entry("approval.requested", &approval, Some(worker_id)).detail(json!({ "summary": payload["summary"], "expires_at": approval.expires_at }));
+    audit::record(&mut *tx, org, &Actor::worker(worker_id), entry).await?;
     tx.commit().await?;
     Ok(RequestOutcome::Created(Box::new(approval), ev))
 }
 
-/// Apply `action` to a locked, pending approval. Returns the stored approval and its event.
+/// An audit entry about approval `a` of a run on `worker`: the tool and the approval, never its input.
+fn audit_entry(action: &'static str, a: &Approval, worker: Option<&str>) -> Entry {
+    Entry::new(action).run(a.run_id).worker(worker).detail(json!({ "approval_id": a.id, "tool_name": a.tool_name }))
+}
+
+/// Apply `action` to a locked, pending approval, decided by `actor` (a person for an approval
+/// or denial; the system when it expires or is cancelled). Returns the stored approval and its event.
 async fn transition(
     tx: &mut Transaction<'_, Postgres>,
     current: &Approval,
     to: ApprovalStatus,
     message: Option<&str>,
-    by: Option<&str>,
+    actor: &Actor,
 ) -> sqlx::Result<(Approval, RunEvent)> {
+    let by = matches!(to, ApprovalStatus::Approved | ApprovalStatus::Denied).then_some(actor.name.as_str());
     let row = sqlx::query(&format!(
-        "UPDATE approvals SET status = $2, message = $3, decided_by = $4, decided_at = now() WHERE id = $1 RETURNING {COLS}"
+        "UPDATE approvals SET status = $2, message = $3, decided_by = $4, decided_at = now() WHERE id = $1 RETURNING {COLS}, org_id"
     ))
     .bind(current.id)
     .bind(to.as_str())
@@ -120,7 +131,20 @@ async fn transition(
     .fetch_one(&mut **tx)
     .await?;
     let a = row_to_approval(&row);
+    let org: Uuid = row.get("org_id");
     let ev = append_event_locked(tx, a.run_id, "approval_decided", &decided_payload(&a)).await?;
+    let action = match to {
+        ApprovalStatus::Approved => "approval.approved",
+        ApprovalStatus::Denied => "approval.denied",
+        ApprovalStatus::Expired => "approval.timed_out",
+        ApprovalStatus::Cancelled | ApprovalStatus::Pending => "approval.cancelled",
+    };
+    let worker: Option<String> = sqlx::query_scalar("SELECT worker_id FROM runs WHERE id = $1").bind(a.run_id).fetch_one(&mut **tx).await?;
+    // A denial's message is the person's words to the agent, like a task: only whether there was one.
+    let explained = (to == ApprovalStatus::Denied).then(|| a.message.as_deref() != Some(DENIED_MESSAGE));
+    let entry = audit_entry(action, &a, worker.as_deref())
+        .detail(json!({ "summary": summarize_tool_input(&a.tool_name, &a.input), "with_message": explained }));
+    audit::record(&mut **tx, org, actor, entry).await?;
     Ok((a, ev))
 }
 
@@ -154,14 +178,14 @@ pub enum DecideOutcome {
     RunEnded(Approval, Option<RunEvent>),
 }
 
-/// Someone on the page approves or denies a pending approval of `run_id`.
+/// Someone on the page (`by`) approves or denies a pending approval of `run_id`.
 pub async fn decide(
     pool: &PgPool,
     org: Uuid,
     run_id: Uuid,
     id: Uuid,
     approve: bool,
-    by: &str,
+    by: &Actor,
     message: Option<&str>,
 ) -> sqlx::Result<DecideOutcome> {
     let mut tx = pool.begin().await?;
@@ -175,7 +199,7 @@ pub async fn decide(
         return Ok(DecideOutcome::AlreadyDecided(current));
     }
     if run.status != RunStatus::Running {
-        let (a, ev) = transition(&mut tx, &current, ApprovalStatus::Cancelled, Some(CANCELLED_MESSAGE), None).await?;
+        let (a, ev) = transition(&mut tx, &current, ApprovalStatus::Cancelled, Some(CANCELLED_MESSAGE), &Actor::system()).await?;
         tx.commit().await?;
         return Ok(DecideOutcome::RunEnded(a, Some(ev)));
     }
@@ -189,7 +213,9 @@ pub async fn decide(
         ApprovalStatus::Expired => Some(expired_message(&current)),
         _ => None,
     };
-    let by = (to != ApprovalStatus::Expired).then_some(by);
+    // Too late: the deadline decided, not the person.
+    let system = Actor::system();
+    let by = if to == ApprovalStatus::Expired { &system } else { by };
     let (a, ev) = transition(&mut tx, &current, to, message.as_deref(), by).await?;
     tx.commit().await?;
     Ok(if to == ApprovalStatus::Expired { DecideOutcome::Expired(a, Some(ev)) } else { DecideOutcome::Decided(a, ev) })
@@ -223,7 +249,7 @@ pub async fn poll(pool: &PgPool, org: Uuid, run_id: Uuid, id: Uuid, now: DateTim
         return Ok(Some((current, None)));
     };
     let message = if to == ApprovalStatus::Expired { expired_message(&current) } else { CANCELLED_MESSAGE.to_string() };
-    let (a, ev) = transition(&mut tx, &current, to, Some(&message), None).await?;
+    let (a, ev) = transition(&mut tx, &current, to, Some(&message), &Actor::system()).await?;
     tx.commit().await?;
     Ok(Some((a, Some(ev))))
 }
@@ -236,7 +262,7 @@ pub async fn cancel_pending(tx: &mut Transaction<'_, Postgres>, run_id: Uuid) ->
         .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
-        let (_, ev) = transition(tx, &row_to_approval(r), ApprovalStatus::Cancelled, Some(CANCELLED_MESSAGE), None).await?;
+        let (_, ev) = transition(tx, &row_to_approval(r), ApprovalStatus::Cancelled, Some(CANCELLED_MESSAGE), &Actor::system()).await?;
         out.push(ev);
     }
     Ok(out)

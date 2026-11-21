@@ -138,8 +138,9 @@ impl Caller {
 }
 
 /// Whether an API token with `scope` may call `method path`. Tokens never
-/// manage orgs, members, tokens or machines, and never see `/v1/setup` (it
-/// can carry a worker token): those stay with the page and the developer key.
+/// manage orgs, members, tokens or machines, never see `/v1/setup` (it
+/// can carry a worker token) and never read the audit log: those stay with the
+/// page and the developer key.
 pub fn scope_allows(scope: Scope, method: &Method, path: &str) -> bool {
     let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
     let need = match (method, seg.as_slice()) {
@@ -269,6 +270,9 @@ mod tests {
             (Method::DELETE, "/v1/workers/mac"),
             (Method::POST, "/v1/workers/mac/update"),
             (Method::PUT, "/v1/repos"),
+            (Method::GET, "/v1/orgs/x/audit"),
+            (Method::GET, "/v1/orgs/x/audit/export"),
+            (Method::GET, "/v1/workers/mac/audit"),
         ] {
             assert!(!ok(Scope::Full, m.clone(), p), "{m} {p}");
         }

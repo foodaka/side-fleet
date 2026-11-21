@@ -164,23 +164,31 @@ pub async fn default_org(pool: &PgPool) -> sqlx::Result<OrgMembership> {
 }
 
 pub enum AddMember {
-    Added(User),
+    /// Added, or their role set; with the role they had before (None: they weren't a member).
+    Added(User, Option<String>),
     NoSuchUser,
 }
 
-/// Add a user who has signed in at least once, by GitHub login.
+/// Add a user who has signed in at least once, by GitHub login (or set their role if they are in).
 pub async fn add_member(pool: &PgPool, org: Uuid, login: &str, role: &str) -> sqlx::Result<AddMember> {
     let Some(row) = sqlx::query("SELECT id, github_id, login, email FROM users WHERE lower(login) = lower($1)").bind(login).fetch_optional(pool).await? else {
         return Ok(AddMember::NoSuchUser);
     };
     let user = row_to_user(&row);
+    let mut tx = pool.begin().await?;
+    let before: Option<String> = sqlx::query_scalar("SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2 FOR UPDATE")
+        .bind(org)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
     sqlx::query("INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role")
         .bind(org)
         .bind(user.id)
         .bind(role)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(AddMember::Added(user))
+    tx.commit().await?;
+    Ok(AddMember::Added(user, before))
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -208,6 +208,28 @@ export interface Invite {
 	revoked_at: string | null;
 }
 
+/** One entry of the org's audit log (`GET /v1/orgs/:org/audit`). */
+export interface AuditEvent {
+	id: number;
+	at: string;
+	/** A login, `developer key`, `worker:<id>` or `system`. */
+	actor: string;
+	actor_id: string | null;
+	/** Dotted, e.g. `run.created`; newer control planes may send ones this page doesn't know. */
+	action: string;
+	target: string | null;
+	run_id: string | null;
+	worker_id: string | null;
+	/** Redacted on the server; never task text, agent output or tool input. */
+	detail: Record<string, unknown>;
+}
+
+export interface AuditPage {
+	events: AuditEvent[];
+	/** Pass as `before` for the next (older) page; null on the last one. */
+	next: number | null;
+}
+
 /** What an invite link says about itself (`GET /v1/invites/:code`, no sign-in needed). */
 export interface InviteInfo {
 	org_name: string;

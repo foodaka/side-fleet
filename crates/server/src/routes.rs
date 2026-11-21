@@ -36,6 +36,7 @@ use tower_http::{
 use uuid::Uuid;
 
 use crate::approvals::{DecideOutcome, RequestOutcome};
+use crate::audit::{self, Actor, Entry};
 use crate::auth::{self, Caller, Identity, WorkerAuth};
 use crate::events::Update;
 use crate::db::{self, AppendOutcome, FinishOutcome, FollowUpOutcome, ForkOutcome, PrOutcome, RestoreOutcome};
@@ -106,6 +107,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/rooms/{id}/tasks", post(create_room_task).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .merge(crate::inbox::router())
         .merge(crate::team::router())
+        .merge(crate::audit::router())
         .merge(crate::rooms::router())
         .merge(crate::machines::router())
         .merge(crate::prefs::router())
@@ -350,6 +352,7 @@ async fn start_run(
     check_run_limit(state, caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
     tag_run(state, caller, run.id).await?;
+    audit_created(state, caller, &run, "task").await;
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, start_at = ?run.start_at, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -436,6 +439,27 @@ fn check_permission_mode(mode: Option<&str>) -> Result<Option<&str>, ApiError> {
             format!("permission_mode must be one of {}", PERMISSION_MODES.join(", ")),
         )),
     }
+}
+
+/// `run.created` for a run the caller just queued: how it runs, never its task text.
+/// `how` says what made it (`task`, `reply`, `fork`, `restore`, `pr`, `integrate`).
+async fn audit_created(state: &AppState, caller: &Caller, run: &Run, how: &str) {
+    let entry = Entry::new("run.created").run(run.id).worker(run.pinned_worker_id.as_deref()).detail(json!({
+        "via": how,
+        "kind": run.kind,
+        "thread": run.parent_id,
+        "forked_from": run.forked_from,
+        "room_id": run.room_id,
+        "repo": run.repo,
+        "agent": run.agent.as_str(),
+        "model": run.model,
+        "effort": run.effort,
+        "permission_mode": run.permission_mode,
+        "isolation": run.isolation,
+        "failover": run.failover.then_some(true),
+        "start_at": run.start_at,
+    }));
+    audit::record_after(&state.pool, caller.org_id(), &Actor::caller(caller), entry).await;
 }
 
 /// A message sent through an API token: its chat app hears how the task goes.
@@ -549,10 +573,8 @@ async fn follow_up(
         None => None,
     };
     // Without a mode the reply keeps the thread's latest one.
-    let inherited = match mode {
-        Some(_) => None,
-        None => db::thread_runs(&state.pool, caller.org_id(), run.parent_id.unwrap_or(run.id)).await?.pop().and_then(|r| r.permission_mode),
-    };
+    let previous = db::thread_runs(&state.pool, caller.org_id(), run.parent_id.unwrap_or(run.id)).await?.pop().and_then(|r| r.permission_mode);
+    let inherited = if mode.is_some() { None } else { previous.clone() };
     check_full_access(&caller, mode.or(inherited.as_deref()))?;
     check_run_limit(&state, &caller).await?;
     match db::create_follow_up(
@@ -573,6 +595,14 @@ async fn follow_up(
     {
         FollowUpOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
+            audit_created(&state, &caller, &run, "reply").await;
+            // Each message runs with its own mode; a reply that changes it is worth a line of its own.
+            if mode.is_some() && run.permission_mode != previous {
+                let entry = Entry::new("run.permission_mode_changed")
+                    .run(run.id)
+                    .detail(json!({ "thread": run.parent_id, "from": previous, "to": run.permission_mode }));
+                audit::record_after(&state.pool, caller.org_id(), &Actor::caller(&caller), entry).await;
+            }
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, parent = ?run.parent_id, "follow-up queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -598,6 +628,7 @@ async fn restore_run(
     check_run_limit(&state, &caller).await?;
     match db::create_restore(&state.pool, caller.org_id(), id, caller.user_id()).await? {
         RestoreOutcome::Created(run, ev) => {
+            audit_created(&state, &caller, &run, "restore").await;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, restores = %id, "restore queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -620,6 +651,7 @@ async fn open_pr(
     match db::create_pr_run(&state.pool, caller.org_id(), id, caller.user_id()).await? {
         PrOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
+            audit_created(&state, &caller, &run, "pr").await;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, thread = %id, "pull request queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -648,6 +680,7 @@ async fn integrate_run(
     check_run_limit(&state, &caller).await?;
     match db::create_integrate_run(&state.pool, caller.org_id(), id, caller.user_id(), &room.branch).await? {
         PrOutcome::Created(run, ev) => {
+            audit_created(&state, &caller, &run, "integrate").await;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, thread = %root.id, room = %room.id, "integration queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -691,6 +724,7 @@ async fn fork_run(
     match db::create_fork(&state.pool, caller.org_id(), id, new).await? {
         ForkOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
+            audit_created(&state, &caller, &run, "fork").await;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, forked_from = %id, agent = %run.agent, model = %run.model, "fork queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
@@ -804,6 +838,18 @@ async fn stop_run(
     let (run, ev) = db::request_stop(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?;
     if let Some(ev) = ev {
         state.events.publish(ev);
+        // Only when this request changed something (not a second press of Stop).
+        let root = match run.parent_id {
+            Some(p) => db::get_run(&state.pool, caller.org_id(), p).await?,
+            None => None,
+        };
+        let creator = root.as_ref().map_or(run.created_by, |r| r.created_by);
+        let other = creator.is_some() && creator != caller.user_id();
+        let entry = Entry::new(if other { "run.stopped_by_other" } else { "run.stopped" })
+            .run(run.id)
+            .worker(run.worker_id.as_deref())
+            .detail(json!({ "status": run.status.as_str(), "created_by": creator }));
+        audit::record_after(&state.pool, caller.org_id(), &Actor::caller(&caller), entry).await;
     }
     tracing::info!(run_id = %id, status = run.status.as_str(), "stop requested");
     Ok(Json(run))
@@ -984,7 +1030,8 @@ async fn request_update(State(state): State<AppState>, Extension(caller): Extens
 /// again with a valid token; revoke its token to keep it out.
 async fn delete_worker(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     own_or_org_owner(&state, &caller, &id).await?;
-    let yours = caller.user_id().is_some() && db::worker_owner(&state.pool, caller.org_id(), &id).await? == caller.user_id();
+    let owner = db::worker_owner(&state.pool, caller.org_id(), &id).await?;
+    let yours = caller.user_id().is_some() && owner == caller.user_id();
     let token = sqlx::query_scalar::<_, String>("SELECT token_hash FROM workers WHERE org_id = $1 AND id = $2")
         .bind(caller.org_id())
         .bind(&id)
@@ -1002,6 +1049,8 @@ async fn delete_worker(State(state): State<AppState>, Extension(caller): Extensi
             .execute(&state.pool)
             .await?;
         }
+        let entry = Entry::new("machine.removed").worker(Some(id.as_str())).detail(json!({ "owner_id": owner, "by_owner": yours }));
+        audit::record_after(&state.pool, caller.org_id(), &Actor::caller(&caller), entry).await;
         tracing::info!(worker = %id, "machine removed");
         Ok(StatusCode::NO_CONTENT)
     } else if db::worker_exists(&state.pool, caller.org_id(), &id).await? {
@@ -1117,7 +1166,7 @@ async fn decide_tool(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?
     };
-    let by = caller.user.as_ref().map_or_else(|| "developer key".to_string(), |u| u.login.clone());
+    let by = Actor::caller(&caller);
     let outcome = crate::approvals::decide(&state.pool, caller.org_id(), id, approval, approve, &by, req.message.as_deref()).await?;
     let (status, msg) = match outcome {
         DecideOutcome::Decided(a, ev) => {
@@ -1720,6 +1769,7 @@ async fn create_org(State(state): State<AppState>, Extension(caller): Extension<
     };
     let name = check_name(&req.name, "org name")?;
     let id = tenancy::create_org(&state.pool, &name, user.id).await?;
+    audit::record_after(&state.pool, id, &Actor::caller(&caller), Entry::new("org.created").target(id).detail(json!({ "name": name }))).await;
     let org = tenancy::memberships(&state.pool, user.id).await?.into_iter().find(|m| m.id == id);
     Ok((StatusCode::CREATED, Json(json!(org))))
 }
@@ -1729,6 +1779,8 @@ async fn rename_org(State(state): State<AppState>, Extension(caller): Extension<
     let org = owned_org(&state, &caller, &org).await?;
     let name = check_name(&req.name, "org name")?;
     tenancy::rename_org(&state.pool, org.id, &name).await?;
+    let entry = Entry::new("org.renamed").target(org.id).detail(json!({ "from": org.name, "to": name }));
+    audit::record_after(&state.pool, org.id, &Actor::caller(&caller), entry).await;
     tracing::info!(org = %org.id, "org renamed");
     Ok(Json(json!({ "id": org.id, "name": name })))
 }
@@ -1756,7 +1808,17 @@ async fn add_member(State(state): State<AppState>, Extension(caller): Extension<
         return Err(ApiError(StatusCode::BAD_REQUEST, "role must be owner or member".into()));
     }
     match tenancy::add_member(&state.pool, org.id, req.login.trim(), role).await? {
-        tenancy::AddMember::Added(u) => Ok(Json(json!({ "login": u.login, "role": role }))),
+        tenancy::AddMember::Added(u, before) => {
+            let entry = match before.as_deref() {
+                None => Some(Entry::new("member.added").detail(json!({ "role": role }))),
+                Some(was) if was != role => Some(Entry::new("member.role_changed").detail(json!({ "from": was, "to": role }))),
+                Some(_) => None,
+            };
+            if let Some(e) = entry {
+                audit::record_after(&state.pool, org.id, &Actor::caller(&caller), e.target(u.id).detail(json!({ "login": u.login }))).await;
+            }
+            Ok(Json(json!({ "login": u.login, "role": role })))
+        }
         tenancy::AddMember::NoSuchUser => Err(ApiError(StatusCode::NOT_FOUND, "no Sidefleet user with that GitHub login; they need to sign in once first".into())),
     }
 }
@@ -1784,6 +1846,8 @@ async fn create_api_token(
     let name = check_name(&req.name, "token name")?;
     let scope = tenancy::Scope::parse(req.scope.trim()).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "scope must be one of read, tasks, full".into()))?;
     let (token, value) = tenancy::create_api_token(&state.pool, caller.org_id(), caller.user_id(), &name, scope).await?;
+    let entry = Entry::new("api_token.created").target(token.id).detail(json!({ "name": token.name, "scope": scope.as_str() }));
+    audit::record_after(&state.pool, caller.org_id(), &Actor::caller(&caller), entry).await;
     tracing::info!(org = %caller.org_id(), token = %token.id, scope = scope.as_str(), "API token created");
     let mut v = json!(token);
     v["token"] = json!(value);
@@ -1794,6 +1858,8 @@ async fn revoke_api_token(State(state): State<AppState>, Extension(caller): Exte
     let t = tenancy::revoke_api_token(&state.pool, caller.org_id(), caller.user_id(), id)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
+    let entry = Entry::new("api_token.revoked").target(id).detail(json!({ "name": t.name, "scope": t.scope.as_str() }));
+    audit::record_after(&state.pool, caller.org_id(), &Actor::caller(&caller), entry).await;
     tracing::info!(org = %caller.org_id(), token = %id, "API token revoked");
     Ok(Json(json!(t)))
 }
@@ -1863,6 +1929,8 @@ async fn create_token(
     let org = owned_org(&state, &caller, &org).await?;
     let name = check_name(&req.name, "token name")?;
     let (token, value) = tenancy::create_token(&state.pool, org.id, &name, caller.user_id()).await?;
+    let entry = Entry::new("worker_token.created").target(token.id).detail(json!({ "name": token.name }));
+    audit::record_after(&state.pool, org.id, &Actor::caller(&caller), entry).await;
     tracing::info!(org = %org.id, token = %token.id, "worker token created");
     let mut v = json!(token);
     v["token"] = json!(value);
@@ -1872,6 +1940,7 @@ async fn create_token(
 async fn revoke_token(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path((org, id)): Path<(String, Uuid)>) -> Result<Json<serde_json::Value>, ApiError> {
     let org = owned_org(&state, &caller, &org).await?;
     let t = tenancy::revoke_token(&state.pool, org.id, id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "token not found".into()))?;
+    audit::record_after(&state.pool, org.id, &Actor::caller(&caller), Entry::new("worker_token.revoked").target(id).detail(json!({ "name": t.name }))).await;
     tracing::info!(org = %org.id, token = %id, "worker token revoked");
     Ok(Json(json!(t)))
 }
@@ -1972,6 +2041,10 @@ async fn deny_enrollment(State(state): State<AppState>, Extension(caller): Exten
 async fn decide(state: &AppState, caller: &Caller, id: Uuid, code: Option<&str>, approve: bool) -> Result<Json<serde_json::Value>, ApiError> {
     match tenancy::decide_enrollment(&state.pool, caller.org_id(), caller.user_id(), id, code, approve).await? {
         Decide::Done(e) => {
+            let entry = Entry::new(if approve { "machine.enrollment_approved" } else { "machine.enrollment_denied" })
+                .worker(Some(e.worker_id.as_str()))
+                .detail(json!({ "enrollment_id": e.id, "machine_name": e.machine_name }));
+            audit::record_after(&state.pool, caller.org_id(), &Actor::caller(caller), entry).await;
             tracing::info!(enrollment = %id, org = %caller.org_id(), approved = approve, machine = %e.machine_name, "enrollment decided");
             Ok(Json(json!(e)))
         }

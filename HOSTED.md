@@ -79,6 +79,7 @@ unchanged; their data moves to the default org when migration `0014` runs.
 | `runs` | the task text, model, repo identity, permission mode, status, timings, the final result (text, turns, duration, cost as Claude Code reports it), Claude session id |
 | `run_events` | the agent's narration as it streams: assistant text, tool calls as a name plus a one-line redacted summary, tool results truncated to 2 KB, status changes |
 | `added_repos` | which repos the org chose to show in the composer |
+| `audit_events` | the org's audit log: who (login, `worker:<id>` or `system`) did what (`run.created`, `approval.denied`, `member.removed`, …), to which run, machine or person, when, and a small redacted `detail` (agent, model, permission mode, status, tool name and its one-line summary). Never task text, agent output, tool input, invite codes or token values. Append-only; no automatic retention yet |
 
 What it does **not** store or receive: repository contents beyond what the agent's narration
 contains (its own text, and tool results capped at 2 KB each, which can include excerpts of files

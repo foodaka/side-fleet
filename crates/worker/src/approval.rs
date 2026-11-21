@@ -64,12 +64,16 @@ impl Decision {
 
 /// The `--mcp-config` that makes Claude Code spawn `<exe> approval-mcp --socket <socket>`.
 pub fn mcp_config(exe: &Path, socket: &Path) -> String {
-    json!({"mcpServers": {MCP_SERVER: {
+    json!({"mcpServers": {MCP_SERVER: mcp_server(exe, socket)}}).to_string()
+}
+
+/// This server's entry in `--mcp-config`'s `mcpServers`.
+pub fn mcp_server(exe: &Path, socket: &Path) -> Value {
+    json!({
         "type": "stdio",
         "command": exe.to_string_lossy(),
         "args": ["approval-mcp", "--socket", socket.to_string_lossy()],
-    }}})
-    .to_string()
+    })
 }
 
 /// The socket for a run: in a fresh private folder in the temp dir, short enough for
@@ -94,6 +98,28 @@ impl Bridge {
         F: Fn(Ask) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Decision> + Send + 'static,
     {
+        let decide = Arc::new(decide);
+        Bridge::serve(dir, move |msg| {
+            let decide = decide.clone();
+            async move {
+                match serde_json::from_value::<Ask>(msg) {
+                    Ok(ask) => decide(ask.clone()).await.reply(&ask),
+                    Err(e) => Decision::Deny(format!("Sidefleet could not read the permission request: {e}")).reply(&Ask {
+                        tool_name: String::new(),
+                        input: Value::Null,
+                        tool_use_id: None,
+                    }),
+                }
+            }
+        })
+    }
+
+    /// Answer each JSON line on the socket with `handle`'s JSON line (see [`ask_socket`]).
+    pub fn serve<F, Fut>(dir: PathBuf, handle: F) -> std::io::Result<Bridge>
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Value> + Send + 'static,
+    {
         use std::os::unix::fs::DirBuilderExt;
         // Left over from a worker that died mid-run; ours, by its name.
         let _ = std::fs::remove_dir_all(&dir);
@@ -101,25 +127,18 @@ impl Bridge {
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         let socket = dir.join("a.sock");
         let listener = tokio::net::UnixListener::bind(&socket)?;
-        let decide = Arc::new(decide);
+        let handle = Arc::new(handle);
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { break };
-                let decide = decide.clone();
+                let handle = handle.clone();
                 tokio::spawn(async move {
                     let (read, mut write) = stream.into_split();
                     let mut line = String::new();
                     if BufReader::new(read).read_line(&mut line).await.unwrap_or(0) == 0 {
                         return;
                     }
-                    let reply = match serde_json::from_str::<Ask>(&line) {
-                        Ok(ask) => decide(ask.clone()).await.reply(&ask),
-                        Err(e) => Decision::Deny(format!("Sidefleet could not read the permission request: {e}")).reply(&Ask {
-                            tool_name: String::new(),
-                            input: Value::Null,
-                            tool_use_id: None,
-                        }),
-                    };
+                    let reply = handle(serde_json::from_str::<Value>(&line).unwrap_or(Value::Null)).await;
                     let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
                 });
             }
@@ -189,6 +208,33 @@ pub async fn ask_page(client: &ControlClient, run_id: Uuid, ask: &Ask, timeout: 
 /// closes. Each tool call is relayed to the worker on `socket` on its own thread, so
 /// questions about parallel tool calls wait side by side.
 pub fn serve_mcp(input: impl BufRead, output: Arc<Mutex<dyn Write + Send>>, socket: &Path) -> std::io::Result<()> {
+    let tool = json!({
+        "name": TOOL,
+        "description": "Asks the user on the Sidefleet page whether a tool call may run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string"},
+                "input": {"type": "object"},
+                "tool_use_id": {"type": "string"},
+            },
+            "required": ["tool_name", "input"],
+        },
+    });
+    serve_tool(input, output, MCP_SERVER, tool, socket, relay)
+}
+
+/// Serve one MCP tool (JSON-RPC lines on `input`/`output`) until `input` closes,
+/// answering each call with `relay(socket, arguments)` as the tool's text, each
+/// on its own thread so parallel calls wait side by side.
+pub fn serve_tool(
+    input: impl BufRead,
+    output: Arc<Mutex<dyn Write + Send>>,
+    server: &'static str,
+    tool: Value,
+    socket: &Path,
+    relay: fn(&Path, &Value) -> Value,
+) -> std::io::Result<()> {
     let send = |out: &Arc<Mutex<dyn Write + Send>>, v: Value| {
         let mut o = out.lock().unwrap_or_else(|e| e.into_inner());
         let _ = writeln!(o, "{v}");
@@ -206,23 +252,11 @@ pub fn serve_mcp(input: impl BufRead, output: Arc<Mutex<dyn Write + Send>>, sock
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": MCP_SERVER, "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": server, "version": env!("CARGO_PKG_VERSION")},
                 })
             }
             "ping" => json!({}),
-            "tools/list" => json!({"tools": [{
-                "name": TOOL,
-                "description": "Asks the user on the Sidefleet page whether a tool call may run.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "tool_name": {"type": "string"},
-                        "input": {"type": "object"},
-                        "tool_use_id": {"type": "string"},
-                    },
-                    "required": ["tool_name", "input"],
-                },
-            }]}),
+            "tools/list" => json!({"tools": [tool.clone()]}),
             "tools/call" => {
                 let args = msg.pointer("/params/arguments").cloned().unwrap_or(Value::Null);
                 let (socket, out) = (socket.to_path_buf(), output.clone());
@@ -252,16 +286,19 @@ fn relay(socket: &Path, args: &Value) -> Value {
         Ok(a) => a,
         Err(e) => return json!({"behavior": "deny", "message": format!("Sidefleet could not read the permission request: {e}")}),
     };
-    let answer = (|| -> std::io::Result<Value> {
-        let mut s = std::os::unix::net::UnixStream::connect(socket)?;
-        writeln!(s, "{}", serde_json::to_string(&ask)?)?;
-        let mut line = String::new();
-        std::io::BufReader::new(s).read_line(&mut line)?;
-        Ok(serde_json::from_str(&line)?)
-    })();
+    let answer = serde_json::to_value(&ask).map_err(std::io::Error::other).and_then(|v| ask_socket(socket, &v));
     answer.unwrap_or_else(|e| {
         json!({"behavior": "deny", "message": format!("Sidefleet could not reach its worker to ask the user ({e}), so the tool call was denied.")})
     })
+}
+
+/// One JSON line to the worker listening on `socket` ([`Bridge::serve`]), and its answer.
+pub fn ask_socket(socket: &Path, msg: &Value) -> std::io::Result<Value> {
+    let mut s = std::os::unix::net::UnixStream::connect(socket)?;
+    writeln!(s, "{msg}")?;
+    let mut line = String::new();
+    std::io::BufReader::new(s).read_line(&mut line)?;
+    Ok(serde_json::from_str(&line)?)
 }
 
 /// `sidefleet approval-mcp --socket <path>`: serve on stdin/stdout.

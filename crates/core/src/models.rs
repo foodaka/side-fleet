@@ -148,6 +148,24 @@ pub struct Run {
     /// A task scheduled to start later: no machine claims it before this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_at: Option<DateTime<Utc>>,
+    /// Most this run's agent may pay for APIs, in millionths of a dollar. None: no payments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_micros: Option<i64>,
+    /// Payments above this wait for someone to approve them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_above_micros: Option<i64>,
+    /// What the agent has paid so far.
+    #[serde(default)]
+    pub spent_micros: i64,
+    /// The access key the worker made for this run's payments (public: a [`PayKeyOffer`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pay_key: Option<Value>,
+    /// The user's signed authorization of that key, once given (public data).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pay_authorization: Option<Value>,
+    /// The services its agent may pay without asking, as they were when the run was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pay_policy: Option<PayPolicy>,
 }
 
 /// A GitHub pull request for a thread's branch.
@@ -593,6 +611,12 @@ pub struct CreateRunRequest {
     /// `MAX_START_DELAY_DAYS` ahead). Absent: as soon as a machine can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_at: Option<DateTime<Utc>>,
+    /// Let the agent pay for APIs, up to this many millionths of a dollar (see [`MAX_BUDGET_MICROS`]).
+    #[serde(default)]
+    pub budget_micros: Option<i64>,
+    /// Payments above this wait for approval ([`DEFAULT_ASK_ABOVE_MICROS`] when absent).
+    #[serde(default)]
+    pub ask_above_micros: Option<i64>,
 }
 
 /// How far ahead a task can be scheduled to start.
@@ -776,6 +800,160 @@ pub struct DecideApprovalRequest {
     /// For a denial: what to tell the agent instead of the default.
     #[serde(default)]
     pub message: Option<String>,
+}
+
+// ---- agent budgets (payments over MPP on Tempo) ----
+
+/// The largest budget a task may have, in millionths of a dollar ($100).
+pub const MAX_BUDGET_MICROS: i64 = 100_000_000;
+/// Payments above this ask for approval unless the task says otherwise ($1).
+pub const DEFAULT_ASK_ABOVE_MICROS: i64 = 1_000_000;
+/// The approval tool name a payment above the threshold is asked about under.
+pub const PAY_TOOL_NAME: &str = "sidefleet_pay";
+/// The approval a budget waits under until the user's wallet signs it: it shows in the
+/// bell and sends a push like any approval, but only a signature approves it; denying it
+/// starts the agent without payments.
+pub const BUDGET_TOOL_NAME: &str = "sidefleet_budget";
+
+/// The worker made an access key for a run's payments and asks the user to authorize it.
+/// Only public data: the key's address, never the key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PayKeyOffer {
+    /// The access key's address (0x...).
+    pub address: String,
+    pub chain_id: u64,
+    /// The TIP-20 token the budget is in (0x...); 6 decimals, so base units are micros.
+    pub token: String,
+    /// When the key should stop working.
+    pub expires_at: DateTime<Utc>,
+    /// How long the worker waits for the authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// The user's root key signed an authorization for the offered key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizePayKeyRequest {
+    /// The account the key spends from (0x...).
+    pub wallet: String,
+    /// The signed key authorization: an object (`sidefleet wallet`), or RLP hex (the page).
+    pub authorization: Value,
+    /// The key it authorizes, for an RLP authorization the control plane doesn't decode.
+    #[serde(default)]
+    pub key_id: Option<String>,
+}
+
+/// What the worker polls for after offering a key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PayKeyStatus {
+    #[serde(default)]
+    pub wallet: Option<String>,
+    #[serde(default)]
+    pub authorization: Option<Value>,
+    /// The user turned the budget down (or nobody answered): start without payments.
+    #[serde(default)]
+    pub declined: bool,
+}
+
+/// A run's budget and key, for `sidefleet wallet authorize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayKeyInfo {
+    pub run_id: Uuid,
+    pub task: String,
+    pub budget_micros: Option<i64>,
+    pub ask_above_micros: Option<i64>,
+    pub spent_micros: i64,
+    pub key: Option<PayKeyOffer>,
+    pub authorized: bool,
+}
+
+/// A payment the agent made, or one that was refused or failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentReport {
+    /// `paid`, `refused` (over budget or denied) or `failed`.
+    pub outcome: String,
+    pub amount_micros: i64,
+    pub url: String,
+    pub host: String,
+    /// What the agent said the payment is for.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Why it was refused or failed.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// The service's receipt (`Payment-Receipt`), for a paid one.
+    #[serde(default)]
+    pub receipt: Option<Value>,
+    /// The address the service asked to be paid (0x...).
+    #[serde(default)]
+    pub recipient: Option<String>,
+}
+
+/// Which services a task's agent may pay without asking first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PayMode {
+    /// Only the approved services; any other asks, whatever the amount.
+    #[default]
+    Approved,
+    /// Any service (under the threshold).
+    Any,
+}
+
+/// Your approved services, kept with your account and copied onto each task with a budget.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PayPolicy {
+    #[serde(default)]
+    pub mode: PayMode,
+    #[serde(default)]
+    pub approved: Vec<ApprovedService>,
+}
+
+/// A service the agent may pay without asking, by the host it is reached at (which TLS proves).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovedService {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The address its first payment went to. A payment to another address asks first, so
+    /// a swapped endpoint can't redirect money quietly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
+}
+
+pub const MAX_APPROVED_SERVICES: usize = 200;
+
+impl PayPolicy {
+    pub fn find(&self, host: &str) -> Option<&ApprovedService> {
+        self.approved.iter().find(|s| s.host.eq_ignore_ascii_case(host))
+    }
+
+    /// Lowercase hosts, one entry each, at most [`MAX_APPROVED_SERVICES`]; an error names a bad host.
+    pub fn normalized(self) -> Result<PayPolicy, String> {
+        if self.approved.len() > MAX_APPROVED_SERVICES {
+            return Err(format!("at most {MAX_APPROVED_SERVICES} approved services"));
+        }
+        let mut approved: Vec<ApprovedService> = Vec::with_capacity(self.approved.len());
+        for mut s in self.approved {
+            s.host = s.host.trim().trim_end_matches('.').to_ascii_lowercase();
+            let ok = !s.host.is_empty() && s.host.len() <= 253 && s.host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'));
+            if !ok {
+                return Err(format!("{:?} is not a host name", s.host));
+            }
+            s.name = s.name.map(|n| n.chars().take(100).collect());
+            s.recipient = s.recipient.filter(|r| r.len() == 42 && r.starts_with("0x") && r[2..].bytes().all(|b| b.is_ascii_hexdigit()));
+            match approved.iter_mut().find(|a| a.host == s.host) {
+                Some(a) => *a = s,
+                None => approved.push(s),
+            }
+        }
+        Ok(PayPolicy { mode: self.mode, approved })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentRecorded {
+    pub spent_micros: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

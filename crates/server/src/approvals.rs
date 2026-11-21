@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sidefleet_core::{
-    redact_tool_input, summarize_tool_input, Approval, ApprovalAction, ApprovalRequest, ApprovalStatus, RunEvent, RunStatus,
+    redact_tool_input, summarize_tool_input, Approval, ApprovalAction, ApprovalRequest, ApprovalStatus, RunEvent, RunStatus, BUDGET_TOOL_NAME,
     DEFAULT_APPROVAL_TIMEOUT_SECS, MAX_APPROVAL_TIMEOUT_SECS,
 };
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -80,6 +80,13 @@ pub async fn request(pool: &PgPool, org: Uuid, run_id: Uuid, worker_id: &str, re
     if run.status != RunStatus::Running || run.stop_requested {
         return Ok(RequestOutcome::NotRunning);
     }
+    let (approval, ev) = insert_locked(&mut tx, org, run_id, req).await?;
+    tx.commit().await?;
+    Ok(RequestOutcome::Created(Box::new(approval), ev))
+}
+
+/// Store a pending approval and its event. The caller holds the run lock.
+pub(crate) async fn insert_locked(tx: &mut Transaction<'_, Postgres>, org: Uuid, run_id: Uuid, req: &ApprovalRequest) -> sqlx::Result<(Approval, RunEvent)> {
     let timeout = req.timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS).clamp(1, MAX_APPROVAL_TIMEOUT_SECS);
     let tool_name: String = req.tool_name.chars().take(200).collect();
     let tool_use_id = req.tool_use_id.as_ref().map(|t| t.chars().take(200).collect::<String>());
@@ -94,16 +101,15 @@ pub async fn request(pool: &PgPool, org: Uuid, run_id: Uuid, worker_id: &str, re
     .bind(redact_tool_input(&req.input, MAX_INPUT_STRING_BYTES))
     .bind(tool_use_id)
     .bind(timeout as f64)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     let approval = row_to_approval(&row);
-    let ev = append_event_locked(&mut tx, run_id, "approval_requested", &requested_payload(&approval)).await?;
-    tx.commit().await?;
-    Ok(RequestOutcome::Created(Box::new(approval), ev))
+    let ev = append_event_locked(tx, run_id, "approval_requested", &requested_payload(&approval)).await?;
+    Ok((approval, ev))
 }
 
 /// Apply `action` to a locked, pending approval. Returns the stored approval and its event.
-async fn transition(
+pub(crate) async fn transition(
     tx: &mut Transaction<'_, Postgres>,
     current: &Approval,
     to: ApprovalStatus,
@@ -124,7 +130,7 @@ async fn transition(
     Ok((a, ev))
 }
 
-async fn lock_approval(tx: &mut Transaction<'_, Postgres>, org: Uuid, run_id: Uuid, id: Uuid) -> sqlx::Result<Option<Approval>> {
+pub(crate) async fn lock_approval(tx: &mut Transaction<'_, Postgres>, org: Uuid, run_id: Uuid, id: Uuid) -> sqlx::Result<Option<Approval>> {
     let row = sqlx::query(&format!("SELECT {COLS} FROM approvals WHERE id = $1 AND run_id = $2 AND org_id = $3 FOR UPDATE"))
         .bind(id)
         .bind(run_id)
@@ -152,6 +158,8 @@ pub enum DecideOutcome {
     Expired(Approval, Option<RunEvent>),
     /// Its run is no longer running; now cancelled.
     RunEnded(Approval, Option<RunEvent>),
+    /// A budget: only a signature from the user's wallet approves it.
+    NeedsWallet,
 }
 
 /// Someone on the page approves or denies a pending approval of `run_id`.
@@ -173,6 +181,9 @@ pub async fn decide(
     };
     if current.status != ApprovalStatus::Pending {
         return Ok(DecideOutcome::AlreadyDecided(current));
+    }
+    if approve && current.tool_name == BUDGET_TOOL_NAME {
+        return Ok(DecideOutcome::NeedsWallet);
     }
     if run.status != RunStatus::Running {
         let (a, ev) = transition(&mut tx, &current, ApprovalStatus::Cancelled, Some(CANCELLED_MESSAGE), None).await?;

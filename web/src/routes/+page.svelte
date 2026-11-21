@@ -55,6 +55,9 @@
 	let failover = $state(false);
 	// Start later (ISO time); '' starts now. Not remembered: each task picks its own.
 	let startAt = $state('');
+	// Agent budgets (spike): the most this task's agent may pay for APIs, and when it asks first.
+	let budget = $state(0);
+	let askAbove = $state(1_000_000);
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
@@ -137,7 +140,7 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined, budget_micros: agent === 'claude' && budget ? budget : undefined, ask_above_micros: agent === 'claude' && budget ? askAbove : undefined })
 			});
 			task = '';
 			startAt = '';
@@ -279,6 +282,8 @@
 						{iso}
 						oniso={(v) => (iso = v)}
 						bind:failover
+						bind:budget
+						bind:askAbove
 					/>
 					<StartAtPicker bind:value={startAt} />
 					</div>

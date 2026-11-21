@@ -35,6 +35,7 @@ fn spec(task: &str) -> AgentSpec {
         images: vec![],
         files: vec![],
         approval: None,
+        pay: None,
     }
 }
 

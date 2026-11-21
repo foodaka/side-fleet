@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use sidefleet_core::{
-    Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, PinRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
+    Agent, Approval, ApprovalRequest, AuthorizePayKeyRequest, PayKeyInfo, PayKeyOffer, PayKeyStatus, PayPolicy, PaymentRecorded, PaymentReport, ArchiveRequest, ClaimRequest, PinRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, FileUpload, ImageUpload, LiveTextRequest, WorktreeCleanupRequest, WorktreeCleanupResult, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
     RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_FILES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
@@ -78,6 +78,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/approvals", get(list_approvals))
         .route("/v1/runs/{id}/approvals/{approval}/approve", post(approve_tool))
         .route("/v1/runs/{id}/approvals/{approval}/deny", post(deny_tool))
+        .route("/v1/runs/{id}/pay-key", get(pay_key_info))
+        .route("/v1/runs/{id}/pay-key/authorize", post(authorize_pay_key))
+        .route("/v1/pay-policy", get(get_pay_policy).put(put_pay_policy))
+        .route("/v1/pay-services", get(pay_services_catalog))
         .route("/v1/images/{id}", get(get_image))
         .route("/v1/files/{id}", get(get_file))
         .route("/v1/workers", get(list_workers))
@@ -123,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/runs/{id}/control", get(run_control))
         .route("/v1/worker/runs/{id}/approvals", post(request_approval))
         .route("/v1/worker/runs/{id}/approvals/{approval}", get(poll_approval))
+        .route("/v1/worker/runs/{id}/pay-key", post(offer_pay_key).get(poll_pay_key))
+        .route("/v1/worker/runs/{id}/payments", post(record_payment))
         .route("/v1/worker/images/{id}", get(worker_get_image))
         .route("/v1/worker/files/{id}", get(worker_get_file))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
@@ -311,6 +317,12 @@ async fn start_run(
     let mode = check_permission_mode(req.permission_mode.as_deref())?;
     check_full_access(caller, mode)?;
     check_ask_agent(mode, agent)?;
+    let (budget_micros, ask_above_micros) = check_budget(req.budget_micros, req.ask_above_micros, agent)?;
+    // A task keeps the approved services it started with.
+    let pay_policy = match budget_micros {
+        Some(_) => Some(crate::payments::policy(&state.pool, caller.org_id(), caller.user_id()).await?),
+        None => None,
+    };
     let isolation = match req.isolation.as_deref() {
         None | Some("") => "worktree",
         Some(i) if ISOLATION_MODES.contains(&i) => i,
@@ -346,6 +358,9 @@ async fn start_run(
         context: brief.as_deref(),
         resume_from_branch: from_branch.as_deref(),
         start_at,
+        budget_micros,
+        ask_above_micros,
+        pay_policy: pay_policy.as_ref(),
     };
     check_run_limit(state, caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
@@ -492,6 +507,25 @@ fn check_ask_agent(mode: Option<&str>, agent: Agent) -> Result<(), ApiError> {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("\"Ask me\" works with Claude Code only for now, not {}", agent.display_name())));
     }
     Ok(())
+}
+
+/// A task's budget: positive, at most `MAX_BUDGET_MICROS`, Claude Code only for now (the pay
+/// tool is an MCP server, which only Claude Code is given). The threshold defaults to $1.
+fn check_budget(budget: Option<i64>, ask_above: Option<i64>, agent: Agent) -> Result<(Option<i64>, Option<i64>), ApiError> {
+    let Some(budget) = budget.filter(|b| *b != 0) else {
+        return Ok((None, None));
+    };
+    if !(1..=sidefleet_core::MAX_BUDGET_MICROS).contains(&budget) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("budget must be between $0.000001 and ${}", sidefleet_core::MAX_BUDGET_MICROS / 1_000_000)));
+    }
+    if agent != Agent::Claude {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("budgets work with Claude Code only for now, not {}", agent.display_name())));
+    }
+    let ask_above = ask_above.unwrap_or(sidefleet_core::DEFAULT_ASK_ABOVE_MICROS);
+    if ask_above < 0 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "ask_above_micros must not be negative".into()));
+    }
+    Ok((Some(budget), Some(ask_above)))
 }
 
 /// The thread in a few lines, for scripts and chat agents (see `summary`).
@@ -1135,6 +1169,7 @@ async fn decide_tool(
             ev.into_iter().for_each(|e| state.events.publish(e));
             (StatusCode::CONFLICT, "the run is no longer running".to_string())
         }
+        DecideOutcome::NeedsWallet => (StatusCode::CONFLICT, "a budget is authorized with your wallet, not approved: open the task to sign it".to_string()),
     };
     Err(ApiError(status, msg))
 }
@@ -1564,6 +1599,87 @@ async fn run_control(
         status: run.status,
         stop_requested: run.stop_requested || run.status.is_terminal(),
     }))
+}
+
+fn payment_error<T>(outcome: crate::payments::Outcome<T>) -> Result<T, ApiError> {
+    match outcome {
+        crate::payments::Outcome::Done(t) => Ok(t),
+        crate::payments::Outcome::NotFound => Err(not_found()),
+        crate::payments::Outcome::NotOwner => Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into())),
+        crate::payments::Outcome::Conflict(why) => Err(ApiError(StatusCode::CONFLICT, why.into())),
+    }
+}
+
+/// Your approved services: which ones a task's agent may pay without asking.
+async fn get_pay_policy(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<PayPolicy>, ApiError> {
+    Ok(Json(crate::payments::policy(&state.pool, caller.org_id(), caller.user_id()).await?))
+}
+
+async fn put_pay_policy(State(state): State<AppState>, Extension(caller): Extension<Caller>, Json(policy): Json<PayPolicy>) -> Result<Json<PayPolicy>, ApiError> {
+    let policy = policy.normalized().map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    crate::payments::set_policy(&state.pool, caller.org_id(), caller.user_id(), &policy).await?;
+    Ok(Json(policy))
+}
+
+/// The public MPP services catalog, trimmed, for picking approved services.
+async fn pay_services_catalog() -> Result<Json<serde_json::Value>, ApiError> {
+    crate::payments::catalog().await.map(Json).map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("could not load the services catalog: {e}")))
+}
+
+/// A run's budget and the key its worker made, for `sidefleet wallet authorize`.
+async fn pay_key_info(State(state): State<AppState>, Extension(caller): Extension<Caller>, Path(id): Path<Uuid>) -> Result<Json<PayKeyInfo>, ApiError> {
+    own_thread(&state, &caller, id).await?;
+    Ok(Json(crate::payments::info(&state.pool, caller.org_id(), id).await?.ok_or_else(not_found)?))
+}
+
+/// The user's root key signed an authorization for the run's key (off this server).
+async fn authorize_pay_key(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AuthorizePayKeyRequest>,
+) -> Result<StatusCode, ApiError> {
+    // The money is the creator's and the key is on their machine, so only they authorize it.
+    own_thread(&state, &caller, id).await?;
+    let by = caller.user.as_ref().map_or_else(|| "developer key".to_string(), |u| u.login.clone());
+    let events = payment_error(crate::payments::authorize(&state.pool, caller.org_id(), id, &req.wallet, &req.authorization, req.key_id.as_deref(), &by).await?)?;
+    events.into_iter().for_each(|e| state.events.publish(e));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The worker made an access key for the run's payments; the page asks the user to authorize it.
+async fn offer_pay_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WorkerQuery>,
+    Json(offer): Json<PayKeyOffer>,
+) -> Result<StatusCode, ApiError> {
+    worker_is(&state, &auth, &q.worker_id).await?;
+    let org = run_org(&state, &auth, id).await?;
+    let events = payment_error(crate::payments::offer_key(&state.pool, org, id, &q.worker_id, &offer).await?)?;
+    events.into_iter().for_each(|e| state.events.publish(e));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn poll_pay_key(State(state): State<AppState>, Extension(auth): Extension<WorkerAuth>, Path(id): Path<Uuid>) -> Result<Json<PayKeyStatus>, ApiError> {
+    let org = run_org(&state, &auth, id).await?;
+    Ok(Json(crate::payments::status(&state.pool, org, id).await?.ok_or_else(not_found)?))
+}
+
+/// The worker paid for something (or refused to): add it to the run's spend and show it.
+async fn record_payment(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WorkerQuery>,
+    Json(report): Json<PaymentReport>,
+) -> Result<Json<PaymentRecorded>, ApiError> {
+    worker_is(&state, &auth, &q.worker_id).await?;
+    let org = run_org(&state, &auth, id).await?;
+    let (spent_micros, ev) = payment_error(crate::payments::record(&state.pool, org, id, &q.worker_id, &report).await?)?;
+    state.events.publish(ev);
+    Ok(Json(PaymentRecorded { spent_micros }))
 }
 
 /// The worker's agent wants to use a tool the permission mode leaves to the person:

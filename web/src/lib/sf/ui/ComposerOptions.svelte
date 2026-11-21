@@ -4,7 +4,7 @@
 	import { goto } from '$app/navigation';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
-	import { WORKSPACES, permHint, permName, permsFor } from '../format';
+	import { ASK_ABOVE, BUDGETS, WORKSPACES, permHint, permName, permsFor, usd } from '../format';
 	import type { AgentId, Worker } from '../types';
 
 	let {
@@ -20,6 +20,8 @@
 		iso,
 		oniso,
 		failover = $bindable(false),
+		budget = $bindable(),
+		askAbove = $bindable(1_000_000),
 		size = 'default'
 	}: {
 		agent: AgentId;
@@ -42,6 +44,10 @@
 		oniso?: (w: string) => void;
 		/** "Move if it drops"; only offered on its own branch. */
 		failover?: boolean;
+		/** Agent budgets (Claude Code): the most the agent may pay for APIs, in micros; 0 is none. Leave out to hide. */
+		budget?: number;
+		/** Payments above this ask first. */
+		askAbove?: number;
 		size?: 'default' | 'sm';
 	} = $props();
 
@@ -50,6 +56,7 @@
 	const pinned = $derived(machines.find((w) => w.id === machine));
 	const showMachines = $derived(machines.length > 1);
 	const showFailover = $derived(iso === 'worktree');
+	const showBudget = $derived(agent === 'claude' && budget !== undefined);
 
 	/** What differs from the defaults, in the order the menu lists it. */
 	const changed = $derived(
@@ -57,7 +64,8 @@
 			showMachines && pinned ? pinned.display_name : '',
 			perm && perm !== defaultPerm ? permName(perm) : '',
 			iso && iso !== defaultIso ? WORKSPACES.find((w) => w.id === iso)?.name : '',
-			showFailover && failover ? 'Moves if it drops' : ''
+			showFailover && failover ? 'Moves if it drops' : '',
+			showBudget && budget ? `Budget ${usd(budget)}` : ''
 		].filter(Boolean)
 	);
 	const summary = $derived(changed.join(' · '));
@@ -121,6 +129,34 @@
 					</DropdownMenu.RadioGroup>
 				</DropdownMenu.SubContent>
 			</DropdownMenu.Sub>
+		{/if}
+
+		{#if showBudget}
+			<DropdownMenu.Separator />
+			<DropdownMenu.Sub>
+				<DropdownMenu.SubTrigger><span class="flex-1">Budget</span><span class={hint}>{budget ? usd(budget) : 'None'}</span></DropdownMenu.SubTrigger>
+				<DropdownMenu.SubContent class="w-72">
+					<DropdownMenu.RadioGroup value={String(budget)} onValueChange={(v) => (budget = Number(v))}>
+						{#each BUDGETS as b (b)}
+							<DropdownMenu.RadioItem value={String(b)} closeOnSelect>
+								<span class="flex flex-col"><span>{b ? usd(b) : 'No budget'}</span><span class={hint}>{b ? `The agent may pay for APIs up to ${usd(b)}` : 'The agent pays for nothing'}</span></span>
+							</DropdownMenu.RadioItem>
+						{/each}
+					</DropdownMenu.RadioGroup>
+				</DropdownMenu.SubContent>
+			</DropdownMenu.Sub>
+			{#if budget}
+				<DropdownMenu.Sub>
+					<DropdownMenu.SubTrigger><span class="flex-1">Ask me over</span><span class={hint}>{usd(askAbove)}</span></DropdownMenu.SubTrigger>
+					<DropdownMenu.SubContent class="w-64">
+						<DropdownMenu.RadioGroup value={String(askAbove)} onValueChange={(v) => (askAbove = Number(v))}>
+							{#each ASK_ABOVE as a (a)}
+								<DropdownMenu.RadioItem value={String(a)} closeOnSelect>{a ? usd(a) : 'Every payment'}</DropdownMenu.RadioItem>
+							{/each}
+						</DropdownMenu.RadioGroup>
+					</DropdownMenu.SubContent>
+				</DropdownMenu.Sub>
+			{/if}
 		{/if}
 
 		{#if showFailover}

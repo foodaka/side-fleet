@@ -6,6 +6,18 @@ export const AGENTS: { id: AgentId; name: string; hint: string }[] = [
 	{ id: 'opencode', name: 'opencode', hint: 'Open source; any model it is set up for (OpenRouter, local…)' }
 ];
 
+/** Millionths of a dollar as dollars: `$1.20`, `$0.0015`. */
+export function usd(micros: number | null | undefined) {
+	const m = micros ?? 0;
+	if (m !== 0 && Math.abs(m) < 10_000) return `$${(m / 1_000_000).toFixed(6).replace(/0+$/, '')}`;
+	return `$${(m / 1_000_000).toFixed(2)}`;
+}
+
+/** Budgets the composer offers, in micros; 0 is none. */
+export const BUDGETS = [0, 1_000_000, 5_000_000, 20_000_000];
+/** Payments above these ask first. */
+export const ASK_ABOVE = [0, 100_000, 1_000_000, 5_000_000];
+
 export const agentName = (id: string | null | undefined) => AGENTS.find((a) => a.id === id)?.name ?? 'Claude Code';
 
 /** Claude Code's model aliases, each the latest version the machine's Claude Code knows; Codex and opencode offer whatever each machine reports.

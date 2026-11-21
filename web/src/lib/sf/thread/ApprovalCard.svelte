@@ -8,7 +8,8 @@
 	import Clock from '@lucide/svelte/icons/clock';
 	import { Button } from '#lib/components/ui/button';
 	import { fleet } from '../state.svelte';
-	import { agentName } from '../format';
+	import { agentName, usd } from '../format';
+	import { allow } from '../services';
 	import type { AgentId } from '../types';
 	import type { Item } from '../thread.svelte';
 
@@ -21,8 +22,11 @@
 	}: { item: Approval; agent: AgentId; live: boolean; ondecide?: (item: Approval, approve: boolean) => Promise<void> } = $props();
 
 	const mcp = $derived(item.name.match(/^mcp__(.+?)__(.+)$/));
+	/** A payment over the task's threshold, from its budget. */
+	const payment = $derived(item.name === 'sidefleet_pay');
 	const ask = $derived(
-		item.name === 'Bash' ? 'run a command'
+		payment ? `pay ${item.input?.amount ?? usd(item.input?.amount_micros)}`
+		: item.name === 'Bash' ? 'run a command'
 		: /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(item.name) ? 'change a file'
 		: item.name === 'WebFetch' ? 'fetch a page'
 		: item.name === 'WebSearch' ? 'search the web'
@@ -32,29 +36,50 @@
 	const input = $derived<Record<string, any>>(item.input ?? {});
 	/** The part worth reading in full: the command, file, address or query. */
 	const main = $derived(
-		typeof input.command === 'string' ? input.command
+		payment ? String(input.host ?? input.url ?? '')
+		: typeof input.command === 'string' ? input.command
 		: typeof input.file_path === 'string' ? input.file_path
 		: typeof input.url === 'string' ? input.url
 		: typeof input.query === 'string' ? input.query
 		: null
 	);
 	const detail = $derived(main === null ? JSON.stringify(input, null, 2) : null);
-	const note = $derived(typeof input.description === 'string' ? input.description : typeof input.prompt === 'string' ? input.prompt : null);
+	const note = $derived(
+		payment ? [input.reason ? `“${input.reason}”` : null, typeof input.left_after_micros === 'number' ? `${usd(input.left_after_micros)} left of ${usd(input.budget_micros)} after this` : null].filter(Boolean).join(' · ') || null
+		: typeof input.description === 'string' ? input.description : typeof input.prompt === 'string' ? input.prompt : null
+	);
 
 	const pending = $derived(item.status === 'pending' && live);
 	const left = $derived(Math.max(0, new Date(item.expiresAt).getTime() - fleet.now));
 	const leftText = $derived(left >= 60_000 ? `${Math.ceil(left / 60_000)} min left` : `${Math.ceil(left / 1000)} s left`);
 
 	let busy = $state<'approve' | 'deny' | null>(null);
-	async function decide(approve: boolean) {
-		if (!ondecide || busy) return;
+	/** Why a payment asks: a service you haven't approved, a new address, or over the threshold. */
+	const asks = $derived<string[]>(payment && Array.isArray(input.asks) ? input.asks : []);
+	/** Pay, and approve the service for later tasks (with the address it asked to be paid to). */
+	async function payAndAllow() {
+		if (!(await decide(true))) return;
+		try {
+			await allow({ host: String(input.host), name: input.service ?? null, recipient: input.recipient ?? null });
+			toast.success(`${input.host} is one of your approved services now`);
+		} catch (e) {
+			toast.error('Paid, but could not add it to your approved services', { description: (e as Error).message });
+		}
+	}
+
+	/** Whether the decision went through. */
+	async function decide(approve: boolean): Promise<boolean> {
+		if (!ondecide || busy) return false;
 		busy = approve ? 'approve' : 'deny';
+		let ok = true;
 		try {
 			await ondecide(item, approve);
 		} catch (e) {
+			ok = false;
 			toast.error(approve ? 'Could not approve' : 'Could not deny', { description: (e as Error).message });
 		}
 		busy = null;
+		return ok;
 	}
 
 	const outcome = $derived(
@@ -78,13 +103,23 @@
 			<pre class="mt-2 max-h-48 overflow-auto rounded-lg bg-code px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-all text-foreground/80">{detail}</pre>
 		{/if}
 		{#if note}<p class="mt-1.5 text-[12.5px] text-muted-foreground">{note}</p>{/if}
+		{#if asks.length}
+			<ul class="mt-1.5 flex flex-col gap-0.5 text-[12.5px] text-queue-ink">
+				{#each asks as why (why)}<li>Asks because {why}.</li>{/each}
+			</ul>
+		{/if}
 		<div class="mt-3 flex flex-wrap items-center gap-2">
 			{#if !ondecide}
 				<span class="text-[12.5px] text-muted-foreground">Only the task's owner can answer: it runs on their machine.</span>
 			{:else}
 			<Button size="sm" class="h-9 min-w-24 rounded-full px-4 max-sm:flex-1" disabled={!!busy || !ondecide} onclick={() => decide(true)}>
-				<Check class="size-4" />{busy === 'approve' ? 'Approving…' : 'Approve'}
+				<Check class="size-4" />{busy === 'approve' ? (payment ? 'Paying…' : 'Approving…') : payment ? `Pay ${input.amount ?? ''}`.trim() : 'Approve'}
 			</Button>
+			{#if payment && input.unlisted}
+				<Button size="sm" variant="outline" class="h-9 rounded-full px-4 max-sm:flex-1" disabled={!!busy || !ondecide} onclick={payAndAllow}>
+					<Check class="size-4" />Pay and always allow {input.host}
+				</Button>
+			{/if}
 			<Button size="sm" variant="outline" class="h-9 min-w-24 rounded-full px-4 max-sm:flex-1" disabled={!!busy || !ondecide} onclick={() => decide(false)}>
 				<X class="size-4" />{busy === 'deny' ? 'Denying…' : 'Deny'}
 			</Button>
@@ -100,6 +135,6 @@
 			{#if item.status === 'approved'}<Check class="size-3.5" />{:else if item.status === 'pending'}<ShieldQuestion class="size-3.5" />{:else}<X class="size-3.5" />{/if}
 		</span>
 		<span class="shrink-0">{outcome}</span>
-		<code class="min-w-0 truncate rounded bg-code px-1.5 py-0.5 font-mono text-[12px] text-foreground/85">{item.summary || item.name}</code>
+		<code class="min-w-0 truncate rounded bg-code px-1.5 py-0.5 font-mono text-[12px] text-foreground/85">{payment ? `pay ${input.amount ?? ''} to ${input.host ?? ''}` : item.summary || item.name}</code>
 	</p>
 {/if}

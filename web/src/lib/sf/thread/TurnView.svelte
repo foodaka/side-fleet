@@ -11,9 +11,11 @@
 	import GitMerge from '@lucide/svelte/icons/git-merge';
 	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
 	import { fleet } from '../state.svelte';
-	import { agentModel, agentName, clock, durationMs, effortName, permName, repoLabel, scheduled, startTime, until } from '../format';
+	import { agentModel, agentName, clock, durationMs, effortName, permName, repoLabel, scheduled, startTime, until, usd } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
+	import BudgetCard from './BudgetCard.svelte';
+	import PaymentRow from './PaymentRow.svelte';
 	import ToolImages from './ToolImages.svelte';
 	import AttachedFiles from './AttachedFiles.svelte';
 	import ChangesCard from '../diff/ChangesCard.svelte';
@@ -100,7 +102,7 @@
 		!prev || !run.parent_id || turn.machine !== prev.machine || (!!turn.branch && !!prev.branch && turn.branch !== prev.branch)
 	);
 	const meta = $derived(
-		[run.parent_id ? null : clock(run.created_at), run.permission_mode ? permName(run.permission_mode) : null, run.effort ? `${effortName(run.agent, run.effort)} effort` : null, !run.parent_id && run.isolation === 'checkout' ? 'In place' : null].filter(Boolean)
+		[run.parent_id ? null : clock(run.created_at), run.permission_mode ? permName(run.permission_mode) : null, run.effort ? `${effortName(run.agent, run.effort)} effort` : null, !run.parent_id && run.isolation === 'checkout' ? 'In place' : null, run.budget_micros ? `Spent ${usd(run.spent_micros)} of ${usd(run.budget_micros)}` : null].filter(Boolean)
 	);
 </script>
 
@@ -202,6 +204,10 @@
 					<ToolGroup tools={it.tools} {live} />
 				{:else if it.kind === 'approval'}
 					<ApprovalCard item={it} agent={run.agent} {live} {ondecide} />
+				{:else if it.kind === 'budget'}
+					<BudgetCard item={it} {live} />
+				{:else if it.kind === 'payment'}
+					<PaymentRow item={it} />
 				{:else if it.kind === 'note'}
 					<p class="py-1 text-[13px] {it.tone === 'err' ? 'text-err-ink' : it.tone === 'ok' ? 'text-ok-ink' : 'text-muted-foreground'}">{#if it.href}<a href={it.href} target="_blank" rel="noopener noreferrer" class="underline underline-offset-2 hover:opacity-80">{it.text}</a>{:else}{it.text}{/if}</p>
 				{:else if it.kind === 'stderr-group'}

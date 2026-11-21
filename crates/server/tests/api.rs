@@ -2321,3 +2321,127 @@ async fn a_task_scheduled_for_later_waits_for_its_time_or_start_now() {
 
     env.teardown().await;
 }
+
+// ---- agent budgets ----
+
+#[tokio::test]
+async fn a_budget_goes_from_key_offer_to_authorization_to_recorded_payments() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    // At most $100, and not for opencode yet.
+    for body in [
+        json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r", "budget_micros": 101_000_000}),
+        json!({"task": "t", "agent": "opencode", "model": "", "repo": "r", "budget_micros": 1_000_000}),
+    ] {
+        let r = api.dev(reqwest::Method::POST, "/v1/runs").json(&body).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    api.register("w", &["r"]).await;
+    let id = create_id(&api, json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r", "budget_micros": 5_000_000})).await;
+    let run = api.claim("w", &["r"]).await.unwrap();
+    assert_eq!((run.budget_micros, run.ask_above_micros, run.spent_micros), (Some(5_000_000), Some(1_000_000), 0), "the threshold defaults to $1");
+
+    let key = "0x1111111111111111111111111111111111111111";
+    let authorize = |key_id: &str| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/pay-key/authorize"))
+        .json(&json!({"wallet": "0x2222222222222222222222222222222222222222", "authorization": {"keyId": key_id, "chainId": "0xa5bf"}}));
+    assert_eq!(authorize(key).send().await.unwrap().status(), StatusCode::CONFLICT, "nothing to authorize before the worker offers a key");
+
+    let offer = json!({"address": key, "chain_id": 42431, "token": "0x20c0000000000000000000000000000000000000", "expires_at": "2030-01-01T00:00:00Z"});
+    let r = api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/pay-key?worker_id=w")).json(&offer).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let info: Value = api.dev(reqwest::Method::GET, &format!("/v1/runs/{id}/pay-key")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((info["key"]["address"].as_str(), info["authorized"].as_bool()), (Some(key), Some(false)));
+
+    // Waiting for the wallet is a pending approval: the sidebar, the bell and push show it, but only a signature approves it.
+    assert_eq!(pending_in_list(&api, id).await, 1);
+    let list: Vec<Value> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{id}/approvals")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list[0]["tool_name"], "sidefleet_budget");
+    let budget_approval = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(decide(&api, id, &budget_approval, "approve", None).await.0, StatusCode::CONFLICT);
+
+    assert_eq!(authorize("0x3333333333333333333333333333333333333333").send().await.unwrap().status(), StatusCode::CONFLICT, "only the offered key");
+    assert_eq!(authorize(key).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+    let st: Value = api.worker(reqwest::Method::GET, &format!("/v1/worker/runs/{id}/pay-key")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["authorization"]["keyId"], key);
+    assert_eq!(st["wallet"], "0x2222222222222222222222222222222222222222");
+    assert_eq!(poll_approval(&api, id, &budget_approval).await["status"], "approved", "signing approves the waiting budget");
+    assert_eq!(pending_in_list(&api, id).await, 0);
+
+    let pay = |outcome: &str, amount: i64| api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/payments?worker_id=w"))
+        .json(&json!({"outcome": outcome, "amount_micros": amount, "url": "https://api.example.com/q?token=sk-abcdefghijklmnopqrstuvwxyz", "host": "api.example.com", "reason": "a query"}));
+    let r: Value = pay("paid", 100_000).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["spent_micros"], 100_000);
+    let r: Value = pay("refused", 10_000_000).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["spent_micros"], 100_000, "a refused payment costs nothing");
+    assert_eq!(api.get_run(id).await.spent_micros, 100_000);
+
+    let evs = sidefleet_server::db::events_since(&env.pool, id, 0).await.unwrap();
+    let kinds: Vec<&str> = evs.iter().map(|e| e.kind.as_str()).filter(|k| k.starts_with("budget") || k.starts_with("payment")).collect();
+    assert_eq!(kinds, vec!["budget_key_ready", "budget_authorized", "payment_made", "payment_refused"]);
+    let paid = evs.iter().find(|e| e.kind == "payment_made").unwrap();
+    assert!(!paid.payload["url"].as_str().unwrap().contains("sk-abcdef"), "urls are redacted: {}", paid.payload);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn denying_a_budget_starts_the_agent_without_payments() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w", &["r"]).await;
+    let id = create_id(&api, json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r", "budget_micros": 1_000_000})).await;
+    api.claim("w", &["r"]).await.unwrap();
+    let offer = json!({"address": "0x1111111111111111111111111111111111111111", "chain_id": 42431,
+        "token": "0x20c0000000000000000000000000000000000000", "expires_at": "2030-01-01T00:00:00Z", "timeout_secs": 600});
+    api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/pay-key?worker_id=w")).json(&offer).send().await.unwrap();
+    let status = || async { api.worker(reqwest::Method::GET, &format!("/v1/worker/runs/{id}/pay-key")).send().await.unwrap().json::<Value>().await.unwrap() };
+    assert_eq!(status().await["declined"], false);
+    let list: Vec<Value> = api.dev(reqwest::Method::GET, &format!("/v1/runs/{id}/approvals")).send().await.unwrap().json().await.unwrap();
+    let (s, _) = decide(&api, id, list[0]["id"].as_str().unwrap(), "deny", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(status().await["declined"], true);
+
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn approved_services_are_copied_onto_tasks_and_pin_the_first_address_paid() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let get = || async { api.dev(reqwest::Method::GET, "/v1/pay-policy").send().await.unwrap().json::<Value>().await.unwrap() };
+    assert_eq!(get().await, json!({"mode": "approved", "approved": []}), "by default every service asks first");
+
+    let bad = api.dev(reqwest::Method::PUT, "/v1/pay-policy").json(&json!({"mode": "approved", "approved": [{"host": "evil.com/path"}]})).send().await.unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let r: Value = api
+        .dev(reqwest::Method::PUT, "/v1/pay-policy")
+        .json(&json!({"mode": "approved", "approved": [{"host": "API.Dune.com", "name": "Dune"}, {"host": "api.dune.com", "name": "Dune"}, {"host": "mpp.dev"}]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["approved"].as_array().unwrap().len(), 2, "hosts are lowercased and kept once: {r}");
+
+    api.register("w", &["r"]).await;
+    let id = create_id(&api, json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r", "budget_micros": 1_000_000})).await;
+    let run = api.claim("w", &["r"]).await.unwrap();
+    let policy = run.pay_policy.expect("a task with a budget carries the approved services");
+    assert!(policy.find("api.dune.com").is_some() && policy.find("mpp.dev").is_some());
+    let none = create_id(&api, json!({"task": "t", "model": "claude-sonnet-5-5", "repo": "r"})).await;
+    assert!(api.get_run(none).await.pay_policy.is_none(), "no budget, no list");
+
+    let recipient = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let pay = |host: &str| api.worker(reqwest::Method::POST, &format!("/v1/worker/runs/{id}/payments?worker_id=w"))
+        .json(&json!({"outcome": "paid", "amount_micros": 100_000, "url": format!("https://{host}/x"), "host": host, "recipient": recipient}));
+    pay("mpp.dev").send().await.unwrap();
+    pay("unlisted.example").send().await.unwrap();
+    let after = get().await;
+    let mpp = after["approved"].as_array().unwrap().iter().find(|s| s["host"] == "mpp.dev").unwrap();
+    assert_eq!(mpp["recipient"], recipient, "the first payment pins the address: {after}");
+    assert_eq!(after["approved"].as_array().unwrap().len(), 2, "paying an unlisted service doesn't approve it");
+
+    env.teardown().await;
+}

@@ -4,6 +4,7 @@
 
 import { api } from './api';
 import { cleanPresets, DEFAULT_SNOOZE_PRESETS, type SnoozePreset } from './snooze';
+import type { PasskeyWallet } from './wallet';
 
 const KEY = 'sidefleet_prefs';
 
@@ -29,6 +30,8 @@ interface Stored {
 	workspace: Workspace;
 	/** The choices in a task's Snooze menu. */
 	snoozePresets: SnoozePreset[];
+	/** Agent budgets: your passkey wallet (public data only), which signs each task's budget. */
+	wallet: PasskeyWallet | null;
 }
 
 const DEFAULTS: Stored = {
@@ -40,12 +43,13 @@ const DEFAULTS: Stored = {
 	permission: 'bypassPermissions',
 	roomPermission: 'acceptEdits',
 	workspace: 'worktree',
-	snoozePresets: DEFAULT_SNOOZE_PRESETS
+	snoozePresets: DEFAULT_SNOOZE_PRESETS,
+	wallet: null
 };
 const MODES = ['acceptEdits', 'bypassPermissions', 'plan', 'ask'];
 
 /** What follows you between browsers. How the Changes panel looks (and the theme) suits each screen, so it stays put. */
-const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop', 'snoozePresets'] as const;
+const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop', 'snoozePresets', 'wallet'] as const;
 const synced = (s: Partial<Stored>) =>
 	Object.fromEntries(SYNCED.filter((k) => s[k] !== undefined).map((k) => [k, s[k]])) as Partial<Stored>;
 const savedHere = () => { try { return localStorage.getItem(KEY) !== null; } catch { return false; } };
@@ -77,6 +81,7 @@ class Prefs {
 	roomPermission = $state(DEFAULTS.roomPermission);
 	workspace = $state<Workspace>(DEFAULTS.workspace);
 	snoozePresets = $state<SnoozePreset[]>(DEFAULTS.snoozePresets);
+	wallet = $state<PasskeyWallet | null>(DEFAULTS.wallet);
 
 	/** Signed in: the synced ones are kept with your account too. */
 	account = $state(false);
@@ -97,6 +102,7 @@ class Prefs {
 		this.roomPermission = MODES.includes(s.roomPermission) ? s.roomPermission : DEFAULTS.roomPermission;
 		this.workspace = s.workspace === 'checkout' ? 'checkout' : 'worktree';
 		this.snoozePresets = cleanPresets(s.snoozePresets);
+		this.wallet = s.wallet && typeof s.wallet.id === 'string' && typeof s.wallet.address === 'string' ? s.wallet : null;
 	}
 
 	#stored(): Stored {
@@ -109,7 +115,8 @@ class Prefs {
 			permission: this.permission,
 			roomPermission: this.roomPermission,
 			workspace: this.workspace,
-			snoozePresets: this.snoozePresets
+			snoozePresets: this.snoozePresets,
+			wallet: this.wallet
 		};
 	}
 

@@ -23,11 +23,14 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 sysinfo.workspace = true
+mpp.workspace = true
+tempo-alloy.workspace = true
+alloy.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 sidefleet-server.workspace = true
 axum.workspace = true
-chrono.workspace = true
 futures.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true

@@ -6,6 +6,7 @@
 //! * `sidefleet status`     show saved worker settings and whether the service is running
 //! * `sidefleet disconnect` remove the service
 //! * `sidefleet detect`     print what this machine can run
+//! * `sidefleet wallet`     your testnet wallet, which authorizes each task's budget
 
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
@@ -151,6 +152,19 @@ enum Cmd {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Internal: the MCP server Claude Code calls to pay for a request from its task's budget.
+    #[command(hide = true)]
+    PayMcp {
+        /// The worker's socket for this run.
+        #[arg(long)]
+        socket: PathBuf,
+    },
+    /// Your wallet for agent budgets (Tempo testnet). Keep it on your own laptop, not on
+    /// a machine that runs tasks: it authorizes each task's budget.
+    Wallet {
+        #[command(subcommand)]
+        cmd: WalletCmd,
+    },
     /// Show the saved worker settings and whether the background service is running.
     Status,
     /// Stop and remove the background service installed by `connect`. Settings are kept.
@@ -169,6 +183,30 @@ enum Cmd {
         skip_sign_in_check: bool,
         #[arg(long, default_value_t = 3)]
         scan_depth: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum WalletCmd {
+    /// Make a new wallet key in ~/.sidefleet/wallet.key.
+    New,
+    /// Print the wallet's address and test-dollar balance.
+    Show,
+    /// Ask the testnet faucet for test dollars.
+    Fund,
+    /// Let a task's agent spend up to its budget: signs the key its machine made for it.
+    Authorize {
+        /// The task's id (the page shows the command to copy).
+        run: uuid::Uuid,
+        /// The control plane's URL.
+        #[arg(long, env = "SIDEFLEET_CONTROL")]
+        control: String,
+        /// An API token with full access (Chat apps page), or a self-hosted control plane's developer key.
+        #[arg(long, env = "SIDEFLEET_API_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+        /// Don't ask before signing.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -295,9 +333,13 @@ async fn main() -> Result<()> {
     if let Cmd::ApprovalMcp { socket } = &cli.cmd {
         return Ok(sidefleet_worker::approval::serve_mcp_stdio(socket)?);
     }
+    if let Cmd::PayMcp { socket } = &cli.cmd {
+        return Ok(sidefleet_worker::pay::serve_mcp_stdio(socket)?);
+    }
     init_logging();
 
     match cli.cmd {
+        Cmd::Wallet { cmd } => wallet(cmd).await,
         Cmd::Serve { bind, database_url, dev_key, worker_tokens, no_worker, repos, permission_mode, parallel, install_service } => {
             if install_service {
                 let mut args = vec!["serve".to_string(), "--bind".into(), bind.clone(), "--parallel".into(), parallel.to_string(), "--permission-mode".into(), permission_mode.clone()];
@@ -351,6 +393,7 @@ async fn main() -> Result<()> {
                 allow_remote_update: true,
                 approval_exe: std::env::current_exe().ok(),
                 approval_timeout: Duration::from_secs(approval_timeout.max(1)),
+                payments: sidefleet_worker::pay::PaymentsConfig::from_env(),
             };
             tokio::select! {
                 r = sidefleet_worker::worker::run(cfg) => r,
@@ -361,7 +404,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::ApprovalMcp { .. } => unreachable!("handled before logging starts"),
+        Cmd::ApprovalMcp { .. } | Cmd::PayMcp { .. } => unreachable!("handled before logging starts"),
         Cmd::Status => status(),
         Cmd::Disconnect => disconnect(),
         Cmd::Detect { repos, claude_bin, codex_bin, opencode_bin, skip_sign_in_check, scan_depth } => {
@@ -528,6 +571,7 @@ async fn serve(opts: ServeOpts) -> Result<()> {
             allow_remote_update: true,
             approval_exe: std::env::current_exe().ok(),
             approval_timeout: Duration::from_secs(sidefleet_core::DEFAULT_APPROVAL_TIMEOUT_SECS),
+            payments: sidefleet_worker::pay::PaymentsConfig::from_env(),
         };
         tokio::spawn(async move {
             if let Err(e) = sidefleet_worker::worker::run(cfg).await {
@@ -932,4 +976,52 @@ fn disconnect() -> Result<()> {
     println!("{}", uninstall_service()?);
     println!("Settings kept at {}; delete that file to forget the token.", worker_env_path().display());
     Ok(())
+}
+
+// ---- wallet ----
+
+async fn wallet(cmd: WalletCmd) -> Result<()> {
+    use sidefleet_worker::{pay, wallet};
+    let path = config_dir().join("wallet.key");
+    let rpc = std::env::var("SIDEFLEET_TEMPO_RPC").unwrap_or_else(|_| pay::TESTNET_RPC.into());
+    match cmd {
+        WalletCmd::New => {
+            let address = wallet::create(&path)?;
+            println!("Made a testnet wallet: {address}\nIts key is in {} (only you can read it).", path.display());
+            println!("Get test dollars with `sidefleet wallet fund`.");
+            Ok(())
+        }
+        WalletCmd::Show => {
+            let address = wallet::load(&path)?.address().to_checksum(None);
+            let micros = wallet::balance(&rpc, &address, pay::PATH_USD).await?;
+            println!("{address}\n{} test dollars (pathUSD)", pay::usd(micros as i64));
+            Ok(())
+        }
+        WalletCmd::Fund => {
+            let address = wallet::load(&path)?.address().to_checksum(None);
+            wallet::fund(&rpc, &address).await?;
+            println!("Asked the faucet to fund {address}; `sidefleet wallet show` shows the balance once it lands.");
+            Ok(())
+        }
+        WalletCmd::Authorize { run, control, token, yes } => {
+            let root = wallet::load(&path)?;
+            let token = token
+                .or_else(|| std::env::var("SIDEFLEET_DEV_KEY").ok())
+                .context("give an API token with full access (--token or SIDEFLEET_API_TOKEN)")?;
+            let control = wallet::Control { url: control.trim_end_matches('/').to_string(), token };
+            wallet::authorize(&control, &root, run, |summary| {
+                println!("{summary}");
+                if yes {
+                    return true;
+                }
+                print!("Authorize? [y/N] ");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
+            })
+            .await?;
+            println!("Authorized. The task's agent can pay up to its budget now.");
+            Ok(())
+        }
+    }
 }

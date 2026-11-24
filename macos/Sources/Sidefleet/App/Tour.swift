@@ -27,7 +27,7 @@ enum Tour {
                 ("thread-failed", .thread("demo-stripe")),
                 ("thread-scheduled", .thread("demo-audit")),
                 // The sidebar By project, then the icon picker over it.
-                ("sidebar-projects", .thread("demo-checkout")),
+                ("sidebar-projects", .overview),
                 ("machines", .machines),
                 ("overview", .overview),
                 ("rooms", .rooms),
@@ -39,7 +39,7 @@ enum Tour {
             for (name, route) in stops {
                 if name == "sidebar-projects" { stores.fleet.projects.setView(.project) }
                 stores.route = route
-                try? await Task.sleep(for: .seconds(2.5))
+                try? await Task.sleep(for: .seconds(name == "sidebar-projects" ? 3.5 : 2.5))
                 capture(folder.appendingPathComponent("\(name)-\(suffix).png"))
                 if name == "new-task" {
                     // The menu of skills a slash opens.

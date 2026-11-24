@@ -100,10 +100,13 @@ struct SidebarView: View {
 
     // MARK: The list
 
+    private static let listTop = "sidebar-list-top"
+
     private var list: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: 0).id(Self.listTop)
                     if !fleet.loaded {
                         skeleton
                     } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -117,6 +120,10 @@ struct SidebarView: View {
             }
             .scrollIndicators(.automatic)
             .sheet(item: pickingProject) { ProjectIconSheet(repo: $0.id, current: fleet.projects.icons[$0.id]) }
+            .onChange(of: fleet.projects.view) { _, _ in
+                // Switching between By time and By project starts again from the top.
+                proxy.scrollTo(Self.listTop, anchor: .top)
+            }
             .onChange(of: stores.openThreadID) { _, id in
                 // Keep the open task in view, after opening it from somewhere else.
                 if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } }

@@ -206,9 +206,21 @@ public final class ThreadStore {
     }
 
     /// Push the branch and open a pull request for it (or update the open one).
-    public func openPR() async throws {
+    public func openPR(_ options: PROptions = PROptions()) async throws {
         guard let root else { return }
-        append(try await api.run(try await api.openPR(root: root.id)))
+        append(try await api.run(try await api.openPR(root: root.id, options: options)))
+    }
+
+    /// Merge the open pull request on GitHub, from the thread's machine.
+    public func mergePR(_ method: MergeMethod) async throws {
+        guard let root else { return }
+        append(try await api.run(try await api.mergePR(root: root.id, method: method)))
+    }
+
+    /// A message since the last push (or opening) changed files: push before merging.
+    public var unpushed: Bool {
+        let last = turns.lastIndex { $0.run.kind == .pr && $0.run.status == .succeeded } ?? -1
+        return turns.dropFirst(last + 1).contains { ($0.run.kind == .agent || $0.run.kind == .restore) && ($0.turnDiff?.fileCount ?? 0) > 0 }
     }
 
     /// Have the machine look at the pull request again now rather than in a few minutes.

@@ -207,6 +207,10 @@ private actor DemoWorld {
         case ("GET", "images"):
             guard seg.count > 2, let data = images[seg[2]] else { throw APIError.status(404, "No such image") }
             return data
+        case ("GET", "pull-requests"):
+            return try encode(DemoData.pullRequests(now: now))
+        case ("POST", "pull-requests"):
+            return try encode(["asked": true])
         case ("GET", "runs") where seg.count == 2:
             return try encode(.array(summaries(archived: query.contains("archived=true"), now: now)))
         case ("POST", "runs") where seg.count == 2:
@@ -254,16 +258,34 @@ private actor DemoWorld {
         case ("POST", "pr") where rest.dropFirst().first == "check":
             guard runs[rootID]?.json["pr"]?["state"]?.string == "open" else { throw APIError.status(409, "this thread has no open pull request to check") }
             return try encode(["checking": true])
-        case ("POST", "pr"):
-            let new = kindRun("pr", "Opening a pull request", rootID: rootID, from: run.json, now: now)
-            let number = 142 + threads.count
-            let url = "https://github.com/acme/storefront/pull/\(number)"
+        case ("POST", "pr") where rest.dropFirst().first == "merge":
+            guard case .object(var pr)? = runs[rootID]?.json["pr"], pr["state"]?.string == "open" else { throw APIError.status(409, "this thread has no open pull request") }
+            let method = MergeMethod(rawValue: body?["method"]?.string ?? "") ?? .squash
+            let number = pr["number"] ?? 0
+            let new = kindRun("merge", "\(method.title) pull request #\(number.int ?? 0)", rootID: rootID, from: run.json, now: now)
+            pr["state"] = "merged"
             play(new.id, script: [
                 DemoStep(0.8, "status", ["status": "running", "worker_id": run.json["worker_id"] ?? "mac-mini"]),
-                DemoStep(1.8, "pull_request", ["url": .string(url), "number": .number(Double(number)), "state": "open", "opened": true]),
+                DemoStep(1.4, "merged", ["url": pr["url"] ?? .null, "number": number, "state": "merged", "method": .string(method.rawValue), "left_behind": 0]),
                 DemoStep(0.2, "status", ["status": "succeeded"]),
             ])
-            runs[rootID]?.json["pr"] = ["url": .string(url), "number": .number(Double(number)), "state": "open"]
+            runs[rootID]?.json["pr"] = .object(pr)
+            return try encode(["id": .string(new.id), "status": "queued"])
+        case ("POST", "pr"):
+            let open = runs[rootID]?.json["pr"]?["state"]?.string == "open"
+            let new = kindRun("pr", open ? "Update the pull request" : "Open a pull request", rootID: rootID, from: run.json, now: now)
+            let number = runs[rootID]?.json["pr"]?["number"]?.int.flatMap { open ? $0 : nil } ?? 142 + threads.count
+            let url = "https://github.com/acme/storefront/pull/\(number)"
+            let title = body?["title"]?.string ?? run.json["task"]?.string ?? "Changes from Sidefleet"
+            let draft = body?["draft"]?.bool ?? false
+            play(new.id, script: [
+                DemoStep(0.8, "status", ["status": "running", "worker_id": run.json["worker_id"] ?? "mac-mini"]),
+                DemoStep(1.8, "pull_request", ["url": .string(url), "number": .number(Double(number)), "state": "open", "opened": .bool(!open), "draft": .bool(draft),
+                                               "written": .bool(!open && body?["title"] == nil), "kept_out": body?["exclude"] ?? .array([])]),
+                DemoStep(0.2, "status", ["status": "succeeded"]),
+            ])
+            runs[rootID]?.json["pr"] = ["url": .string(url), "number": .number(Double(number)), "state": "open", "title": .string(title), "base": "main", "draft": .bool(draft),
+                                         "checks": ["passed": 0, "failed": 0, "pending": 3]]
             return try encode(["id": .string(new.id), "status": "queued"])
         case ("POST", "fork"):
             let task = body?["task"]?.string ?? ""

@@ -41,6 +41,7 @@ enum DemoData {
                     "slots": ["parallel": .number(Double(parallel)), "active": 0],
                     // The MacBook runs an older build, which can't clean up its worktrees.
                     "can_clean_worktrees": .bool(id != "macbook-pro"),
+                    "can_manage_prs": .bool(id != "macbook-pro"),
                 ],
             ]
         }
@@ -375,5 +376,37 @@ enum DemoData {
             DemoStep(0.3, "result", ["subtype": "success", "is_error": false, "result": "", "duration_ms": 540_000, "num_turns": 11, "total_cost_usd": 0.92, "session_id": "demo-session-rate", "context": ["used": 164_000, "limit": 200_000]]),
             DemoStep(0.1, "status", ["status": "succeeded"]),
         ]
+    }
+
+    /// The Pull requests screen: what the demo machines "found" on GitHub.
+    static func pullRequests(now: Date) -> JSONValue {
+        func ago(_ minutes: Double) -> JSONValue { .string(Timestamp.format(now.addingTimeInterval(-minutes * 60))) }
+        let ok: JSONValue = ["passed": 3, "failed": 0, "pending": 0]
+        func pr(_ repo: String, _ n: Int, _ title: String, _ state: String, head: String, add: Int, del: Int, updated: Double, created: Double,
+                checks: JSONValue = .null, review: JSONValue = .null, draft: Bool = false, thread: JSONValue = .null, machine: String = "mac-mini") -> JSONValue {
+            ["url": .string("https://github.com/\(repo)/pull/\(n)"), "number": .number(Double(n)), "repo": .string(repo), "title": .string(title), "state": .string(state),
+             "draft": .bool(draft), "additions": .number(Double(add)), "deletions": .number(Double(del)), "head": .string(head), "base": "main",
+             "created_at": ago(created), "updated_at": ago(updated), "checks": checks, "review": review, "machine": .string(machine), "thread": thread]
+        }
+        let prs: [JSONValue] = [
+            pr("acme/storefront", 131, "Let coupon codes stack with gift cards", "open", head: "sidefleet/5d2a90c4", add: 26, del: 9, updated: 40, created: 60 * 98,
+               checks: ["passed": 3, "failed": 1, "pending": 1, "failing": [["name": "test"]]], review: "changes_requested",
+               thread: ["id": "demo-coupons", "task": "Let coupon codes stack with gift cards"], machine: "hetzner-vps"),
+            pr("acme/storefront", 134, "Show prices with the shopper's currency symbol", "open", head: "sidefleet/8c21f0aa", add: 58, del: 12, updated: 90, created: 300,
+               checks: ["passed": 2, "failed": 0, "pending": 1], review: "review_required"),
+            pr("acme/docs", 52, "Write a migration guide for the v3 API", "open", head: "sidefleet/77ab02e1", add: 412, del: 6, updated: 60 * 5, created: 60 * 7, checks: ok, review: "approved"),
+            pr("acme/storefront", 120, "Spike: move the cart to a server action", "open", head: "cart-server-action", add: 310, del: 145, updated: 60 * 48, created: 60 * 96, draft: true),
+            pr("acme/cli", 88, "Add a `--json` flag to the `export` command", "merged", head: "sidefleet/88e0ff21", add: 64, del: 3, updated: 60 * 25, created: 60 * 26,
+               checks: ok, review: "approved", thread: ["id": "demo-json", "task": "Add a `--json` flag to the `export` command"]),
+            pr("acme/storefront", 128, "Fix the colour contrast on the product cards", "merged", head: "sidefleet/0b7e5d13", add: 12, del: 12, updated: 60 * 72, created: 60 * 96, checks: ok, review: "approved"),
+            pr("acme/storefront", 117, "Rename the price helpers", "closed", head: "rename-price", add: 18, del: 18, updated: 60 * 24 * 9, created: 60 * 24 * 10, checks: ok),
+        ]
+        let looked = ago(1)
+        let machines: [JSONValue] = [
+            ["id": "mac-mini", "name": "mac-mini", "online": true, "can_list": true, "fetched_at": looked, "error": .null, "looking": false],
+            ["id": "hetzner-vps", "name": "hetzner-vps", "online": true, "can_list": true, "fetched_at": looked, "error": .null, "looking": false],
+            ["id": "macbook-pro", "name": "macbook-pro", "online": false, "can_list": false, "fetched_at": .null, "error": .null, "looking": false],
+        ]
+        return ["machines": .array(machines), "prs": .array(prs)]
     }
 }

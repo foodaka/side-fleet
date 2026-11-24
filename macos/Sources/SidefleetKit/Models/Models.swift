@@ -158,7 +158,55 @@ public struct PRChecks: Sendable, Hashable, Decodable {
 }
 
 public enum RunKind: String, Sendable, Hashable {
-    case agent, restore, pr, integrate
+    case agent, restore, pr, merge, integrate
+}
+
+/// How a pull request is merged: `POST /v1/runs/:root/pr/merge {method}`.
+public enum MergeMethod: String, Sendable, Hashable, CaseIterable {
+    case squash, merge, rebase
+
+    /// As the menu says it.
+    public var title: String {
+        switch self {
+        case .squash: "Squash and merge"
+        case .merge: "Create a merge commit"
+        case .rebase: "Rebase and merge"
+        }
+    }
+
+    /// As the confirmation says it: "Confirm squash and merge".
+    public var verb: String {
+        switch self {
+        case .squash: "squash and merge"
+        case .merge: "merge"
+        case .rebase: "rebase and merge"
+        }
+    }
+}
+
+/// What `POST /v1/runs/:root/pr` can ask for; everything optional.
+public struct PROptions: Sendable, Hashable {
+    public var title: String?
+    public var body: String?
+    public var draft = false
+    /// Changed files to leave out of the commit; they stay in the worktree.
+    public var exclude: [String] = []
+
+    public init(title: String? = nil, body: String? = nil, draft: Bool = false, exclude: [String] = []) {
+        self.title = title
+        self.body = body
+        self.draft = draft
+        self.exclude = exclude
+    }
+
+    var json: JSONValue? {
+        var o: [String: JSONValue] = [:]
+        if let t = title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { o["title"] = .string(t) }
+        if let b = body?.trimmingCharacters(in: .whitespacesAndNewlines), !b.isEmpty { o["body"] = .string(b) }
+        if draft { o["draft"] = .bool(true) }
+        if !exclude.isEmpty { o["exclude"] = .array(exclude.map { .string($0) }) }
+        return o.isEmpty ? nil : .object(o)
+    }
 }
 
 public struct Run: Sendable, Hashable, Decodable, Identifiable {
@@ -406,6 +454,9 @@ public struct Capabilities: Sendable, Hashable, Decodable {
     public var slots: Slots?
     /// This worker's build answers Clean up.
     public var canCleanWorktrees: Bool
+    /// This worker's build leaves files out of a pull request, has the agent write it, merges it,
+    /// and lists pull requests for the Pull requests screen.
+    public var canManagePRs: Bool
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
@@ -417,6 +468,7 @@ public struct Capabilities: Sendable, Hashable, Decodable {
         system = f.opt("system")
         slots = f.opt("slots")
         canCleanWorktrees = f.bool("can_clean_worktrees")
+        canManagePRs = f.bool("can_manage_prs")
     }
 }
 

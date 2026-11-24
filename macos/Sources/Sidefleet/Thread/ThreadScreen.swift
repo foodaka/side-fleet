@@ -66,6 +66,8 @@ private struct ThreadContent: View {
     @State private var askingStop = false
     @State private var dontAskAgain = false
     @State private var opening = false
+    /// The sheet that chooses the files (and, for a new pull request, its title) before pushing.
+    @State private var prSheet = false
     @State private var composerFocus = 1
     @State private var slash = SlashMenuModel()
     @State private var forkSource: String?
@@ -110,6 +112,17 @@ private struct ThreadContent: View {
         .sheet(item: $forking) { ForkSheet(request: $0) }
         .onChange(of: thread.latest?.agent) { _, _ in reply.syncFromThread() }
         .onChange(of: stores.forkThread) { _, id in askForkFromSidebar(id) }
+        .onChange(of: stores.prSheetThread) { _, id in askPRSheet(id) }
+        .onChange(of: thread.loaded) { _, _ in askPRSheet(stores.prSheetThread) }
+        .sheet(isPresented: $prSheet) {
+            PRSheet(
+                openNumber: pr?.isOpen == true ? pr?.number : nil,
+                files: thread.changes?.files ?? [], fileCount: thread.changes?.fileCount ?? 0,
+                branch: thread.branch ?? "", machine: thread.machine ?? "its machine",
+                agent: Format.agentName(thread.latest?.agent), canManage: canManagePRs,
+                onSubmit: openPR
+            )
+        }
         .onChange(of: thread.loaded) { _, _ in askForkFromSidebar(stores.forkThread) }
         .task(id: root?.forkedFrom) {
             // The title of the thread this one was forked from.
@@ -147,8 +160,8 @@ private struct ThreadContent: View {
                          reviewing = ReviewRequest(scope: run ?? "all", focus: path)
                      },
                      onFork: { forking = ForkRequest(run: $0.run, hasFiles: $0.hasSnapshot) },
-                     onOpenPR: openPR, onCheckPR: checkPR,
-                     onAsk: { reply.text = $0 }, onSendNow: sendNow)
+                     onOpenPR: { prSheet = true }, onCheckPR: checkPR,
+                     onAsk: { reply.text = $0 }, onMergePR: mergePR, canManagePRs: canManagePRs, onSendNow: sendNow)
             Divider()
             if let root, theirs { teammateBar(root) } else if root != nil { composer.zIndex(1) }
         }
@@ -399,16 +412,36 @@ private struct ThreadContent: View {
         }
     }
 
-    private func openPR() {
+    /// The thread's machine runs a Sidefleet that leaves files out, writes the pull request and merges.
+    private var canManagePRs: Bool { fleet.workers.first { $0.id == thread.machine }?.capabilities.canManagePRs ?? false }
+
+    private func askPRSheet(_ id: String?) {
+        guard thread.loaded, let id, id == root?.id else { return }
+        stores.prSheetThread = nil
+        prSheet = true
+    }
+
+    private func openPR(_ options: PROptions) async -> Bool {
         opening = true
+        defer { opening = false }
+        do {
+            try await thread.openPR(options)
+            await fleet.refresh()
+            return true
+        } catch {
+            stores.toasts.error(pr?.isOpen == true ? "Could not push the changes" : "Could not open a pull request", error)
+            return false
+        }
+    }
+
+    private func mergePR(_ method: MergeMethod) {
         Task {
             do {
-                try await thread.openPR()
+                try await thread.mergePR(method)
                 await fleet.refresh()
             } catch {
-                stores.toasts.error("Could not open a pull request", error)
+                stores.toasts.error("Could not merge", error)
             }
-            opening = false
         }
     }
 

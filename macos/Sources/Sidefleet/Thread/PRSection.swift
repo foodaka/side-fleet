@@ -16,34 +16,82 @@ struct PRSection: View {
     var busy: Bool
     /// The push (and opening the pull request) is running now.
     var pushing: Bool
+    /// Merging it is running now.
+    var merging = false
+    /// Messages since the last push changed files, so pushing comes before merging.
+    var unpushed = false
+    /// The machine's Sidefleet can merge it from here.
+    var canMerge = false
     var changes: DiffSet?
+    /// Opens the sheet to choose the files (and, for a new one, its title).
     var onPush: () -> Void
     var onCheck: () -> Void
     var onReview: () -> Void
     /// Put a request to the agent in the reply box.
     var onAsk: (String) -> Void
+    var onMerge: (MergeMethod) -> Void = { _ in }
     @Environment(Stores.self) private var stores
+    @AppStorage("sidefleet_merge_method") private var methodRaw = MergeMethod.squash.rawValue
+    /// Merging asks twice: the first click turns the button into "Confirm …" for a few seconds.
+    @State private var confirming = false
 
-    private enum Action { case view, push, open }
+    private enum Action { case view, push, open, merge }
 
-    private var action: Action { theirs || pr?.state == "merged" ? .view : pr?.isOpen == true ? .push : .open }
+    private var method: MergeMethod { MergeMethod(rawValue: methodRaw) ?? .squash }
+    private var checks: PRChecks? { pr?.isOpen == true ? pr?.checks : nil }
+    /// Ready to merge as far as GitHub has told us: branch protection still has the last word.
+    private var ready: Bool {
+        guard let pr, pr.isOpen, !pr.draft, !pr.conflicts, pr.review != "changes_requested" else { return false }
+        return (checks?.failed ?? 0) == 0 && (checks?.pending ?? 0) == 0
+    }
+    private var action: Action {
+        if theirs || pr?.state == "merged" { return .view }
+        if pr?.isOpen == true { return ready && !unpushed && canMerge ? .merge : .push }
+        return .open
+    }
+    private var running: Bool { pushing || merging }
     private var base: String { pr?.base ?? "the default branch" }
 
     /// Why the action can't run now, said under it rather than hidden in a tooltip.
     private var blocked: String? {
-        if action == .view || pushing { return nil }
-        if !machineOnline { return "\(machine) is offline, so it can't push the branch. It will once it's back." }
-        if busy { return "Waiting for the agent to finish before pushing." }
+        if action == .view || running { return nil }
+        if !machineOnline { return "\(machine) is offline, so it can't push or merge. It will once it's back." }
+        if busy { return "Waiting for the agent to finish." }
         return nil
     }
 
+    /// Why the merge items in the menu can't be used, if they can't.
+    private var mergeOff: String? {
+        if !canMerge { return "Update Sidefleet on \(machine) to merge from here" }
+        if let blocked { return blocked }
+        return unpushed ? "Push the new changes first" : nil
+    }
+
     private var label: String {
+        if merging { return "Merging…" }
         if pushing { return pr?.isOpen == true ? "Pushing…" : "Opening…" }
         switch action {
+        case .merge: return confirming ? "Confirm \(method.verb)" : method.title
         case .push: return "Push changes"
         case .open: return pr?.state == "closed" ? "Open a new one" : "Open pull request"
         case .view: return "View on GitHub"
         }
+    }
+
+    private func askToMerge(_ m: MergeMethod) {
+        methodRaw = m.rawValue
+        confirming = true
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            confirming = false
+        }
+    }
+
+    private func primary() {
+        guard action == .merge else { return onPush() }
+        if !confirming { return askToMerge(method) }
+        confirming = false
+        onMerge(method)
     }
 
     var body: some View {
@@ -69,7 +117,17 @@ struct PRSection: View {
                 Divider()
                 row
             }
-            if let note = blocked ?? (pr?.state == "merged" ? "Merged. The branch \(branch) is still on \(machine)." : nil) {
+            if confirming, action == .merge {
+                Divider()
+                Text("Click again to \(method.verb) #\(pr?.number ?? 0) into \(base).")
+                    .font(SF.font(11.5))
+                    .foregroundStyle(SF.okInk)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(SF.okSoft)
+            } else if let note = blocked ?? (pr?.state == "merged" ? "Merged. The branch \(branch) is still on \(machine)."
+                                            : pr?.isOpen == true && unpushed && ready && canMerge ? "The agent changed files since the last push: push them, then merge." : nil) {
                 Divider()
                 Text(note)
                     .font(SF.font(11.5))
@@ -128,16 +186,37 @@ struct PRSection: View {
             }
         } else {
             HStack(spacing: 6) {
-                let button = Button(action: onPush) {
-                    Label(label, systemImage: pushing ? "hourglass" : "arrow.triangle.pull")
+                let button = Button(action: primary) {
+                    Label(label, systemImage: running ? "hourglass" : action == .merge ? "arrow.triangle.merge" : "arrow.triangle.pull")
                 }
-                .disabled(pushing || blocked != nil)
-                .help(action == .push
-                      ? "Commits what's left and pushes \(branch) to #\(pr?.number ?? 0), with the GitHub CLI on \(machine)"
-                      : "Commits what's left, pushes \(branch) to origin and opens a pull request with the GitHub CLI on \(machine)")
-                if pr == nil { button.buttonStyle(PrimaryButtonStyle()) } else { button.buttonStyle(SecondaryButtonStyle()) }
+                .disabled(running || blocked != nil)
+                .help(action == .merge
+                      ? "Merges #\(pr?.number ?? 0) into \(base) on GitHub, from \(machine), if its last commit is still the one pushed from here"
+                      : action == .push
+                      ? "Choose the files, then commit and push \(branch) to #\(pr?.number ?? 0) with the GitHub CLI on \(machine)"
+                      : "Choose the files, title and description, then push \(branch) and open a pull request with the GitHub CLI on \(machine)")
+                if action == .merge {
+                    button.buttonStyle(MergeButtonStyle(confirming: confirming))
+                } else if pr == nil {
+                    button.buttonStyle(PrimaryButtonStyle())
+                } else {
+                    button.buttonStyle(SecondaryButtonStyle())
+                }
                 if let pr {
                     Menu {
+                        if pr.isOpen {
+                            if action == .merge {
+                                Button("Push changes…", action: onPush).disabled(blocked != nil)
+                            }
+                            ForEach(MergeMethod.allCases, id: \.self) { m in
+                                Button(m.title) {
+                                    if confirming, m == method { primary() } else { askToMerge(m) }
+                                }
+                                .disabled(mergeOff != nil)
+                            }
+                            if let mergeOff { Text(mergeOff) }
+                            Divider()
+                        }
                         if let url = URL(string: pr.url) {
                             Button("View on GitHub") { NSWorkspace.shared.open(url) }
                         }
@@ -218,5 +297,32 @@ struct PRSection: View {
 
     private func stateFill(_ pr: PullRequest) -> Color {
         pr.state == "merged" ? SF.merged.opacity(0.12) : pr.state == "closed" ? SF.errSoft : pr.draft ? SF.fill : SF.okSoft
+    }
+}
+
+/// Merge: the green of an open pull request, ringed while it waits for the second click.
+private struct MergeButtonStyle: ButtonStyle {
+    var confirming: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        Face(configuration: configuration, confirming: confirming)
+    }
+
+    private struct Face: View {
+        var configuration: Configuration
+        var confirming: Bool
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(SF.font(13, .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .background(SF.ok, in: Capsule())
+                .overlay(Capsule().strokeBorder(SF.ok.opacity(confirming ? 0.45 : 0), lineWidth: 3).padding(-3))
+                .contentShape(Capsule())
+                .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
+        }
     }
 }

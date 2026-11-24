@@ -24,6 +24,9 @@ struct TurnList: View {
     var onOpenPR: () -> Void
     var onCheckPR: () -> Void
     var onAsk: (String) -> Void
+    var onMergePR: (MergeMethod) -> Void = { _ in }
+    /// The thread's machine runs a Sidefleet that can merge from here.
+    var canManagePRs = false
     var onSendNow: () -> Void
     @Environment(Stores.self) private var stores
     @State private var pinned = true
@@ -118,11 +121,14 @@ struct TurnList: View {
     /// The pull request section at the end: where the work is, what GitHub says about it and what to do next.
     @ViewBuilder private var closingNote: some View {
         let pushing = thread.live && thread.current?.kind == .pr
+        let merging = thread.live && thread.current?.kind == .merge
         if !thread.turns.isEmpty, let branch = thread.branch, (thread.changes?.fileCount ?? 0) > 0 || pr != nil, !thread.live || pr != nil || pushing {
             PRSection(
                 pr: pr, branch: branch, repo: Format.repoLabel(thread.root?.repo), machine: thread.machine ?? "its machine",
-                machineOnline: machineOnline, theirs: theirs, busy: thread.live && !pushing, pushing: pushing || opening,
-                changes: thread.changes, onPush: onOpenPR, onCheck: onCheckPR, onReview: { onOpenDiff(nil, nil) }, onAsk: onAsk
+                machineOnline: machineOnline, theirs: theirs, busy: thread.live && !pushing && !merging, pushing: pushing || opening,
+                merging: merging, unpushed: thread.unpushed, canMerge: canManagePRs,
+                changes: thread.changes, onPush: onOpenPR, onCheck: onCheckPR, onReview: { onOpenDiff(nil, nil) }, onAsk: onAsk,
+                onMerge: onMergePR
             )
         }
     }
@@ -204,9 +210,9 @@ private struct TurnRows: View {
             .padding(.bottom, 8)
         } else if run.kind == .integrate {
             IntegrateLine(run: run).padding(.bottom, 8)
-        } else if run.kind == .restore || run.kind == .pr {
+        } else if run.kind == .restore || run.kind == .pr || run.kind == .merge {
             HStack(spacing: 6) {
-                Image(systemName: run.kind == .pr ? "arrow.triangle.pull" : "arrow.counterclockwise").font(.system(size: 10))
+                Image(systemName: run.kind == .merge ? "arrow.triangle.merge" : run.kind == .pr ? "arrow.triangle.pull" : "arrow.counterclockwise").font(.system(size: 10))
                 Text(run.task)
             }
             .font(SF.font(12))
@@ -307,7 +313,7 @@ private struct TurnRows: View {
     }
 
     @ViewBuilder private var footerActions: some View {
-        if finished, !live, run.kind != .pr, run.kind != .integrate {
+        if finished, !live, run.kind != .pr, run.kind != .merge, run.kind != .integrate {
             HStack(spacing: 4) {
                 Spacer()
                 if !thread.live, !theirs, run.isolation == "worktree", turn.hasSnapshot {

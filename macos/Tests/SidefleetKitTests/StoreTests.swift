@@ -73,7 +73,11 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(thread.context?.fill?.percent, 41)
         XCTAssertNotNil(thread.forkTurn)
         let groups = thread.turns[0].groups
-        XCTAssertEqual(groups.filter { if case .text = $0 { true } else { false } }.count, 4)
+        XCTAssertEqual(groups.filter { if case .text = $0 { true } else { false } }.count, 5)
+        // The repo's checks: a failed type check the agent fixed, then both passing.
+        let retries = groups.compactMap { if case .checks(let c) = $0 { c } else { nil } }
+        XCTAssertEqual(retries.map(\.verdict), [.failed])
+        XCTAssertEqual(thread.turns[0].checks?.headline(agent: .claude), "All 2 checks passed")
         guard case .tools(_, let tools) = groups[1] else { return XCTFail() }
         XCTAssertEqual(ToolSummary.line(tools), "Ran a command")
         let hunks = DiffParser.parse(thread.changes?.files[0].patch ?? "")

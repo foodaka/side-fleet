@@ -229,6 +229,7 @@ event sequences recorded from a real control plane and assert the resulting turn
 | `approval_requested`, `approval_decided` | Approval item and its outcome |
 | `result` | Duration, turns, cost or tokens, context fill |
 | `diff` | `{turn, total}` |
+| `checks` | The repo's checks (`.sidefleet.json`) after the turn. `running` sets the activity line. A failure with `retrying` moves the first answer into the narration and adds a checks card; the agent's fix follows. The last verdict (`passed`, `failed`, `skipped`, `error`) is the card under the reply. The run list's `latest_checks` marks the sidebar row with a check or a cross. |
 | `restored`, `pull_request`, `error`, `omitted`, `stderr` | Notes, with a link for the PR; stderr groups into a log |
 
 Replay finished runs in order and follow live ones side by side, as `Thread.load()` does. Consecutive

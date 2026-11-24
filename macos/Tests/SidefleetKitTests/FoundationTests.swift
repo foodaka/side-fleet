@@ -93,6 +93,14 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(w.limitedUntil.count, 1)
     }
 
+    func testSummaryReadsTheThreadsChecks() throws {
+        let s: RunSummary = try decode(["id": "r", "latest_checks": ["verdict": "failed", "attempts": 2, "passed": 1, "total": 2, "failed": ["tests"]]])
+        XCTAssertEqual(s.latestChecks?.verdict, .failed)
+        XCTAssertEqual(s.latestChecks?.failed, ["tests"])
+        let none: RunSummary = try decode(["id": "r", "latest_checks": .null])
+        XCTAssertNil(none.latestChecks)
+    }
+
     func testSummaryFallsBackToTheRun() throws {
         let s: RunSummary = try decode(["id": "r", "task": "t", "status": "running", "agent": "codex", "model": "m"])
         XCTAssertEqual(s.threadStatus, .running)
@@ -150,6 +158,44 @@ final class TurnTests: XCTestCase {
         XCTAssertNil(t.activity)
         t.apply(ev(10, "status", ["status": "succeeded"]))
         XCTAssertEqual(t.run.status, .succeeded)
+    }
+
+    func testAFailedCheckThenTheAgentsFix() throws {
+        var t = Turn(run: try run(["status": "running"]))
+        let failing: JSONValue = ["name": "tests", "run": "cargo test", "passed": false, "exit_code": 101, "timed_out": false, "duration_ms": 9000, "output": "1 failed"]
+        t.apply(ev(0, "result", ["subtype": "success", "result": "Fixed the login bug."]))
+        t.apply(ev(1, "checks", ["verdict": "running", "attempt": 1, "names": ["tests"]]))
+        XCTAssertEqual(t.activity, "Running the checks")
+        t.apply(ev(2, "checks", ["verdict": "failed", "attempt": 1, "retrying": true, "checks": [failing]]))
+        XCTAssertNil(t.result, "the first answer moves into the narration")
+        XCTAssertEqual(t.activity, "Fixing the failed check")
+        guard case .text(_, let text)? = t.groups.dropLast().last, case .checks(let first)? = t.groups.last else { return XCTFail("\(t.groups)") }
+        XCTAssertEqual(text, "Fixed the login bug.")
+        XCTAssertEqual(first.headline(agent: .claude), "Check failed: tests · asked Claude Code to fix it")
+        XCTAssertEqual(first.failed?.how, "exit 101")
+        XCTAssertNil(first.stillFailing(agent: .claude), "its fix is still to come")
+
+        t.apply(ev(3, "result", ["subtype": "success", "result": "Also fixed the test."]))
+        t.apply(ev(4, "checks", ["verdict": "running", "attempt": 2]))
+        XCTAssertEqual(t.activity, "Running the checks again")
+        t.apply(ev(5, "checks", ["verdict": "failed", "attempt": 2, "checks": [failing]]))
+        XCTAssertNil(t.activity)
+        XCTAssertEqual(t.result?.text, "Also fixed the test.")
+        XCTAssertEqual(t.checks?.stillFailing(agent: .codex), "Still failing after Codex's fix. Reply to have it try again, or take it from here.")
+    }
+
+    func testChecksThatPassOrDidntRun() throws {
+        var t = Turn(run: try run(["status": "running"]))
+        t.apply(ev(0, "checks", ["verdict": "passed", "attempt": 1, "checks": [
+            ["name": "lint", "run": "x", "passed": true, "duration_ms": 1500],
+            ["name": "tests", "run": "y", "passed": true, "duration_ms": 65000],
+        ]]))
+        XCTAssertEqual(t.checks?.headline(agent: .claude), "All 2 checks passed")
+        XCTAssertEqual(t.checks?.checks.map(\.how), ["2s", "1m 05s"])
+        t.apply(ev(1, "checks", ["verdict": "skipped", "reason": "this task only reads, so there is nothing to check"]))
+        XCTAssertEqual(t.checks?.headline(agent: .claude), "Checks not run: this task only reads, so there is nothing to check")
+        t.apply(ev(2, "checks", ["verdict": "something_new"]))
+        XCTAssertEqual(t.checks?.verdict, .skipped, "a verdict from a newer worker is ignored")
     }
 
     func testApprovalsCancelWhenTheRunEnds() throws {

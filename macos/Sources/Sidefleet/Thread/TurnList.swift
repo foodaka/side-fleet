@@ -218,6 +218,9 @@ private struct TurnRows: View {
             if let text = turn.result?.text, !text.isEmpty {
                 MarkdownView(text: text).padding(.vertical, 6)
             }
+            if let checks = turn.checks {
+                ChecksCard(item: checks, agent: run.agent)
+            }
             if let diff = turn.turnDiff {
                 ChangesCard(set: diff) { path in onOpenDiff(run.id, path) }
             }
@@ -318,6 +321,8 @@ private struct TurnRows: View {
             NoteRow(note: note)
         case .log(_, let lines):
             LogRow(lines: lines)
+        case .checks(let item):
+            ChecksCard(item: item, agent: run.agent)
         }
     }
 

@@ -29,6 +29,11 @@ enum DemoData {
 
     private static func iso(_ d: Date) -> JSONValue { .string(Timestamp.format(d)) }
 
+    /// One check's result, as a `checks` event carries it.
+    private static func check(_ name: String, _ run: String, passed: Bool, exit: Int, ms: Double, output: String) -> JSONValue {
+        ["name": .string(name), "run": .string(run), "passed": .bool(passed), "exit_code": .number(Double(exit)), "timed_out": false, "duration_ms": .number(ms), "output": .string(output)]
+    }
+
     static func workers(now: Date) -> [JSONValue] {
         func worker(_ id: String, _ name: String, os: String, cores: Int, cpu: Double, memUsed: Double, memTotal: Double, diskFree: Double, diskTotal: Double, up: Int, parallel: Int, online: Bool, agents: JSONValue, repos: [String], seen: Date) -> JSONValue {
             [
@@ -228,7 +233,8 @@ enum DemoData {
             "file_count": 2, "additions": 8, "deletions": 8,
         ]
         out.append([SeedRun(
-            json: run("demo-checkout", "The checkout e2e test is flaky on CI. Find out why and fix it", status: "succeeded", created: checkoutAt, started: checkoutAt, finished: ago(35), worker: "hetzner-vps", extra: ["effort": "high"]),
+            json: run("demo-checkout", "The checkout e2e test is flaky on CI. Find out why and fix it", status: "succeeded", created: checkoutAt, started: checkoutAt, finished: ago(35), worker: "hetzner-vps",
+                      extra: ["effort": "high", "result": ["checks": ["verdict": "passed", "attempts": 2, "passed": 2, "total": 2, "failed": []]]]),
             events: [
                 ("status", ["status": "running", "worker_id": "hetzner-vps"], checkoutAt),
                 ("workspace", ["mode": "worktree", "branch": "sidefleet/4e61fe7e", "from": ["ref": "origin/main", "commit": "e03b19d4c1"]], checkoutAt),
@@ -249,6 +255,20 @@ enum DemoData {
                 ("tool_use", ["id": "c5", "name": "Edit", "summary": "src/lib/checkout/PayButton.tsx"], ago(37)),
                 ("tool_result", ["tool_use_id": "c5", "content": "Applied 1 edit", "is_error": false], ago(36.9)),
                 ("assistant_text", ["text": "Pay is now disabled with a spinner until the tax quote arrives, and the test waits for the response instead of sleeping. 50/50 local runs pass."], ago(35.2)),
+                // The repo's checks (`.sidefleet.json`) fail once, the agent fixes it, and they pass.
+                ("checks", ["verdict": "running", "attempt": 1, "names": ["typecheck", "e2e"]], ago(35.19)),
+                ("checks", ["verdict": "failed", "attempt": 1, "retrying": true, "checks": [
+                    check("typecheck", "pnpm tsc --noEmit", passed: false, exit: 2, ms: 14_200,
+                          output: "src/lib/checkout/PayButton.tsx(41,7): error TS2322: Type 'boolean | undefined' is not assignable to type 'boolean'.\n\nFound 1 error in src/lib/checkout/PayButton.tsx:41"),
+                ]], ago(35.16)),
+                ("tool_use", ["id": "c6", "name": "Edit", "summary": "src/lib/checkout/PayButton.tsx"], ago(35.14)),
+                ("tool_result", ["tool_use_id": "c6", "content": "Applied 1 edit", "is_error": false], ago(35.13)),
+                ("assistant_text", ["text": "The type check caught that `pending` is optional in PayButton's props. It now defaults to `false`."], ago(35.12)),
+                ("checks", ["verdict": "running", "attempt": 2, "names": ["typecheck", "e2e"]], ago(35.11)),
+                ("checks", ["verdict": "passed", "attempt": 2, "retrying": false, "checks": [
+                    check("typecheck", "pnpm tsc --noEmit", passed: true, exit: 0, ms: 13_800, output: ""),
+                    check("e2e", "pnpm playwright test checkout", passed: true, exit: 0, ms: 68_400, output: "Running 6 tests using 4 workers\n  6 passed (1.1m)"),
+                ]], ago(35.105)),
                 ("diff", ["turn": checkoutDiff], ago(35.1)),
                 ("snapshot", ["before": "aaaaaaa", "after": "bbbbbbb"], ago(35.1)),
                 ("result", ["subtype": "success", "is_error": false, "result": "", "duration_ms": 431_000, "num_turns": 18, "total_cost_usd": 1.12, "session_id": "demo-session-checkout", "context": ["used": 412_000, "limit": 1_000_000]], ago(35)),

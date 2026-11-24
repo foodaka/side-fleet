@@ -103,6 +103,8 @@ public enum TurnItem: Sendable, Hashable, Identifiable {
     case approval(ApprovalItem)
     case note(Note)
     case stderr(key: String, text: String, at: Date)
+    /// The repo's checks failed and the agent was asked to fix them; its fix follows.
+    case checks(ChecksItem)
 
     public var id: String {
         switch self {
@@ -110,6 +112,7 @@ public enum TurnItem: Sendable, Hashable, Identifiable {
         case .tool(let t): t.key
         case .approval(let a): a.key
         case .note(let n): n.key
+        case .checks(let c): c.key
         }
     }
 }
@@ -122,12 +125,14 @@ public enum ItemGroup: Sendable, Hashable, Identifiable {
     case approval(ApprovalItem)
     case note(Note)
     case log(key: String, [String])
+    case checks(ChecksItem)
 
     public var id: String {
         switch self {
         case .text(let key, _), .tools(let key, _), .log(let key, _): key
         case .approval(let a): a.key
         case .note(let n): n.key
+        case .checks(let c): c.key
         }
     }
 }
@@ -229,6 +234,8 @@ public struct Turn: Sendable, Hashable, Identifiable {
     public var reconnecting = false
     public var turnDiff: DiffSet?
     public var totalDiff: DiffSet?
+    /// How the repo's checks went on what the turn left, when it ran them.
+    public var checks: ChecksItem?
     public var snapshot: (before: String, after: String)? {
         get { snapshotBefore.flatMap { b in snapshotAfter.map { (b, $0) } } }
         set {
@@ -266,6 +273,8 @@ public struct Turn: Sendable, Hashable, Identifiable {
                 out.append(.approval(a))
             case .note(let n):
                 out.append(.note(n))
+            case .checks(let c):
+                out.append(.checks(c))
             case .stderr(let key, let text, _):
                 if case .log(let first, var lines)? = out.last {
                     lines.append(text)
@@ -431,6 +440,22 @@ public struct Turn: Sendable, Hashable, Identifiable {
                 tokens: Self.tokenCount(p["usage"]),
                 context: ContextFill(p["context"]))
             activity = nil
+        case "checks":
+            if p["verdict"]?.string == "running" {
+                activity = (p["attempt"]?.int ?? 1) > 1 ? "Running the checks again" : "Running the checks"
+                break
+            }
+            guard let c = ChecksItem(key: key, at: ev.at, payload: p) else { break }
+            if c.retrying {
+                // The agent's first answer stays in the narration, then the failure, then its fix.
+                if let text = result?.text, !text.isEmpty { items.append(.text(key: "\(key)-reply", text: text, at: ev.at)) }
+                items.append(.checks(c))
+                result = nil
+                activity = "Fixing the failed check"
+            } else {
+                checks = c
+                activity = nil
+            }
         case "snapshot":
             if let before = p["before"]?.string, let after = p["after"]?.string { snapshot = (before, after) }
         case "restored":

@@ -170,6 +170,8 @@ public struct RunSummary: Sendable, Hashable, Decodable, Identifiable {
     public var latestModel: String
     public var latestEffort: String?
     public var latestWorkerID: String?
+    /// The repo's checks on the thread's latest message that ran them.
+    public var latestChecks: ChecksSummary?
 
     public var id: String { run.id }
 
@@ -189,6 +191,7 @@ public struct RunSummary: Sendable, Hashable, Decodable, Identifiable {
         latestModel = f.opt("latest_model") ?? run.model
         latestEffort = f.opt("latest_effort") ?? run.effort
         latestWorkerID = f.opt("latest_worker_id") ?? run.workerID
+        latestChecks = f.opt("latest_checks")
     }
 
     public var isLive: Bool { threadStatus.isLive }

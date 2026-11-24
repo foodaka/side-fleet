@@ -1107,3 +1107,36 @@ async fn preferences_follow_you_to_every_browser_and_stay_yours() {
     assert_eq!(with_token(&env, tok, Method::PUT, "/v1/me/prefs", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn project_icons_are_kept_per_org_and_reset_to_the_default() {
+    let env = TestEnv::start_hosted().await;
+    let alice = Browser::login(&env, "alice").await;
+    let phone = Browser::login(&env, "alice").await;
+    let bob = Browser::login(&env, "bob").await;
+    let path = "/v1/project-icons";
+
+    assert_eq!(alice.json(Method::GET, path, None).await, (StatusCode::OK, json!([])));
+
+    let (code, list) = alice.json(Method::PUT, path, Some(json!({"repo": "github.com/acme/app", "icon": {"kind": "emoji", "value": "🪐"}}))).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!((list[0]["repo"].as_str(), list[0]["kind"].as_str(), list[0]["value"].as_str()), (Some("github.com/acme/app"), Some("emoji"), Some("🪐")));
+    // Setting it again replaces it; another repo adds one.
+    alice.json(Method::PUT, path, Some(json!({"repo": "github.com/acme/app", "icon": {"kind": "letter", "value": "#22a06b"}}))).await;
+    alice.json(Method::PUT, path, Some(json!({"repo": "notes", "icon": {"kind": "image", "value": "data:image/png;base64,iVBORw0KGgo="}}))).await;
+    let (_, list) = phone.json(Method::GET, path, None).await;
+    let got: Vec<(&str, &str)> = list.as_array().unwrap().iter().map(|i| (i["repo"].as_str().unwrap(), i["kind"].as_str().unwrap())).collect();
+    assert_eq!(got, vec![("github.com/acme/app", "letter"), ("notes", "image")]);
+
+    // Bob's org has its own.
+    assert_eq!(bob.json(Method::GET, path, None).await, (StatusCode::OK, json!([])));
+
+    // Malformed icons are refused; null goes back to the default.
+    for bad in [json!({"repo": "", "icon": {"kind": "emoji", "value": "🪐"}}), json!({"repo": "x", "icon": {"kind": "image", "value": "data:image/svg+xml;base64,PHN2Zz4="}}), json!({"repo": "x", "icon": {"kind": "letter", "value": "red"}})] {
+        assert_eq!(alice.json(Method::PUT, path, Some(bad.clone())).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (_, list) = alice.json(Method::PUT, path, Some(json!({"repo": "notes", "icon": null}))).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    env.teardown().await;
+}

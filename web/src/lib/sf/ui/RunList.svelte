@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { fleet } from '../state.svelte';
 	import { seen } from '../seen.svelte';
 	import { inbox, reasonTone } from '../inbox.svelte';
-	import { agentModel, ago, dayGroup, duration, modelName, repoLabel, scheduled, startTime } from '../format';
+	import { agentModel, ago, dayGroup, duration, modelName, repoKey, repoLabel, scheduled, startTime } from '../format';
 	import type { RunSummary } from '../types';
 	import StatusDot from './StatusDot.svelte';
 	import PrIcon from './PrIcon.svelte';
@@ -24,6 +24,14 @@
 	import { Button } from '#lib/components/ui/button';
 	import { prefs } from '../prefs.svelte';
 	import { isSnoozed, localInput, presetTime, wakeLabel } from '../snooze';
+	import { projects, projectName } from '../projects.svelte';
+	import ProjectIcon from './ProjectIcon.svelte';
+	import ProjectIconPicker from './ProjectIconPicker.svelte';
+	import SquarePen from '@lucide/svelte/icons/square-pen';
+	import Smile from '@lucide/svelte/icons/smile';
+	import EyeOff from '@lucide/svelte/icons/eye-off';
+	import ChevronsDownUp from '@lucide/svelte/icons/chevrons-down-up';
+	import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
 
 	let { query = '', activeId = null }: { query?: string; activeId?: string | null } = $props();
 
@@ -101,6 +109,33 @@
 		return out;
 	});
 
+	// By project: one group per repo, the ones waiting on you or busy first, then the latest.
+	const SHOWN = 5;
+	const byProject = $derived(projects.view === 'project');
+	const projectGroups = $derived.by(() => {
+		const by = new Map<string, RunSummary[]>();
+		for (const r of runs) {
+			if (!by.has(r.repo)) by.set(r.repo, []);
+			by.get(r.repo)!.push(r);
+		}
+		const sorted = (rs: RunSummary[]) => rs.sort((a, b) => rank(a) - rank(b) || byStart(a, b) || b.last_activity_at.localeCompare(a.last_activity_at));
+		const urgency = (rs: RunSummary[]) => Math.min(...rs.map((r) => (live(r) ? rank(r) : 4)));
+		return [...by.entries()]
+			.map(([repo, rs]) => ({ repo, runs: sorted(rs), urgency: urgency(rs), latest: rs.reduce((m, r) => (r.last_activity_at > m ? r.last_activity_at : m), '') }))
+			.sort((a, b) => a.urgency - b.urgency || b.latest.localeCompare(a.latest));
+	});
+	const shownGroups = $derived(projectGroups.filter((g) => !projects.hidden.has(g.repo)));
+	const hiddenCount = $derived(projectGroups.length - shownGroups.length);
+	// Repos one of your machines has now: a new task can start there.
+	const myRepos = $derived(new Set(fleet.myOnline.flatMap((w) => (w.capabilities.repos ?? []).map(repoKey))));
+
+	function newTaskIn(repo: string) {
+		projects.composeIn = repo;
+		void goto('#/');
+	}
+
+	onMount(() => void projects.load());
+
 	// Keep the open run in view, e.g. after opening it from somewhere else.
 	$effect(() => {
 		const id = activeId;
@@ -109,11 +144,11 @@
 	});
 </script>
 
-{#snippet row(r: RunSummary, detail: boolean, asleep = false)}
+{#snippet row(r: RunSummary, detail: boolean, asleep = false, grouped = false)}
 	{@const on = r.id === activeId}
 	{@const waiting = on ? undefined : inbox.byId.get(r.id)}
 	{@const unread = !on && (!!waiting || seen.unread(r))}
-	{@const other = r.repo !== homeRepo}
+	{@const other = !grouped && (byProject || r.repo !== homeRepo)}
 	{@const asking = !!r.pending_approvals && live(r)}
 	<div class="group/row relative">
 	<a
@@ -158,14 +193,14 @@
 						{#if r.thread_status === 'running'}
 							<span class="flex min-w-0 gap-1"><span class="truncate">{r.latest_worker_id ? fleet.workerName(r.latest_worker_id) : 'Starting'}</span><span class="shrink-0">· {duration(r.started_at, null, fleet.now) || 'starting'}</span></span>
 						{:else if r.start_at && later(r)}
-							Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+							Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
 						{:else}
-							Waiting for a machine{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+							Waiting for a machine{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
 						{/if}
 					{:else if asleep}
-						<AlarmClock class="mr-1 inline size-3 align-[-2px]" />Back {wakeLabel(r.snoozed_until!, fleet.now)}{#if other}&nbsp;· {repoLabel(r.repo)}{/if}
+						<AlarmClock class="mr-1 inline size-3 align-[-2px]" />Back {wakeLabel(r.snoozed_until!, fleet.now)}{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
 					{:else}
-						{[other ? repoLabel(r.repo) : null, fleet.workers.length > 1 ? fleet.workerName(r.latest_worker_id) : null].filter(Boolean).join(' · ')}
+						{#if other}{@render repoTag(r.repo)}{/if}{#if other && fleet.workers.length > 1}&nbsp;·&nbsp;{/if}{#if fleet.workers.length > 1}{fleet.workerName(r.latest_worker_id)}{/if}
 					{/if}
 				</span>
 				<span class="flex max-w-[55%] shrink-0 items-center gap-1 text-faint" title="{agentModel(r.latest_agent, r.latest_model)}{r.latest_effort ? ` · ${r.latest_effort}` : ''}">
@@ -217,6 +252,83 @@
 	</div>
 {/snippet}
 
+{#snippet repoTag(repo: string)}<span class="inline-flex items-baseline gap-1"><ProjectIcon {repo} size={11} class="self-center" />{byProject ? projectName(repo) : repoLabel(repo)}</span>{/snippet}
+
+{#snippet project(g: { repo: string; runs: RunSummary[] })}
+	{@const open = !projects.folded.has(g.repo)}
+	{@const asking = g.runs.filter((r) => r.pending_approvals && live(r)).length}
+	{@const running = g.runs.filter((r) => r.thread_status === 'running' && !r.pending_approvals).length}
+	{@const fresh = g.runs.some((r) => r.id !== activeId && (inbox.byId.has(r.id) || seen.unread(r)))}
+	{@const all = projects.showAll.has(g.repo)}
+	{@const shown = all ? g.runs : g.runs.filter((r, i) => i < SHOWN || r.id === activeId)}
+	<div class="group/proj relative mt-1.5">
+		<button
+			type="button"
+			aria-expanded={open}
+			title={g.repo}
+			class="flex w-full items-center gap-2 rounded-md py-[5px] pr-9 pl-1.5 text-left transition-colors hover:bg-sidebar-accent/60"
+			onclick={() => projects.toggleFolded(g.repo)}
+		>
+			<ChevronRight class="size-3 shrink-0 text-faint transition-transform {open ? 'rotate-90' : ''}" />
+			<ProjectIcon repo={g.repo} size={18} />
+			<span class="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground">{projectName(g.repo)}</span>
+			<span class="flex shrink-0 items-center gap-1 group-hover/proj:invisible pointer-coarse:hidden">
+				{#if asking}<span class="tnum grid h-4 min-w-4 place-items-center rounded-full bg-queue-soft px-1 text-[10.5px] font-semibold text-queue-ink" title="{asking} waiting on you">{asking}</span>{/if}
+				{#if running}<span class="tnum grid h-4 min-w-4 place-items-center rounded-full bg-run-soft px-1 text-[10.5px] font-semibold text-run-ink" title="{running} running">{running}</span>{/if}
+				{#if !open && !asking && !running}
+					{#if fresh}<span class="size-1.5 rounded-full bg-foreground" aria-label="New"></span>
+					{:else}<span class="tnum text-[11px] text-faint">{ago(g.runs[0].last_activity_at, fleet.now)}</span>{/if}
+				{/if}
+			</span>
+		</button>
+		<DropdownMenu.Root>
+			<DropdownMenu.Trigger
+				class="absolute top-1/2 right-1.5 grid size-[22px] -translate-y-1/2 place-items-center rounded text-muted-foreground opacity-0 transition-opacity group-hover/proj:opacity-100 hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 data-[state=open]:bg-sidebar-accent data-[state=open]:opacity-100 pointer-coarse:opacity-100"
+				aria-label="Actions for {projectName(g.repo)}"
+			>
+				<Ellipsis class="size-3.5" />
+			</DropdownMenu.Trigger>
+			<DropdownMenu.Content align="start" side="right" class="w-56">
+				<DropdownMenu.Item onclick={() => (projects.picking = g.repo)}><Smile class="size-3.5" />Set icon…</DropdownMenu.Item>
+				<DropdownMenu.Item disabled={!myRepos.has(g.repo)} onclick={() => newTaskIn(g.repo)}>
+					<SquarePen class="size-3.5" /><span class="flex flex-col"><span>New task in {projectName(g.repo)}</span>{#if !myRepos.has(g.repo)}<span class="text-xs text-muted-foreground">None of your machines online has it</span>{/if}</span>
+				</DropdownMenu.Item>
+				<DropdownMenu.Separator />
+				<DropdownMenu.Item onclick={() => projects.toggleFolded(g.repo)}>
+					{#if open}<ChevronsDownUp class="size-3.5" />Fold{:else}<ChevronsUpDown class="size-3.5" />Unfold{/if}
+				</DropdownMenu.Item>
+				<DropdownMenu.Item onclick={() => projects.hide(g.repo)}><EyeOff class="size-3.5" />Hide from the list</DropdownMenu.Item>
+				<DropdownMenu.Separator />
+				<DropdownMenu.Label class="truncate text-xs font-normal text-muted-foreground">{g.repo}</DropdownMenu.Label>
+			</DropdownMenu.Content>
+		</DropdownMenu.Root>
+	</div>
+	{#if open}
+		<div class="ml-[13px] border-l border-sidebar-border pl-1.5">
+			{#each shown as r (r.id)}{@render row(r, live(r), false, true)}{/each}
+			{#if g.runs.length > SHOWN}
+				<button type="button" class="px-2.5 py-1 text-[11.5px] text-faint hover:text-muted-foreground" onclick={() => projects.toggleShowAll(g.repo)}>
+					{all ? 'Show fewer' : `Show ${g.runs.length - shown.length} more`}
+				</button>
+			{/if}
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet segment(label: string, options: string[][], value: string, set: (v: string) => void, badge = 0)}
+	<div class="grid flex-1 grid-cols-2 rounded-md bg-sidebar-accent/60 p-0.5" role="tablist" aria-label={label}>
+		{#each options as [id, text] (id)}
+			<button
+				type="button"
+				role="tab"
+				aria-selected={value === id}
+				class="truncate rounded px-1.5 py-1 transition-colors {value === id ? 'bg-background font-medium text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
+				onclick={() => set(id)}
+			>{text}{#if id === 'team' && badge}<span class="tnum ml-1 text-faint">{badge}</span>{/if}</button>
+		{/each}
+	</div>
+{/snippet}
+
 {#snippet heading(label: string, count?: number)}
 	<h3 class="flex items-center gap-1.5 px-2.5 pt-4 pb-1 text-[11px] font-medium text-faint">
 		{label}{#if count}<span class="tnum rounded-full bg-run-soft px-1.5 text-[10.5px] leading-4 text-run-ink">{count}</span>{/if}
@@ -243,19 +355,12 @@
 			<p class="px-2.5 py-2 text-xs text-muted-foreground">Nothing in the latest {fleet.runs.length} tasks mentions “{query.trim()}”.</p>
 		{/if}
 	{:else}
-		{#if filtering}
-			<div class="mx-1 mt-3 grid grid-cols-2 rounded-md bg-sidebar-accent/60 p-0.5 text-[12px]" role="tablist" aria-label="Whose tasks">
-				{#each [['mine', 'Mine'], ['team', 'Team']] as [id, label] (id)}
-					<button
-						type="button"
-						role="tab"
-						aria-selected={scope === id}
-						class="rounded px-2 py-1 transition-colors {scope === id ? 'bg-background font-medium text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
-						onclick={() => setScope(id as 'mine' | 'team')}
-					>{label}{#if id === 'team' && theirs}<span class="tnum ml-1 text-faint">{theirs}</span>{/if}</button>
-				{/each}
-			</div>
-		{/if}
+		<div class="mx-1 mt-3 flex gap-1.5 text-[12px]">
+			{#if filtering}
+				{@render segment('Whose tasks', [['mine', 'Mine'], ['team', 'Team']], scope, (v) => setScope(v as 'mine' | 'team'), theirs)}
+			{/if}
+			{@render segment('Group tasks', [['time', 'By time'], ['project', 'By project']], projects.view, (v) => projects.setView(v as 'time' | 'project'))}
+		</div>
 	{/if}
 	{#if fleet.loaded && !q && !awake.length}
 		<div class="mx-1 mt-4 rounded-lg border border-dashed border-sidebar-border px-3 py-4 text-xs leading-relaxed text-muted-foreground">
@@ -270,14 +375,24 @@
 			{@render heading('Pinned')}
 			{#each pinned as r (r.id)}{@render row(r, live(r))}{/each}
 		{/if}
-		{#if active.length}
-			{@render heading('Active', active.length)}
-			{#each active as r (r.id)}{@render row(r, true)}{/each}
+		{#if byProject}
+			{#if pinned.length && shownGroups.length}{@render heading('Projects')}{:else}<div class="h-1.5"></div>{/if}
+			{#each shownGroups as g (g.repo)}{@render project(g)}{/each}
+			{#if hiddenCount}
+				<button type="button" class="mt-2 px-2.5 py-1 text-[11.5px] text-faint hover:text-muted-foreground" onclick={() => projects.unhideAll()}>
+					Show {hiddenCount} hidden project{hiddenCount === 1 ? '' : 's'}
+				</button>
+			{/if}
+		{:else}
+			{#if active.length}
+				{@render heading('Active', active.length)}
+				{#each active as r (r.id)}{@render row(r, true)}{/each}
+			{/if}
+			{#each groups as g (g.label)}
+				{@render heading(g.label)}
+				{#each g.runs as r (r.id)}{@render row(r, false)}{/each}
+			{/each}
 		{/if}
-		{#each groups as g (g.label)}
-			{@render heading(g.label)}
-			{#each g.runs as r (r.id)}{@render row(r, false)}{/each}
-		{/each}
 		{#if fleet.runs.length >= 100}
 			<p class="px-2.5 pt-4 text-[11px] text-faint">Showing the latest {fleet.runs.length} tasks{filtering ? ' in the team' : ''}.</p>
 		{/if}
@@ -318,6 +433,8 @@
 		{/if}
 	{/if}
 </div>
+
+<ProjectIconPicker />
 
 <Dialog.Root open={!!picking} onOpenChange={(o) => { if (!o) picking = null; }}>
 	<Dialog.Content class="sm:max-w-[24rem]">

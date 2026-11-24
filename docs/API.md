@@ -90,8 +90,8 @@ what it can call; anything else answers `403`:
 
 | Scope | Can |
 |---|---|
-| `read` | `GET` runs, threads, events, approvals, images, files, workers and repos; `GET /v1/me` shows the token's name and scope |
-| `tasks` | also start runs (now or later), send messages, stop, start early, restore, fork, open PRs, archive, snooze and pin; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
+| `read` | `GET` runs, threads, events, approvals, images, files, workers, repos and project icons; `GET /v1/me` shows the token's name and scope |
+| `tasks` | also start runs (now or later), send messages, stop, start early, restore, fork, open PRs, archive, snooze, pin and set project icons; never with full access (`bypassPermissions`), including a reply or fork that would keep a thread's full access without naming another `permission_mode` |
 | `full` | also approve or deny tool calls, and use full access |
 
 No token manages orgs, members, worker or API tokens, enrollments or machines, or reads
@@ -175,6 +175,8 @@ go into a path.
 | `POST` | `/v1/runs/:id/start-now` | a task scheduled with `start_at` drops its start time and is claimable at once; returns the run (unchanged once it has started) |
 | `POST` | `/v1/runs/:id/snooze` `{until}` | `200` with the thread's root run: its `snoozed_until` is `until` (RFC 3339, in the future, at most 366 days ahead; `400` otherwise), or `null` to wake it now. Any run of the thread may be named. A snoozed thread stays in `GET /v1/runs` (the page lists it apart until `snoozed_until`) and leaves the inbox until then. It wakes early (`snoozed_until` back to `null`) on a reply, or when it starts waiting on you after it was snoozed: it finishes, fails or asks for a tool approval |
 | `POST` | `/v1/runs/:id/pin` `{pinned}` | `200` with the thread's root run: its `pinned_at` is when it was pinned, or `null` once unpinned. Any run of the thread may be named. A pin belongs to the thread, so everyone in the org sees it; `GET /v1/runs` lists pinned threads first, so the limit never leaves one out, and the page keeps them in a Pinned section at the top |
+| `GET` | `/v1/project-icons` | the icons set for this org's projects (repos): `[{repo, kind, value, updated_at}]`. `kind` is `emoji` (value: the emoji), `letter` (value: the tile colour, `#rrggbb`) or `image` (value: a PNG, JPEG or WebP `data:` URL, at most 48 KB). A repo with none set gets a default the page picks |
+| `PUT` | `/v1/project-icons` `{repo, icon: {kind, value} \| null}` | set a repo's icon for everyone in the org, or `null` to go back to the default; `200` with every icon, as `GET` answers. `400` for a malformed icon |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `DELETE` | `/v1/workers/:id` | forget a machine (frees a plan slot); `409` while it runs a task |
 | `GET` | `/v1/setup` | control URL and, in the default org, the first static worker token, for the page's connect command |

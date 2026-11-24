@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, FileRef, FileUpload, ImageRef, ImageUpload, MergeRequest, PrCheck, PrReport, PrRequest, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
+use sidefleet_core::{Agent, AuthoredPr, Capabilities, FileRef, FileUpload, ImageRef, ImageUpload, MergeRequest, PrCheck, PrReport, PrRequest, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -766,6 +766,105 @@ pub async fn record_prs(pool: &PgPool, org: Uuid, worker_id: &str, prs: &[PrRepo
             .await?;
     }
     Ok(())
+}
+
+/// Whether the Pull requests page asked `worker` to look since it last handed that out;
+/// marks it handed out.
+pub async fn list_prs_due(pool: &PgPool, orgs: &[Uuid], worker: &str) -> sqlx::Result<bool> {
+    let rows = sqlx::query(
+        "UPDATE workers SET prs_asked_at = now() WHERE id = $1 AND org_id = ANY($2)
+           AND prs_wanted_at IS NOT NULL AND (prs_asked_at IS NULL OR prs_asked_at < prs_wanted_at) RETURNING 1",
+    )
+    .bind(worker)
+    .bind(orgs)
+    .fetch_all(pool)
+    .await?;
+    Ok(!rows.is_empty())
+}
+
+/// Keep what `worker` found for the Pull requests page.
+pub async fn record_authored_prs(pool: &PgPool, orgs: &[Uuid], worker: &str, prs: &[AuthoredPr], error: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE workers SET prs = $3, prs_error = $4, prs_fetched_at = now() WHERE id = $1 AND org_id = ANY($2)")
+        .bind(worker)
+        .bind(orgs)
+        .bind(json!(prs))
+        .bind(error)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Ask `owner`'s machines (every machine, for the developer key) to look at their pull
+/// requests again; at most twice a minute.
+pub async fn want_prs(pool: &PgPool, org: Uuid, owner: Option<Uuid>) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE workers SET prs_wanted_at = now() WHERE org_id = $1 AND ($2::uuid IS NULL OR owner_id = $2)
+           AND (prs_wanted_at IS NULL OR prs_wanted_at < now() - interval '20 seconds')",
+    )
+    .bind(org)
+    .bind(owner)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The Pull requests page: `owner`'s machines (every machine, for the developer key), how
+/// recently each looked, and the pull requests they found, newest first, one per link,
+/// each with the thread that opened it if one did.
+pub async fn pull_requests(pool: &PgPool, org: Uuid, owner: Option<Uuid>) -> sqlx::Result<Value> {
+    let rows = sqlx::query(
+        "SELECT id, display_name, prs, prs_fetched_at, prs_error, prs_wanted_at, capabilities,
+                (last_heartbeat_at > now() - interval '45 seconds') AS online
+           FROM workers WHERE org_id = $1 AND ($2::uuid IS NULL OR owner_id = $2) ORDER BY display_name",
+    )
+    .bind(org)
+    .bind(owner)
+    .fetch_all(pool)
+    .await?;
+    let mut machines = Vec::new();
+    let mut by_url: std::collections::HashMap<String, (AuthoredPr, String)> = std::collections::HashMap::new();
+    for r in &rows {
+        let id: String = r.get("id");
+        let fetched: Option<DateTime<Utc>> = r.get("prs_fetched_at");
+        let wanted: Option<DateTime<Utc>> = r.get("prs_wanted_at");
+        let caps: Option<Capabilities> = serde_json::from_value(r.get::<Value, _>("capabilities")).ok();
+        let online: bool = r.get("online");
+        let can = caps.is_some_and(|c| c.can_manage_prs);
+        machines.push(json!({
+            "id": id, "name": r.get::<String, _>("display_name"), "online": online, "can_list": can,
+            "fetched_at": fetched, "error": r.get::<Option<String>, _>("prs_error"),
+            "looking": online && can && wanted.is_some_and(|w| fetched.is_none_or(|f| f < w)),
+        }));
+        let prs: Vec<AuthoredPr> = r.get::<Option<Value>, _>("prs").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        for p in prs {
+            let newer = by_url.get(&p.url).is_none_or(|(have, _)| p.updated_at > have.updated_at);
+            if newer {
+                by_url.insert(p.url.clone(), (p, id.clone()));
+            }
+        }
+    }
+    let urls: Vec<String> = by_url.keys().cloned().collect();
+    let threads = sqlx::query("SELECT id, task, pr->>'url' AS url FROM runs WHERE org_id = $1 AND parent_id IS NULL AND pr->>'url' = ANY($2)")
+        .bind(org)
+        .bind(&urls)
+        .fetch_all(pool)
+        .await?;
+    let thread_of: std::collections::HashMap<String, Value> = threads
+        .iter()
+        .map(|t| (t.get::<String, _>("url"), json!({"id": t.get::<Uuid, _>("id"), "task": t.get::<String, _>("task").chars().take(200).collect::<String>()})))
+        .collect();
+    let mut prs: Vec<(AuthoredPr, String)> = by_url.into_values().collect();
+    prs.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
+    let prs: Vec<Value> = prs
+        .into_iter()
+        .map(|(p, machine)| {
+            let mut v = json!(p);
+            v["machine"] = json!(machine);
+            v["thread"] = thread_of.get(&p.url).cloned().unwrap_or(Value::Null);
+            v
+        })
+        .collect();
+    Ok(json!({"machines": machines, "prs": prs}))
 }
 
 /// Have the thread's open pull request checked on its machine's next heartbeat. False

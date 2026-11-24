@@ -91,6 +91,36 @@ export interface PrOptions {
 
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
+/** A pull request you authored, as one of your machines saw it on GitHub (the Pull requests page). */
+export interface AuthoredPr {
+	url: string;
+	number: number;
+	/** `owner/name`. */
+	repo: string;
+	title: string;
+	state: PullRequest['state'];
+	draft?: boolean;
+	additions?: number;
+	deletions?: number;
+	head?: string;
+	base?: string;
+	author?: string;
+	created_at?: string;
+	updated_at?: string;
+	review?: PullRequest['review'];
+	checks?: PullRequest['checks'];
+	/** The machine that saw it. */
+	machine: string;
+	/** The Sidefleet thread that opened it, if one did. */
+	thread: { id: string; task: string } | null;
+}
+
+/** `GET /v1/pull-requests`. */
+export interface PullRequestsPage {
+	machines: { id: string; name: string; online: boolean; can_list: boolean; fetched_at: string | null; error: string | null; looking: boolean }[];
+	prs: AuthoredPr[];
+}
+
 export interface RunSummary extends Run {
 	follow_ups: number;
 	thread_status: RunStatus;

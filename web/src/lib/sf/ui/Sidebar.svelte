@@ -8,6 +8,7 @@
 	import MessagesSquare from '@lucide/svelte/icons/messages-square';
 	import UsersRound from '@lucide/svelte/icons/users-round';
 	import Boxes from '@lucide/svelte/icons/boxes';
+	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, Settings, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
@@ -43,6 +44,7 @@
 	);
 	const nav = $derived([
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
+		{ href: '#/pulls', label: 'Pull requests', icon: GitPullRequest, on: (p: string) => p.startsWith('/pulls') },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
 		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') },
 		...(fleet.me?.user ? [{ href: '#/team', label: 'Team', icon: UsersRound, on: (p: string) => p.startsWith('/team') }] : []),

@@ -74,6 +74,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/pr", post(open_pr))
         .route("/v1/runs/{id}/pr/check", post(check_pr))
         .route("/v1/runs/{id}/pr/merge", post(merge_pr))
+        .route("/v1/pull-requests", get(pull_requests))
+        .route("/v1/pull-requests/refresh", post(refresh_pull_requests))
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/runs/{id}/snooze", post(snooze_run))
         .route("/v1/runs/{id}/pin", post(pin_run))
@@ -130,6 +132,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/files/{id}", get(worker_get_file))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route("/v1/worker/prs", post(report_prs))
+        .route("/v1/worker/pull-requests", post(report_authored_prs))
         // Workers gzip what they post (see HeartbeatResponse::accepts_gzip): smaller, and a
         // firewall in front of the server can't mistake agent output for an attack. Inside the
         // token check, and the body limits above count the decompressed bytes.
@@ -680,6 +683,17 @@ fn branch_run_error(outcome: PrOutcome, what: &str) -> ApiError {
         PrOutcome::TooOld(why) => ApiError(StatusCode::CONFLICT, why),
         PrOutcome::NoOpenPr => ApiError(StatusCode::CONFLICT, "this thread has no open pull request".into()),
     }
+}
+
+/// The Pull requests page: what your machines found on GitHub, and how recently.
+async fn pull_requests(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(db::pull_requests(&state.pool, caller.org_id(), caller.user_id()).await?))
+}
+
+/// Ask your machines to look on GitHub again; they do on their next heartbeat.
+async fn refresh_pull_requests(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<StatusCode, ApiError> {
+    db::want_prs(&state.pool, caller.org_id(), caller.user_id()).await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Ask the machine that opened the thread's pull request to look at it again on its next
@@ -1468,6 +1482,7 @@ async fn heartbeat(
             },
             finished_runs: db::finished_runs(&state.pool, &auth.orgs, &req.id, &req.active_runs).await?,
             accepts_gzip: true,
+            list_pull_requests: db::list_prs_due(&state.pool, &auth.orgs, &req.id).await?,
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
@@ -1542,6 +1557,39 @@ async fn report_prs(
     for org in &auth.orgs {
         db::record_prs(&state.pool, *org, &req.worker_id, &prs).await?;
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// What a machine found for the Pull requests page. Links that aren't `https` and
+/// overlong text are cut; a few hundred pull requests is plenty.
+async fn report_authored_prs(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Json(req): Json<sidefleet_core::AuthoredPrsReport>,
+) -> Result<StatusCode, ApiError> {
+    if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    }
+    let cut = |s: String, n: usize| s.chars().take(n).collect::<String>();
+    let prs: Vec<_> = req
+        .prs
+        .into_iter()
+        .filter(|p| p.url.starts_with("https://") && matches!(p.state.as_str(), "open" | "merged" | "closed"))
+        .take(1200)
+        .map(|mut p| {
+            p.title = cut(p.title, 300);
+            p.repo = cut(p.repo, 200);
+            p.head = cut(p.head, 255);
+            p.base = cut(p.base, 255);
+            p.author = cut(p.author, 100);
+            let cleaned = sidefleet_core::PullRequest { url: String::new(), number: 0, state: String::new(), review: p.review.take(), checks: p.checks.take(), ..Default::default() }.cleaned();
+            p.review = cleaned.review;
+            p.checks = cleaned.checks;
+            p
+        })
+        .collect();
+    let error = req.error.map(|e| cut(sidefleet_core::redact::redact(&e), 500));
+    db::record_authored_prs(&state.pool, &auth.orgs, &req.worker_id, &prs, error.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

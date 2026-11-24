@@ -234,6 +234,15 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                         if !resp.check_prs.is_empty() {
                             tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
                         }
+                        if resp.list_pull_requests {
+                            let (client, repos) = (client.clone(), snapshot.repos.clone());
+                            tokio::spawn(async move {
+                                let (prs, error) = crate::pr::authored(&repos).await;
+                                if let Err(e) = client.report_authored_prs(prs, error).await {
+                                    tracing::warn!(error = %e, "reporting the pull requests list failed");
+                                }
+                            });
+                        }
                         if let Some(request) = resp.worktree_cleanup.filter(|_| !cleaning.swap(true, Ordering::SeqCst)) {
                             let (dir, active, cleaned) = (cfg2.worktrees_dir.clone(), active.clone(), cleaned.clone());
                             tokio::spawn(async move {

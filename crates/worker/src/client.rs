@@ -184,6 +184,14 @@ impl ControlClient {
     }
 
     /// What this machine found out about threads' pull requests.
+    /// What this machine found for the Pull requests page.
+    pub async fn report_authored_prs(&self, prs: Vec<sidefleet_core::AuthoredPr>, error: Option<String>) -> Result<()> {
+        let body = sidefleet_core::AuthoredPrsReport { worker_id: self.worker_id.clone(), prs, error };
+        let r = self.http.post(self.url("/v1/worker/pull-requests")).bearer_auth(&self.token).json(&body).send().await.context("pull requests list failed")?;
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(())
+    }
+
     pub async fn report_prs(&self, prs: Vec<PrReport>) -> Result<()> {
         let r = self
             .http

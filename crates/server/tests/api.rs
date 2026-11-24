@@ -2204,6 +2204,57 @@ async fn ask_me_is_for_claude_code() {
 }
 
 #[tokio::test]
+async fn the_pull_requests_page_asks_machines_and_shows_what_they_found() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.worker(reqwest::Method::POST, "/v1/worker/register")
+        .json(&json!({"id": "w", "display_name": "w", "capabilities": {"repos": [{"name": "r", "path": "/tmp/r", "id": "github.com/o/r"}], "can_manage_prs": true}, "active_runs": []}))
+        .send().await.unwrap();
+    let hb = || async {
+        api.worker(reqwest::Method::POST, "/v1/worker/heartbeat")
+            .json(&json!({"id": "w", "capabilities": {"repos": [], "hostname": "w", "os": "linux", "version": "t", "can_manage_prs": true}}))
+            .send().await.unwrap().json::<Value>().await.unwrap()
+    };
+    let page = || async { api.dev(reqwest::Method::GET, "/v1/pull-requests").send().await.unwrap().json::<Value>().await.unwrap() };
+
+    // Nothing asked yet: the machine isn't told to look.
+    assert!(hb().await.get("list_pull_requests").is_none());
+    let p = page().await;
+    assert_eq!((p["machines"][0]["id"].clone(), p["machines"][0]["looking"].clone(), p["prs"].clone()), (json!("w"), json!(false), json!([])));
+
+    // The page asks; the next heartbeat hands it out, once.
+    assert_eq!(api.dev(reqwest::Method::POST, "/v1/pull-requests/refresh").send().await.unwrap().status(), StatusCode::ACCEPTED);
+    assert_eq!(page().await["machines"][0]["looking"], json!(true));
+    assert_eq!(hb().await["list_pull_requests"], json!(true));
+    assert!(hb().await.get("list_pull_requests").is_none(), "handed out once");
+
+    // A thread whose pull request is one of them gets linked.
+    let (_, body) = api.create_run("Fix the login bug", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("UPDATE runs SET pr = $1 WHERE id = $2").bind(json!({"url": "https://github.com/o/r/pull/2", "number": 2, "state": "open"})).bind(id).execute(&env.pool).await.unwrap();
+
+    let r = api.worker(reqwest::Method::POST, "/v1/worker/pull-requests")
+        .json(&json!({"worker_id": "w", "prs": [
+            {"url": "https://github.com/o/r/pull/1", "number": 1, "repo": "o/r", "title": "Older", "state": "merged", "updated_at": "2026-11-01T10:00:00Z"},
+            {"url": "https://github.com/o/r/pull/2", "number": 2, "repo": "o/r", "title": "Newer", "state": "open", "additions": 5, "updated_at": "2026-11-02T10:00:00Z",
+             "checks": {"passed": 1, "failed": 1, "pending": 0, "failing": [{"name": "ci", "url": "javascript:alert(1)"}]}},
+            {"url": "javascript:alert(1)", "number": 3, "repo": "o/r", "title": "Bad", "state": "open"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let p = page().await;
+    assert_eq!(p["machines"][0]["looking"], json!(false));
+    assert!(p["machines"][0]["fetched_at"].is_string());
+    let prs = p["prs"].as_array().unwrap();
+    assert_eq!(prs.iter().map(|x| x["number"].as_i64().unwrap()).collect::<Vec<_>>(), vec![2, 1], "newest first, bad link dropped");
+    assert_eq!((prs[0]["machine"].clone(), prs[0]["thread"]["id"].clone(), prs[0]["checks"]["failing"].clone()), (json!("w"), json!(id), json!([{"name": "ci"}])));
+    assert!(prs[1]["thread"].is_null());
+
+    // A machine that couldn't look says why.
+    api.worker(reqwest::Method::POST, "/v1/worker/pull-requests").json(&json!({"worker_id": "w", "prs": [], "error": "gh isn't signed in"})).send().await.unwrap();
+    assert_eq!(page().await["machines"][0]["error"], json!("gh isn't signed in"));
+}
+
+#[tokio::test]
 async fn pull_request_options_and_merging_need_a_machine_that_can() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use sidefleet_core::{FailedCheck, MergeRequest, PrChecks, PrRequest, PullRequest};
+use sidefleet_core::{AuthoredPr, FailedCheck, MergeRequest, PrChecks, PrRequest, PullRequest};
 
 use crate::checkpoint::{commit_staged, git, is_task_branch, push_branch};
 use crate::pr_text::Writer;
@@ -320,6 +320,120 @@ pub async fn merged_at(dir: &Path, branch: &str, head: &str) -> bool {
     serde_json::from_str::<Merged>(&out).is_ok_and(|p| p.state.eq_ignore_ascii_case("merged") && p.head == head)
 }
 
+/// Repos looked at for the Pull requests page, at most, and pull requests per repo.
+const LIST_REPOS: usize = 40;
+const LIST_PER_REPO: &str = "30";
+const LIST_FIELDS: &str = "number,url,title,state,isDraft,additions,deletions,createdAt,updatedAt,headRefName,baseRefName,reviewDecision,statusCheckRollup,author";
+
+/// What `gh pr list --json LIST_FIELDS` prints for each pull request.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhListed {
+    number: i64,
+    url: String,
+    #[serde(default)]
+    title: String,
+    state: String,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    additions: i64,
+    #[serde(default)]
+    deletions: i64,
+    #[serde(default)]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    base_ref_name: String,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    status_check_rollup: Option<Vec<GhCheck>>,
+    #[serde(default)]
+    author: Option<GhAuthor>,
+}
+
+#[derive(Deserialize)]
+struct GhAuthor {
+    #[serde(default)]
+    login: String,
+}
+
+fn review_of(decision: Option<&str>) -> Option<String> {
+    match decision {
+        Some("APPROVED") => Some("approved".into()),
+        Some("CHANGES_REQUESTED") => Some("changes_requested".into()),
+        Some("REVIEW_REQUIRED") => Some("review_required".into()),
+        _ => None,
+    }
+}
+
+/// `gh pr list`'s answer for `repo` (`owner/name`), as the page shows it.
+fn read_listed(repo: &str, out: &str) -> Result<Vec<AuthoredPr>> {
+    let listed: Vec<GhListed> = serde_json::from_str(out).context("reading gh's answer")?;
+    Ok(listed
+        .into_iter()
+        .map(|p| AuthoredPr {
+            url: p.url,
+            number: p.number,
+            repo: repo.to_string(),
+            title: p.title,
+            state: p.state.to_ascii_lowercase(),
+            draft: p.is_draft,
+            additions: p.additions,
+            deletions: p.deletions,
+            head: p.head_ref_name,
+            base: p.base_ref_name,
+            author: p.author.map(|a| a.login).unwrap_or_default(),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            review: review_of(p.review_decision.as_deref()),
+            checks: p.status_check_rollup.and_then(checks),
+        })
+        .collect())
+}
+
+/// The pull requests this machine's GitHub user authored in the GitHub repos it has
+/// checked out (open ones and the latest closed), and why it couldn't look, if it
+/// couldn't at all.
+pub async fn authored(repos: &[sidefleet_core::RepoInfo]) -> (Vec<AuthoredPr>, Option<String>) {
+    let mut names: Vec<String> = repos.iter().filter_map(|r| r.id.strip_prefix("github.com/").map(str::to_string)).collect();
+    names.sort();
+    names.dedup();
+    names.truncate(LIST_REPOS);
+    if names.is_empty() {
+        return (vec![], Some("none of this machine's checkouts is a GitHub repo".into()));
+    }
+    let dir = std::env::temp_dir();
+    let mut set = tokio::task::JoinSet::new();
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    for name in names {
+        let (gate, dir) = (gate.clone(), dir.clone());
+        set.spawn(async move {
+            let _slot = gate.acquire_owned().await;
+            let out = gh(&dir, &["pr", "list", "-R", &name, "--author", "@me", "--state", "all", "--limit", LIST_PER_REPO, "--json", LIST_FIELDS]).await;
+            out.and_then(|o| read_listed(&name, &o))
+        });
+    }
+    let (mut prs, mut errors, mut any_ok) = (Vec::new(), Vec::new(), false);
+    while let Some(done) = set.join_next().await {
+        match done {
+            Ok(Ok(found)) => {
+                any_ok = true;
+                prs.extend(found);
+            }
+            Ok(Err(e)) => errors.push(format!("{e:#}")),
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    // One repo it can't see (archived, no access) is no news; all of them failing is.
+    let error = (!any_ok).then(|| errors.into_iter().next().unwrap_or_default());
+    (prs, error)
+}
+
 /// `gh args` in `dir`, never prompting.
 async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
     let cmd = tokio::process::Command::new("gh")
@@ -449,5 +563,19 @@ mod tests {
         // No checks, no review asked for, mergeable: nothing extra.
         let pr: PullRequest = serde_json::from_str::<GhPr>(r#"{"number":1,"url":"u","state":"MERGED","reviewDecision":"","mergeable":"UNKNOWN","statusCheckRollup":[]}"#).unwrap().into();
         assert_eq!((pr.review, pr.conflicts, pr.checks), (None, false, None));
+    }
+
+    /// `gh pr list`'s answer, as the Pull requests page shows it.
+    #[test]
+    fn reads_listed_pull_requests() {
+        let out = r#"[{"number":12,"url":"https://github.com/o/r/pull/12","title":"Add it","state":"MERGED","isDraft":false,"additions":20,"deletions":3,
+            "createdAt":"2026-11-01T10:00:00Z","updatedAt":"2026-11-02T10:00:00Z","headRefName":"sidefleet/ab12","baseRefName":"main",
+            "reviewDecision":"APPROVED","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}],"author":{"login":"ada"}}]"#;
+        let prs = read_listed("o/r", out).unwrap();
+        assert_eq!(prs.len(), 1);
+        let p = &prs[0];
+        assert_eq!((p.repo.as_str(), p.state.as_str(), p.additions, p.head.as_str(), p.author.as_str(), p.review.as_deref()), ("o/r", "merged", 20, "sidefleet/ab12", "ada", Some("approved")));
+        assert_eq!(p.checks.as_ref().map(|c| c.passed), Some(1));
+        assert_eq!(p.updated_at.unwrap().to_rfc3339(), "2026-11-02T10:00:00+00:00");
     }
 }

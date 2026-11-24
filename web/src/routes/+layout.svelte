@@ -29,6 +29,7 @@
 	import { goto } from '$app/navigation';
 	import UsersRound from '@lucide/svelte/icons/users-round';
 	import Boxes from '@lucide/svelte/icons/boxes';
+	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -98,6 +99,7 @@
 	}
 	const rail = $derived([
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
+		{ href: '#/pulls', label: 'Pull requests', icon: GitPullRequest, on: (p: string) => p.startsWith('/pulls') },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
 		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') },
 		...(fleet.me?.user ? [{ href: '#/team', label: 'Team', icon: UsersRound, on: (p: string) => p.startsWith('/team') }] : [])

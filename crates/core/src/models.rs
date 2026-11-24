@@ -293,6 +293,48 @@ impl PrRequest {
     }
 }
 
+/// A pull request someone authored, as their machine saw it on GitHub (the Pull requests page).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuthoredPr {
+    pub url: String,
+    pub number: i64,
+    /// `owner/name`.
+    pub repo: String,
+    pub title: String,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub additions: i64,
+    #[serde(default)]
+    pub deletions: i64,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PrChecks>,
+}
+
+/// `POST /v1/worker/pull-requests`: what a machine found when asked to list pull requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthoredPrsReport {
+    pub worker_id: String,
+    pub prs: Vec<AuthoredPr>,
+    /// Why it couldn't look (no `gh`, signed out), when it couldn't at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// How a `merge` run merges the thread's pull request: its `context`, as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MergeRequest {
@@ -429,7 +471,8 @@ pub struct Capabilities {
     #[serde(default)]
     pub can_hand_off_files: bool,
     /// This worker's build reads a `pr` run's options (files to leave out, a title
-    /// the agent writes, drafts) and runs `merge` runs.
+    /// the agent writes, drafts), runs `merge` runs and lists the pull requests its
+    /// GitHub user authored for the Pull requests page.
     #[serde(default)]
     pub can_manage_prs: bool,
 }
@@ -957,6 +1000,10 @@ pub struct HeartbeatResponse {
     /// Worker routes take gzip-compressed bodies (`Content-Encoding: gzip`).
     #[serde(default)]
     pub accepts_gzip: bool,
+    /// The Pull requests page is open: list the pull requests this machine's GitHub
+    /// user authored and report them (`POST /v1/worker/pull-requests`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub list_pull_requests: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

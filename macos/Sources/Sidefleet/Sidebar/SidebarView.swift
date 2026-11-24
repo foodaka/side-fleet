@@ -237,7 +237,7 @@ struct SidebarView: View {
 
     /// Mine / Team when the org has several members, and By time / By project. Both choices stick.
     private func listTabs(theirs: Int) -> some View {
-        HStack(spacing: 6) {
+        VStack(spacing: 6) {
             if filtering {
                 SegmentTabs(segments: [.init(id: "mine", label: "Mine"), .init(id: "team", label: "Team", badge: theirs)], selected: scope) { scope = $0 }
             }

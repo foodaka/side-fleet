@@ -355,7 +355,7 @@
 			<p class="px-2.5 py-2 text-xs text-muted-foreground">Nothing in the latest {fleet.runs.length} tasks mentions “{query.trim()}”.</p>
 		{/if}
 	{:else}
-		<div class="mx-1 mt-3 flex gap-1.5 text-[12px]">
+		<div class="mx-1 mt-3 flex flex-col gap-1.5 text-[12px]">
 			{#if filtering}
 				{@render segment('Whose tasks', [['mine', 'Mine'], ['team', 'Team']], scope, (v) => setScope(v as 'mine' | 'team'), theirs)}
 			{/if}

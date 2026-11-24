@@ -38,7 +38,7 @@ export interface Run {
 	files?: { id: string; name: string; media_type: string; bytes: number }[];
 	/** `restore` runs put the thread's worktree back to a snapshot instead of running the agent;
 	 * `pr` runs push the thread's branch and open a pull request. */
-	kind: 'agent' | 'restore' | 'pr' | 'integrate' | 'handoff';
+	kind: 'agent' | 'restore' | 'pr' | 'merge' | 'integrate' | 'handoff';
 	restore_to: string | null;
 	/** For a fork: the message (run) of the thread it continues from. */
 	forked_from: string | null;
@@ -77,6 +77,19 @@ export interface PullRequest {
 	/** The checks on its last commit; absent when it has none. */
 	checks?: { passed: number; failed: number; pending: number; failing?: { name: string; url?: string }[] };
 }
+
+/** What `POST /v1/runs/:id/pr` can ask for; all optional. */
+export interface PrOptions {
+	title?: string;
+	body?: string;
+	/** Have the agent write the title and description (the default when no title is given). */
+	write?: boolean;
+	draft?: boolean;
+	/** Changed files to leave out of the commit. */
+	exclude?: string[];
+}
+
+export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
 export interface RunSummary extends Run {
 	follow_ups: number;
@@ -118,6 +131,8 @@ export interface Capabilities {
 	can_clean_worktrees?: boolean;
 	/** This worker's build sends a thread's files to a fork on another machine. */
 	can_hand_off_files?: boolean;
+	/** This worker's build leaves files out of a pull request, has the agent write it, opens drafts and merges. */
+	can_manage_prs?: boolean;
 	agents: {
 		claude?: { version: string; signed_in: boolean; sign_in_error?: string; models?: Record<string, string> };
 		codex?: { version: string; signed_in?: boolean; models?: string[] };

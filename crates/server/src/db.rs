@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, FileRef, FileUpload, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
+use sidefleet_core::{Agent, Capabilities, FileRef, FileUpload, ImageRef, ImageUpload, MergeRequest, PrCheck, PrReport, PrRequest, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -583,18 +583,69 @@ pub enum PrOutcome {
     InPlace,
     /// No machine has run it yet.
     NoMachine,
+    /// What was asked needs a newer Sidefleet on this machine.
+    TooOld(String),
+    /// The thread has no open pull request (to merge).
+    NoOpenPr,
+}
+
+/// What the page can ask of a new `pr` run, beyond pushing everything.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PrOptions {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// Have the agent write the title and description; by default, when no title is given.
+    pub write: Option<bool>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Queue a `pr` run on the machine with the thread's worktree: it commits what is
-/// left, pushes the branch and opens (or updates) the thread's pull request.
-pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>) -> sqlx::Result<PrOutcome> {
-    thread_branch_run(pool, org, run_id, "pr", created_by, |root| {
+/// left (but files `opts` leaves out), pushes the branch and opens (or updates) the
+/// thread's pull request. Machines too old for the options get the legacy context,
+/// unless the options can't be done without them.
+pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, opts: &PrOptions) -> sqlx::Result<PrOutcome> {
+    thread_branch_run(pool, org, run_id, "pr", created_by, |root, thread, caps| {
         let task = if root.pr.as_ref().is_some_and(|p| p.state == "open") { "Update the pull request" } else { "Open a pull request" };
         let first_line = root.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("Changes from Sidefleet").trim();
         let title: String = first_line.chars().take(72).collect();
         let title = if first_line.chars().count() > 72 { format!("{}…", title.trim_end()) } else { title };
         let body: String = root.task.chars().take(4000).collect();
-        (task.to_string(), format!("{title}\n\n{body}\n\nOpened from Sidefleet."))
+        let given = |s: &Option<String>| s.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+        let req = PrRequest {
+            title: given(&opts.title),
+            body: given(&opts.body),
+            write: opts.write.unwrap_or(given(&opts.title).is_none()),
+            draft: opts.draft,
+            exclude: opts.exclude.clone(),
+            fallback_title: title,
+            fallback_body: format!("{body}\n\nOpened from Sidefleet."),
+            messages: thread.iter().filter(|r| r.kind == "agent").map(|r| r.task.chars().take(4000).collect()).collect(),
+        };
+        if caps.is_some_and(|c| c.can_manage_prs) {
+            return Ok((task.to_string(), serde_json::to_string(&req).unwrap_or_default()));
+        }
+        if req.draft || !req.exclude.is_empty() {
+            return Err("leave files out or open a draft");
+        }
+        Ok((task.to_string(), req.legacy_context()))
+    })
+    .await
+}
+
+/// Queue a `merge` run on the machine with the thread's worktree: it merges the
+/// thread's open pull request on GitHub with `method` (`squash`, `merge` or `rebase`).
+pub async fn create_merge_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, method: &str) -> sqlx::Result<PrOutcome> {
+    thread_branch_run(pool, org, run_id, "merge", created_by, |root, _, caps| {
+        let Some(pr) = root.pr.as_ref().filter(|p| p.state == "open") else { return Err("") };
+        if !caps.is_some_and(|c| c.can_manage_prs) {
+            return Err("merge pull requests");
+        }
+        let how = match method { "squash" => "Squash and merge", "rebase" => "Rebase and merge", _ => "Merge" };
+        let req = MergeRequest { method: method.to_string(), url: pr.url.clone() };
+        Ok((format!("{how} pull request #{}", pr.number), serde_json::to_string(&req).unwrap_or_default()))
     })
     .await
 }
@@ -603,22 +654,24 @@ pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: O
 /// the thread's branch into `room_branch` and pushes that.
 pub async fn create_integrate_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, room_branch: &str) -> sqlx::Result<PrOutcome> {
     // The task text names the merge commit on the room branch ("Room: <first line>").
-    thread_branch_run(pool, org, run_id, "integrate", created_by, |root| {
+    thread_branch_run(pool, org, run_id, "integrate", created_by, |root, _, _| {
         let first: String = root.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("a task").trim().chars().take(72).collect();
-        (format!("Add to the room: {first}"), room_branch.to_string())
+        Ok((format!("Add to the room: {first}"), room_branch.to_string()))
     })
     .await
 }
 
 /// A run that works on a finished thread's branch on the machine that has it
-/// (`pr`, `integrate`). `make` gives its task text and context from the root.
+/// (`pr`, `merge`, `integrate`). `make` gives its task text and context from the root,
+/// the thread and the machine's capabilities, or says what the machine is too old to
+/// do (empty: the thread has no open pull request).
 async fn thread_branch_run(
     pool: &PgPool,
     org: Uuid,
     run_id: Uuid,
     kind: &str,
     created_by: Option<Uuid>,
-    make: impl FnOnce(&Run) -> (String, String),
+    make: impl FnOnce(&Run, &[Run], Option<&Capabilities>) -> Result<(String, String), &'static str>,
 ) -> sqlx::Result<PrOutcome> {
     let Some(target) = get_run(pool, org, run_id).await? else {
         return Ok(PrOutcome::NotFound);
@@ -644,7 +697,12 @@ async fn thread_branch_run(
         },
         None => return Ok(PrOutcome::NoMachine),
     };
-    let (task, context) = make(&root);
+    let caps = worker_caps(pool, org, &worker).await?.map(|(_, c)| c);
+    let (task, context) = match make(&root, &thread, caps.as_ref()) {
+        Ok(made) => made,
+        Err("") => return Ok(PrOutcome::NoOpenPr),
+        Err(what) => return Ok(PrOutcome::TooOld(format!("update Sidefleet on {worker} to {what} from here"))),
+    };
     let session = session_for(&thread, latest.agent, None);
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
@@ -912,6 +970,11 @@ pub const HANDOFF_WAIT_SECS: i64 = 600;
 
 /// Whether `worker` is online and can push a thread's files for a fork.
 async fn can_hand_off(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<bool> {
+    Ok(worker_caps(pool, org, worker).await?.is_some_and(|(online, c)| online && c.can_hand_off_files))
+}
+
+/// Whether `worker` is online, and what it said it can do.
+async fn worker_caps(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<Option<(bool, Capabilities)>> {
     let row = sqlx::query(
         "SELECT (last_heartbeat_at > now() - interval '45 seconds') AS online, capabilities FROM workers WHERE id = $1 AND org_id = $2",
     )
@@ -919,9 +982,9 @@ async fn can_hand_off(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<bo
     .bind(org)
     .fetch_optional(pool)
     .await?;
-    Ok(row.is_some_and(|r| {
-        let caps: Option<Capabilities> = serde_json::from_value(r.get::<Value, _>("capabilities")).ok();
-        r.get::<bool, _>("online") && caps.is_some_and(|c| c.can_hand_off_files)
+    Ok(row.and_then(|r| {
+        let caps: Capabilities = serde_json::from_value(r.get::<Value, _>("capabilities")).ok()?;
+        Some((r.get::<bool, _>("online"), caps))
     }))
 }
 

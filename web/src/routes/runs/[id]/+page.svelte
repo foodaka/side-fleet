@@ -13,7 +13,7 @@
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
-	import type { AgentId, Run } from '#lib/sf/types';
+	import type { AgentId, MergeMethod, PrOptions, Run } from '#lib/sf/types';
 	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel, scheduled, startTime } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
@@ -21,6 +21,7 @@
 	import CopyButton from '#lib/sf/ui/CopyButton.svelte';
 	import PrIcon from '#lib/sf/ui/PrIcon.svelte';
 	import PrSection from '#lib/sf/thread/PrSection.svelte';
+	import PrDialog from '#lib/sf/thread/PrDialog.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
@@ -197,15 +198,37 @@
 	let opening = $state(false);
 	// A pull request run is pushing the branch right now.
 	const pushing = $derived(live && latest?.kind === 'pr');
-	async function openPr() {
+	const merging = $derived(live && latest?.kind === 'merge');
+	let prDialog = $state(false);
+	/** The thread's machine runs a Sidefleet that leaves files out, writes the pull request and merges. */
+	const canManagePrs = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.capabilities.can_manage_prs);
+	/** A message since the last push (or opening) changed files: push before merging. */
+	const unpushed = $derived.by(() => {
+		// `runs` gets status updates as they stream in; `turns` lines up with it.
+		const runs = thread?.runs ?? [];
+		const turns = thread?.turns ?? [];
+		const last = runs.findLastIndex((r) => r.kind === 'pr' && r.status === 'succeeded');
+		return turns.slice(last + 1).some((t) => (t.run.kind === 'agent' || t.run.kind === 'restore') && !!t.diff?.turn?.file_count);
+	});
+	async function openPr(opts?: PrOptions) {
 		opening = true;
 		try {
-			await thread?.openPr();
+			await thread?.openPr(opts);
 			void fleet.refresh();
 		} catch (err) {
-			toast.error('Could not open a pull request', { description: (err as Error).message });
+			toast.error(pr?.state === 'open' ? 'Could not push the changes' : 'Could not open a pull request', { description: (err as Error).message });
+			opening = false;
+			throw err;
 		}
 		opening = false;
+	}
+	async function mergePr(method: MergeMethod) {
+		try {
+			await thread?.mergePr(method);
+			void fleet.refresh();
+		} catch (err) {
+			toast.error('Could not merge', { description: (err as Error).message });
+		}
 	}
 	async function checkPr() {
 		try {
@@ -338,6 +361,20 @@
 	</header>
 
 	<StopDialog bind:open={stopAsk} agent={agentName(threadAgent ?? agent)} {queued} onstop={stop} />
+	{#if thread?.branch && !theirs}
+		<PrDialog
+			bind:open={prDialog}
+			mode={pr?.state === 'open' ? 'push' : 'open'}
+			number={pr?.number}
+			files={thread.changes?.files ?? []}
+			fileCount={thread.changes?.file_count ?? 0}
+			branch={thread.branch}
+			machine={thread.machine ?? 'its machine'}
+			agent={agentName(threadAgent ?? agent)}
+			canManage={canManagePrs}
+			onsubmit={openPr}
+		/>
+	{/if}
 	{#if forkTurn}<ForkDialog bind:open={forkOpen} run={forkTurn.run} hasFiles={!!forkTurn.snapshot} />{/if}
 
 	<Conversation class="min-h-0 flex-1">
@@ -370,13 +407,17 @@
 							machine={thread.machine ?? 'its machine'}
 							{machineOnline}
 							{theirs}
-							busy={(live && !pushing) || !!thread.outbox.length}
+							busy={(live && !pushing && !merging) || !!thread.outbox.length}
 							pushing={pushing || opening}
+							{merging}
+							{unpushed}
+							canMerge={canManagePrs}
 							changes={thread.changes}
-							onpush={openPr}
+							onpush={() => (prDialog = true)}
 							oncheck={checkPr}
 							onreview={() => openDiff(null, null)}
 							onask={askAgent}
+							onmerge={mergePr}
 						/>
 					{/if}
 				{/if}

@@ -117,22 +117,40 @@ pub async fn commit_and_push(worktree: &Path, branch: &str, message: &str, last_
     }
     if !git(worktree, &["status", "--porcelain"], None).await?.is_empty() {
         git(worktree, &["add", "-A"], None).await?;
-        // Keep the user's identity when there is one; commits need some identity.
-        let has_identity = git(worktree, &["config", "user.email"], None).await.is_ok_and(|e| !e.is_empty());
-        let mut args = vec![];
-        if !has_identity {
-            args.extend(["-c", "user.name=Sidefleet", "-c", "user.email=sidefleet@localhost"]);
-        }
-        args.extend(["commit", "--no-verify", "--quiet", "-m", message]);
-        git(worktree, &args, None).await?;
+        commit_staged(worktree, message).await?;
     }
     let sha = git(worktree, &["rev-parse", "HEAD"], None).await?;
     if last_sha == Some(sha.as_str()) {
         return Ok(None);
     }
+    push_branch(worktree, branch).await?;
+    Ok(Some(sha))
+}
+
+/// Commit what is staged, if anything is. Returns whether it made a commit.
+pub async fn commit_staged(worktree: &Path, message: &str) -> Result<bool> {
+    if git(worktree, &["diff", "--cached", "--name-only"], None).await?.is_empty() {
+        return Ok(false);
+    }
+    // Keep the user's identity when there is one; commits need some identity.
+    let has_identity = git(worktree, &["config", "user.email"], None).await.is_ok_and(|e| !e.is_empty());
+    let mut args = vec![];
+    if !has_identity {
+        args.extend(["-c", "user.name=Sidefleet", "-c", "user.email=sidefleet@localhost"]);
+    }
+    args.extend(["commit", "--no-verify", "--quiet", "-m", message]);
+    git(worktree, &args, None).await?;
+    Ok(true)
+}
+
+/// Push a task branch, and only it, to `origin`.
+pub async fn push_branch(worktree: &Path, branch: &str) -> Result<()> {
+    if !is_task_branch(branch) {
+        anyhow::bail!("{branch} is not a sidefleet task branch; not pushing it");
+    }
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     git(worktree, &["push", "--no-verify", "--quiet", "origin", &refspec], Some(PUSH_TIMEOUT)).await?;
-    Ok(Some(sha))
+    Ok(())
 }
 
 /// Fetch a task branch from `origin` into `refs/remotes/origin/<branch>` and return that ref.

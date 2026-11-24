@@ -247,6 +247,60 @@ pub struct PrReport {
     pub pr: PullRequest,
 }
 
+/// What a `pr` run is asked to do. Machines that can manage pull requests get it
+/// as JSON in the run's `context`; older ones get the legacy `title\n\nbody` text.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrRequest {
+    /// The title and description to use; none to write them (or fall back).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Have the thread's agent write the title and description when opening one.
+    #[serde(default)]
+    pub write: bool,
+    /// Open it as a draft.
+    #[serde(default)]
+    pub draft: bool,
+    /// Changed files to leave out of the commit; they stay in the worktree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// From the task, for when nothing better is given or written.
+    #[serde(default)]
+    pub fallback_title: String,
+    #[serde(default)]
+    pub fallback_body: String,
+    /// The thread's messages, oldest first, for whoever writes the description.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
+}
+
+impl PrRequest {
+    /// A `pr` run's context, in either form.
+    pub fn parse(context: &str) -> Self {
+        if context.trim_start().starts_with('{') {
+            if let Ok(r) = serde_json::from_str(context) {
+                return r;
+            }
+        }
+        let (title, body) = context.split_once("\n\n").unwrap_or((context, ""));
+        PrRequest { fallback_title: title.trim().to_string(), fallback_body: body.to_string(), ..Default::default() }
+    }
+
+    /// The legacy context older machines read: the title, a blank line, the body.
+    pub fn legacy_context(&self) -> String {
+        format!("{}\n\n{}", self.title.as_deref().unwrap_or(&self.fallback_title), self.body.as_deref().unwrap_or(&self.fallback_body))
+    }
+}
+
+/// How a `merge` run merges the thread's pull request: its `context`, as JSON.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergeRequest {
+    /// `squash`, `merge` or `rebase`.
+    pub method: String,
+    pub url: String,
+}
+
 pub fn default_kind() -> String {
     "agent".into()
 }
@@ -374,6 +428,10 @@ pub struct Capabilities {
     /// fork that runs on another machine.
     #[serde(default)]
     pub can_hand_off_files: bool,
+    /// This worker's build reads a `pr` run's options (files to leave out, a title
+    /// the agent writes, drafts) and runs `merge` runs.
+    #[serde(default)]
+    pub can_manage_prs: bool,
 }
 
 /// What the Machines page asks of a machine's worktrees.

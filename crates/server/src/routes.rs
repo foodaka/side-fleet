@@ -73,6 +73,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/pr", post(open_pr))
         .route("/v1/runs/{id}/pr/check", post(check_pr))
+        .route("/v1/runs/{id}/pr/merge", post(merge_pr))
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/runs/{id}/snooze", post(snooze_run))
         .route("/v1/runs/{id}/pin", post(pin_run))
@@ -612,24 +613,72 @@ async fn restore_run(
 }
 
 /// Push the thread's branch and open a pull request for it (or update the open one).
+/// The body, all optional: `{title, body, write, draft, exclude}`.
 async fn open_pr(
     State(state): State<AppState>,
     Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    let opts: db::PrOptions = if body.iter().all(u8::is_ascii_whitespace) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("bad pull request options: {e}")))?
+    };
+    let too_long = |s: &Option<String>, n: usize| s.as_ref().is_some_and(|s| s.chars().count() > n);
+    if too_long(&opts.title, 300) || too_long(&opts.body, 20_000) || opts.exclude.len() > 1000 || opts.exclude.iter().any(|p| p.is_empty() || p.len() > 1024 || p.contains('\0')) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad pull request options: the title, description or file list is too long".into()));
+    }
     own_thread(&state, &caller, id).await?;
     check_run_limit(&state, &caller).await?;
-    match db::create_pr_run(&state.pool, caller.org_id(), id, caller.user_id()).await? {
+    match db::create_pr_run(&state.pool, caller.org_id(), id, caller.user_id(), &opts).await? {
         PrOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, thread = %id, "pull request queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
         }
-        PrOutcome::NotFound => Err(not_found()),
-        PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into())),
-        PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch of its own to open a pull request from".into())),
-        PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
+        other => Err(branch_run_error(other, "open a pull request from")),
+    }
+}
+
+/// Merge the thread's open pull request on GitHub, from its machine. `{method}`: `squash`, `merge` or `rebase`.
+async fn merge_pr(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<MergeBody>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    if !matches!(req.method.as_str(), "squash" | "merge" | "rebase") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "method is squash, merge or rebase".into()));
+    }
+    own_thread(&state, &caller, id).await?;
+    check_run_limit(&state, &caller).await?;
+    match db::create_merge_run(&state.pool, caller.org_id(), id, caller.user_id(), &req.method).await? {
+        PrOutcome::Created(run, ev) => {
+            tag_run(&state, &caller, run.id).await?;
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, thread = %id, method = %req.method, "merge queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        other => Err(branch_run_error(other, "merge")),
+    }
+}
+
+#[derive(Deserialize)]
+struct MergeBody {
+    method: String,
+}
+
+/// Why a run on a thread's branch wasn't queued. `what` finishes "no branch of its own to …".
+fn branch_run_error(outcome: PrOutcome, what: &str) -> ApiError {
+    match outcome {
+        PrOutcome::Created(..) | PrOutcome::NotFound => not_found(),
+        PrOutcome::Busy(_) => ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into()),
+        PrOutcome::InPlace => ApiError(StatusCode::CONFLICT, format!("this task ran in the checkout itself, so it has no branch of its own to {what}")),
+        PrOutcome::NoMachine => ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into()),
+        PrOutcome::TooOld(why) => ApiError(StatusCode::CONFLICT, why),
+        PrOutcome::NoOpenPr => ApiError(StatusCode::CONFLICT, "this thread has no open pull request".into()),
     }
 }
 
@@ -672,6 +721,7 @@ async fn integrate_run(
         PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the task is still running; wait for it to finish or stop it".into())),
         PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch to merge".into())),
         PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
+        other => Err(branch_run_error(other, "merge")),
     }
 }
 

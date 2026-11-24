@@ -45,6 +45,8 @@ pub fn run_finished(state: &AppState, org: Uuid, run: &Run) {
         let (event, text) = match (run.kind.as_str(), run.status) {
             ("pr", RunStatus::Succeeded) if !task["pr"].is_null() => ("task.pull_request", pr_text(&task)),
             ("pr", _) => ("task.failed", failed_text(&task, "couldn't open a pull request")),
+            ("merge", RunStatus::Succeeded) if !task["pr"].is_null() => ("task.pull_request", pr_text(&task)),
+            ("merge", _) => ("task.failed", failed_text(&task, "couldn't merge the pull request")),
             (_, RunStatus::Succeeded) => ("task.finished", finished_text(&task)),
             _ => ("task.failed", failed_text(&task, "failed")),
         };

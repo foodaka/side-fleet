@@ -2204,6 +2204,79 @@ async fn ask_me_is_for_claude_code() {
 }
 
 #[tokio::test]
+async fn pull_request_options_and_merging_need_a_machine_that_can() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let register = |id: &str, can: bool| {
+        api.worker(reqwest::Method::POST, "/v1/worker/register")
+            .json(&json!({"id": id, "display_name": id, "capabilities": {"repos": [{"name": "r", "path": "/tmp/r"}], "can_manage_prs": can}, "active_runs": []}))
+            .send()
+    };
+    let claim = |id: &str| {
+        api.worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": id, "repos": ["r"], "busy_repos": [], "agents": ["claude"], "kinds": ["agent", "pr", "merge"]}))
+            .send()
+    };
+    let post = |path: String, body: Value| api.dev(reqwest::Method::POST, &path).json(&body).send();
+
+    // A thread on a machine that can, and one on a machine that can't.
+    let mut threads = vec![];
+    for (w, can) in [("new", true), ("old", false)] {
+        register(w, can).await.unwrap();
+        let (_, body) = api.create_run(&format!("Fix the login bug on {w}\n\nIt loops."), "r").await;
+        let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(claim(w).await.unwrap().json::<Run>().await.unwrap().id, id);
+        api.post_events(w, id, json!([{"kind": "agent_init", "payload": {"session_id": "s"}}])).await;
+        api.finish(w, id, "succeeded", json!({})).await;
+        threads.push(id);
+    }
+    let (new, old) = (threads[0], threads[1]);
+
+    // Files left out, a draft, the agent writing it: the request goes as JSON.
+    let r = post(format!("/v1/runs/{new}/pr"), json!({"exclude": ["notes.md"], "draft": true})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let pid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let req: sidefleet_core::PrRequest = serde_json::from_str(api.get_run(pid).await.context.as_deref().unwrap()).unwrap();
+    assert_eq!((req.exclude, req.draft, req.write, req.title), (vec!["notes.md".to_string()], true, true, None));
+    assert_eq!((req.fallback_title.as_str(), req.messages.len()), ("Fix the login bug on new", 1));
+    assert_eq!(claim("new").await.unwrap().json::<Run>().await.unwrap().id, pid);
+    api.finish("new", pid, "succeeded", json!({})).await;
+
+    // An older machine: a title of your own still works, the rest needs an update.
+    let r = post(format!("/v1/runs/{old}/pr"), json!({"exclude": ["notes.md"]})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert!(r.text().await.unwrap().contains("update Sidefleet on old"));
+    let r = post(format!("/v1/runs/{old}/pr"), json!({"title": "My title", "body": "Mine."})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let pid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(api.get_run(pid).await.context.as_deref(), Some("My title\n\nMine."));
+    assert_eq!(claim("old").await.unwrap().json::<Run>().await.unwrap().id, pid);
+    api.finish("old", pid, "succeeded", json!({})).await;
+
+    // Nonsense is refused.
+    assert_eq!(post(format!("/v1/runs/{new}/pr"), json!({"title": "x".repeat(301)})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(post(format!("/v1/runs/{new}/pr/merge"), json!({"method": "octopus"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    // Merging needs an open pull request, then a machine that can.
+    assert_eq!(post(format!("/v1/runs/{new}/pr/merge"), json!({"method": "squash"})).await.unwrap().status(), StatusCode::CONFLICT);
+    for (w, id) in [("new", new), ("old", old)] {
+        let r = api.worker(reqwest::Method::POST, "/v1/worker/prs")
+            .json(&json!({"worker_id": w, "prs": [{"thread": id, "pr": {"url": format!("https://github.com/o/r/pull/{w}"), "number": 7, "state": "open"}}]}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(post(format!("/v1/runs/{old}/pr/merge"), json!({"method": "squash"})).await.unwrap().status(), StatusCode::CONFLICT);
+    let r = post(format!("/v1/runs/{new}/pr/merge"), json!({"method": "rebase"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let mid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let run = api.get_run(mid).await;
+    assert_eq!((run.kind.as_str(), run.task.as_str(), run.pinned_worker_id.as_deref()), ("merge", "Rebase and merge pull request #7", Some("new")));
+    let m: sidefleet_core::MergeRequest = serde_json::from_str(run.context.as_deref().unwrap()).unwrap();
+    assert_eq!((m.method.as_str(), m.url.as_str()), ("rebase", "https://github.com/o/r/pull/new"));
+    assert_eq!(claim("new").await.unwrap().json::<Run>().await.unwrap().id, mid);
+}
+
+#[tokio::test]
 async fn pull_requests_are_opened_on_the_threads_machine_and_kept_on_the_thread() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

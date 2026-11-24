@@ -465,6 +465,7 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
     Capabilities {
         can_clean_worktrees: true,
         can_hand_off_files: true,
+        can_manage_prs: true,
         agents: Agents { claude, codex, opencode, ollama },
         repos: scan_repos(&opts.repos_root, opts.scan_depth),
         hostname: gethostname::gethostname().to_string_lossy().to_string(),

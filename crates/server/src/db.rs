@@ -854,7 +854,7 @@ pub async fn pull_requests(pool: &PgPool, org: Uuid, owner: Option<Uuid>) -> sql
         .map(|t| (t.get::<String, _>("url"), json!({"id": t.get::<Uuid, _>("id"), "task": t.get::<String, _>("task").chars().take(200).collect::<String>()})))
         .collect();
     let mut prs: Vec<(AuthoredPr, String)> = by_url.into_values().collect();
-    prs.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
+    prs.sort_by_key(|p| std::cmp::Reverse(p.0.updated_at));
     let prs: Vec<Value> = prs
         .into_iter()
         .map(|(p, machine)| {

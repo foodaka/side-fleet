@@ -117,6 +117,9 @@ struct SidebarView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
+                // A fresh list per view: the lazy stack otherwise reuses rows laid out for the other one
+                // (rows by time kept their place instead of moving in under their project).
+                .id(fleet.projects.view)
             }
             .scrollIndicators(.automatic)
             .sheet(item: pickingProject) { ProjectIconSheet(repo: $0.id, current: fleet.projects.icons[$0.id]) }

@@ -536,6 +536,22 @@ struct RunRow: View {
     }
 
     @ViewBuilder private var trailingMarks: some View {
+        switch run.latestChecks?.verdict {
+        case .passed?:
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(SF.okInk)
+                .help("All \(run.latestChecks?.total ?? 0) checks passed")
+                .accessibilityLabel("Checks passed")
+        case .failed?:
+            Image(systemName: "xmark.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(SF.errInk)
+                .help("Check failed: \((run.latestChecks?.failed ?? []).joined(separator: ", "))")
+                .accessibilityLabel("Checks failed")
+        default:
+            EmptyView()
+        }
         if let pr = run.run.pr {
             HStack(spacing: 2) {
                 PRIcon(state: pr.state)

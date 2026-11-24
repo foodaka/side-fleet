@@ -524,6 +524,21 @@ fn status_word(s: &Value) -> String {
     }
 }
 
+/// The repo's checks (`.sidefleet.json`) on the newest message that ran them.
+fn checks_line(c: &Value) -> Option<String> {
+    let line = match c["verdict"].as_str()? {
+        "passed" => format!("Checks: all {} passed", c["total"]),
+        "failed" => {
+            let failed: Vec<&str> = c["failed"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            format!("Checks: failed ({})", failed.join(", "))
+        }
+        "skipped" => "Checks: not run for this task".to_string(),
+        "error" => "Checks: the repo's .sidefleet.json could not be used".to_string(),
+        _ => return None,
+    };
+    Some(format!("{line}.\n"))
+}
+
 fn summary_text(s: &Value) -> String {
     let mut out = format!("Task: {} (id {})\n", first_line(s["task"].as_str().unwrap_or(""), 120), s["id"].as_str().unwrap_or(""));
     let machine = s["machine"].as_str().map(|m| format!(" on {m}")).unwrap_or_default();
@@ -556,6 +571,9 @@ fn summary_text(s: &Value) -> String {
             .map(|f| format!("{} (+{} -{})", f["path"].as_str().unwrap_or("?"), f["additions"], f["deletions"]))
             .collect();
         out.push_str(&format!("Changed files ({}, +{} -{}): {}\n", c["count"], c["additions"], c["deletions"], files.join(", ")));
+    }
+    if let Some(line) = checks_line(&s["checks"]) {
+        out.push_str(&line);
     }
     if let Some(url) = s["pr"]["url"].as_str() {
         out.push_str(&format!("Pull request #{} ({}): {url}\n", s["pr"]["number"], s["pr"]["state"].as_str().unwrap_or("")));

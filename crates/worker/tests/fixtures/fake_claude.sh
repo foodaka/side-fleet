@@ -7,7 +7,8 @@
 # notes.txt; "rename" moves notes.txt; "ask" asks the worker's "Ask me" socket
 # from --mcp-config about a Bash call, as Claude Code's permission prompt tool would;
 # "jam" leaves a git clean filter that hangs, so snapshotting the tree never ends;
-# "bait" says something a web application firewall takes for an attack).
+# "bait" says something a web application firewall takes for an attack; the check
+# gate's follow-up, "Sidefleet ran this repo's checks", writes "fixed" into README.md).
 # With --include-partial-messages the last message streams as text deltas first.
 if [ "$1" = "--version" ]; then printf '%s\n' "9.9.9 (Claude Code fake)"; exit 0; fi
 task=""
@@ -59,12 +60,14 @@ print(json.loads(s.makefile().readline())["behavior"])
     fi;;
 esac
 case "$task" in
+  *"Sidefleet ran this repo's checks"*) printf 'demo\nfixed\n' > README.md;;
   *edit*) printf 'demo\nedited by the agent\n' > README.md; printf 'one\ntwo\n' > notes.txt;;
   *rename*) git mv -f notes.txt docs-notes.txt 2>/dev/null || mv notes.txt docs-notes.txt;;
   *jam*) git config filter.jam.clean "sleep 30"; printf '* filter=jam\n' > .gitattributes; printf 'x\n' > jammed.txt;;
   *bait*) printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The test reads ../../etc/shadow to check the path guard."}]}}';;
 esac
 case "$task" in
+  *"Sidefleet ran this repo's checks"*) ;;
   *fail*) printf '%s\n' "fatal: simulated crash" >&2; kill $child 2>/dev/null; exit 3;;
   *error-result*) printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":900,"num_turns":1,"session_id":"fake-session"}'; kill $child 2>/dev/null; exit 0;;
 esac

@@ -17,6 +17,7 @@
 	import ToolImages from './ToolImages.svelte';
 	import AttachedFiles from './AttachedFiles.svelte';
 	import ChangesCard from '../diff/ChangesCard.svelte';
+	import ChecksCard from './ChecksCard.svelte';
 	import ForkDialog from './ForkDialog.svelte';
 	import type { Turn } from '../thread.svelte';
 
@@ -214,6 +215,8 @@
 					<ApprovalCard item={it} agent={run.agent} {live} {ondecide} />
 				{:else if it.kind === 'note'}
 					<p class="py-1 text-[13px] {it.tone === 'err' ? 'text-err-ink' : it.tone === 'ok' ? 'text-ok-ink' : 'text-muted-foreground'}">{#if it.href}<a href={it.href} target="_blank" rel="noopener noreferrer" class="underline underline-offset-2 hover:opacity-80">{it.text}</a>{:else}{it.text}{/if}</p>
+				{:else if it.kind === 'checks'}
+					<ChecksCard item={it} agent={run.agent} />
 				{:else if it.kind === 'stderr-group'}
 					<details class="py-0.5 text-xs text-muted-foreground">
 						<summary class="cursor-pointer select-none hover:text-foreground">{it.lines.length} line{it.lines.length === 1 ? '' : 's'} of agent log</summary>
@@ -239,6 +242,10 @@
 
 		{#if turn.result?.text}
 			<div class="sf-md py-1.5 text-[14.5px] leading-[1.7]"><Response content={turn.result.text} /></div>
+		{/if}
+
+		{#if turn.checks}
+			<ChecksCard item={turn.checks} agent={run.agent} />
 		{/if}
 
 		{#if turn.diff && onopendiff}

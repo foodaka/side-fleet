@@ -388,6 +388,7 @@ private actor DemoWorld {
             json["latest_model"] = latest.json["model"] ?? ""
             json["latest_effort"] = latest.json["effort"] ?? .null
             json["latest_worker_id"] = latest.json["worker_id"] ?? .null
+            json["latest_checks"] = all.reversed().lazy.compactMap { $0.json["result"]?["checks"] }.first ?? .null
             // A list row reports the running message's machine.
             json["worker_id"] = latest.json["worker_id"] ?? .null
             if latest.json["status"]?.string == "running" { json["started_at"] = latest.json["started_at"] ?? .null }

@@ -84,6 +84,8 @@ struct PRSheet: View {
                     }
                 } label: {
                     Label(busy ? "Starting…" : opening ? "Open pull request" : "Push changes", systemImage: "arrow.triangle.pull")
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)

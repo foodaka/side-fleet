@@ -58,7 +58,8 @@
 
 	// Fork asked for from the sidebar: from the latest finished message, once the thread has loaded.
 	let forkOpen = $state(false);
-	const forkTurn = $derived(thread?.turns.findLast((t) => ['succeeded', 'failed', 'stopped'].includes(t.run.status)));
+	// The latest finished message (not a pull request, handoff or the like, which have no files of their own).
+	const forkTurn = $derived(thread?.turns.findLast((t) => ['agent', 'restore'].includes(t.run.kind) && ['succeeded', 'failed', 'stopped'].includes(t.run.status)));
 	$effect(() => {
 		if (!loaded || !fleet.forkThread || fleet.forkThread !== thread?.root?.id) return;
 		untrack(() => {

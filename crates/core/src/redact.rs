@@ -43,6 +43,31 @@ static KEY_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Credentials that are unlikely to be anything else, by name, for refusing to push
+/// a file that holds one. Unlike [`redact`] this leaves out `key = value` shapes,
+/// which code is full of.
+static CREDENTIALS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    [
+        ("an API key (sk-…)", r"\bsk-[A-Za-z0-9_\-]{16,}"),
+        ("a GitHub token", r"\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"),
+        ("a Slack token", r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
+        ("an AWS access key", r"\bAKIA[0-9A-Z]{16}\b"),
+        ("a Google API key", r"\bAIza[0-9A-Za-z_\-]{30,}"),
+        ("a Stripe secret key", r"\b[rs]k_live_[0-9A-Za-z]{16,}"),
+        ("a private key", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----"),
+        ("an npm token", r"(?m)^\s*//\S*:_(?:authToken|auth|password)\s*=\s*\S"),
+        ("a password in a URL", r"\b[a-z][a-z0-9+.\-]*://[^\s:/@\x22']+:[^\s:/@\x22'$<>{}]{6,}@[A-Za-z0-9.\-]+"),
+    ]
+    .iter()
+    .map(|(what, p)| (*what, Regex::new(p).expect("valid regex")))
+    .collect()
+});
+
+/// What kind of credential `text` holds, if it holds one of the unmistakable kinds.
+pub fn find_credential(text: &str) -> Option<&'static str> {
+    CREDENTIALS.iter().find(|(_, re)| re.is_match(text)).map(|(what, _)| *what)
+}
+
 /// Replace anything that looks like a credential with `[REDACTED]`.
 pub fn redact(input: &str) -> String {
     let mut out = input.to_string();
@@ -148,6 +173,18 @@ pub fn summarize_tool_input(tool: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_unmistakable_credentials_but_not_code_about_them() {
+        assert_eq!(find_credential("KEY=sk-ant-api03-abcdefghijklmnopqrstuv"), Some("an API key (sk-…)"));
+        assert_eq!(find_credential("token: ghp_abcdefghijklmnopqrstuvwxyz0123"), Some("a GitHub token"));
+        assert_eq!(find_credential("-----BEGIN OPENSSH PRIVATE KEY-----\nabc"), Some("a private key"));
+        assert_eq!(find_credential("//registry.npmjs.org/:_authToken=abc123"), Some("an npm token"));
+        assert_eq!(find_credential("DATABASE_URL=postgres://app:hunter2hunter@db.internal:5432/app"), Some("a password in a URL"));
+        assert_eq!(find_credential("let password = read_password(); // token = getToken()"), None);
+        assert_eq!(find_credential("postgres://${USER}:${PASSWORD}@localhost/db"), None);
+        assert_eq!(find_credential("see https://github.com/org/repo and task-sk-1"), None);
+    }
     use serde_json::json;
 
     #[test]

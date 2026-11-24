@@ -107,7 +107,9 @@ pub struct Run {
     /// the thread's worktree back to the snapshot in `restore_to`), `pr` (the
     /// worker commits and pushes the thread's branch and opens a pull request) or
     /// `integrate` (the worker merges the thread's branch into its room's branch,
-    /// named in `context`, and pushes that).
+    /// named in `context`, and pushes that) or `handoff` (the worker pushes the
+    /// snapshot in `fork_commit` for the fork whose id is in `context`, which runs
+    /// on another machine; see [`handoff_branch`]).
     #[serde(default = "default_kind")]
     pub kind: String,
     /// For a restore run: the snapshot commit to restore.
@@ -117,11 +119,13 @@ pub struct Run {
     #[serde(default)]
     pub forked_from: Option<Uuid>,
     /// For a fork: the snapshot its worktree starts from (the files after that message).
+    /// For a `handoff` run: the snapshot to push.
     #[serde(default)]
     pub fork_commit: Option<String>,
     /// For a fork: the earlier conversation, given to the agent ahead of the task.
     /// For a `pr` run: the pull request's title, then a blank line and its body.
     /// For an `integrate` run: the room branch to merge into.
+    /// For a `handoff` run: the id of the fork it pushes the files for.
     /// For a room's task: the room brief or update, ahead of the message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
@@ -302,6 +306,10 @@ pub struct Capabilities {
     /// This worker's build answers "Clean up" on the Machines page.
     #[serde(default)]
     pub can_clean_worktrees: bool,
+    /// This worker's build runs `handoff` runs: it pushes a thread's files for a
+    /// fork that runs on another machine.
+    #[serde(default)]
+    pub can_hand_off_files: bool,
 }
 
 /// What the Machines page asks of a machine's worktrees.
@@ -845,7 +853,7 @@ pub struct ClaimRequest {
     /// to the least busy machine. None from older workers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<Slots>,
-    /// Kinds of run this worker can execute (`agent`, `restore`, `fork`). Empty
+    /// Kinds of run this worker can execute (`agent`, `restore`, `fork`, `handoff`…). Empty
     /// from older workers, which only run plain `agent` runs.
     #[serde(default)]
     pub kinds: Vec<String>,
@@ -931,4 +939,22 @@ mod approval_tests {
             assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
         }
     }
+}
+
+/// The branch on `origin` a `handoff` run pushes a fork's files to, for the
+/// fork's machine to fetch (it deletes the branch once it has them).
+pub fn handoff_branch(fork_id: Uuid) -> String {
+    format!("sidefleet/handoff-{}", &fork_id.simple().to_string()[..8])
+}
+
+/// The sentence in a fork's transcript header that says its files came along.
+pub const FORK_FILES_HERE: &str = "The files in your working directory already include every change made in it.";
+/// What a fork's machine says instead when the files did not come along.
+pub const FORK_FILES_MISSING: &str = "The files from that conversation are NOT in your working directory: it starts \
+from this repository's own branch instead, so changes the transcript mentions are not here unless they were pushed \
+or merged. Check before relying on them, and tell the user if work has to be redone.";
+
+/// A fork transcript, told that the files from the conversation did not come along.
+pub fn fork_context_without_files(context: &str) -> String {
+    context.replacen(FORK_FILES_HERE, FORK_FILES_MISSING, 1)
 }

@@ -375,7 +375,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
 				t.machine = run.worker_id;
-				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : run.kind === 'integrate' ? 'Adding the changes to the room' : 'Starting ' + agentName(run.agent);
+				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : run.kind === 'integrate' ? 'Adding the changes to the room' : run.kind === 'handoff' ? 'Checking the files for secrets and sending them to the fork' : 'Starting ' + agentName(run.agent);
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;

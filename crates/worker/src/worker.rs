@@ -19,6 +19,7 @@ use crate::checkpoint::{self, ChangeTracker};
 use crate::cleanup::{self, ActiveRuns};
 use crate::client::{Backoff, ClientError, ControlClient, Rejected};
 use crate::diff;
+use crate::handoff;
 use crate::setup;
 use crate::snapshot;
 use crate::detect::{self, DetectOptions};
@@ -653,16 +654,50 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         return;
     };
 
+    if run.kind == "handoff" {
+        // Sends files from the checkout's git store: no worktree needed.
+        let (status, result) = match run_handoff(client, &run, &repo_dir).await {
+            Ok(branch) => (RunStatus::Succeeded, json!({"branch": branch})),
+            Err(e) => {
+                let msg = sidefleet_core::redact::redact(&format!("{e:#}"));
+                let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+                (RunStatus::Failed, json!({"error": msg}))
+            }
+        };
+        report_finish(client, run_id, status, result, None).await;
+        return;
+    }
+
     // Where the agent works: its own worktree and branch, or the checkout itself.
     let mut pre_events: Vec<NewEvent> = Vec::new();
     // The worktree and branch to checkpoint, for a run that may move if this machine drops.
     let mut checkpoints: Option<(PathBuf, String)> = None;
     let root_id = run.parent_id.unwrap_or(run.id);
-    let fork_from = run.fork_commit.as_deref().filter(|c| snapshot::is_commit_id(c));
+    let mut fork_from = run.fork_commit.clone().filter(|c| snapshot::is_commit_id(c));
+    let mut resume_from_branch = run.resume_from_branch.clone();
+    // A fork whose files another machine sent: fetch them, and start from them as from a snapshot here.
+    let mut received: Option<String> = None;
+    if run.forked_from.is_some() && run.isolation == "worktree" && fork_from.is_none() {
+        if let Some(b) = resume_from_branch.take() {
+            match handoff::receive(&repo_dir, &b).await {
+                Ok(sha) => {
+                    fork_from = Some(sha);
+                    received = Some(b);
+                }
+                Err(e) => pre_events.push(NewEvent {
+                    kind: "error".into(),
+                    payload: json!({"message": sidefleet_core::redact::redact(&format!(
+                        "The files from the thread this was forked from didn't come along (could not fetch {b} from origin: {e:#}). It starts from this machine's copy of the repo."
+                    ))}),
+                }),
+            }
+        }
+    }
+    let fork_from = fork_from.as_deref();
     let mut in_worktree = false;
     let mut branch: Option<String> = None;
     let cwd = if run.isolation == "worktree" {
-        let mut resume_from = run.resume_from_branch.as_deref();
+        let mut resume_from = resume_from_branch.as_deref();
         let mut prepared = prepare_worktree(&repo_dir, &run.repo, root_id, &cfg.worktrees_dir, resume_from, fork_from).await;
         if let (Err(e), Some(from)) = (&prepared, resume_from) {
             pre_events.push(NewEvent {
@@ -708,6 +743,12 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     if let Err(e) = client.post_events(run_id, pre_events).await {
         tracing::warn!(error = %e, "posting workspace event failed");
     }
+    if let Some(b) = &received {
+        // The worktree has the files now; the branch on origin was only the way here.
+        handoff::clean_up(&repo_dir, b).await;
+    }
+    // A fork's transcript says its files are here; say otherwise when they aren't.
+    let fork_files_here = in_worktree && fork_from.is_some();
 
     if run.kind == "restore" {
         let (status, result) = match run_restore(client, &run, root_id, &cwd, in_worktree).await {
@@ -823,6 +864,9 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         bin: bin.clone(),
         // A fork's agent gets the earlier conversation ahead of the new message.
         task: match &run.context {
+            Some(c) if !c.is_empty() && run.forked_from.is_some() && !fork_files_here => {
+                format!("{}\n\n{}", sidefleet_core::fork_context_without_files(c), run.task)
+            }
             Some(c) if !c.is_empty() => format!("{c}\n\n{}", run.task),
             _ => run.task.clone(),
         },
@@ -1167,6 +1211,16 @@ async fn run_restore(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Pat
     events.push(NewEvent { kind: "restored".into(), payload: json!({"to": target}) });
     client.post_events(run.id, events).await?;
     Ok(target)
+}
+
+/// A handoff run: push the files after a message to a branch on `origin` for a
+/// fork on another machine (`context` names the fork), unless they hold secrets.
+async fn run_handoff(client: &ControlClient, run: &Run, repo: &Path) -> Result<String> {
+    let fork: Uuid = run.context.as_deref().and_then(|c| c.trim().parse().ok()).context("handoff run without a fork to send the files to")?;
+    let snap = run.fork_commit.as_deref().context("handoff run without a snapshot to send")?;
+    let branch = handoff::send(repo, snap, fork).await?;
+    client.post_events(run.id, vec![NewEvent { kind: "handoff".into(), payload: json!({"branch": branch, "commit": snap, "fork": fork}) }]).await?;
+    Ok(branch)
 }
 
 /// A pull request run: commit and push the thread's branch, open a pull request

@@ -690,9 +690,13 @@ async fn fork_run(
     check_full_access(&caller, mode.or(target.permission_mode.as_deref()))?;
     check_run_limit(&state, &caller).await?;
     match db::create_fork(&state.pool, caller.org_id(), id, new).await? {
-        ForkOutcome::Created(run, ev) => {
+        ForkOutcome::Created(run, ev, handoff) => {
             tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
+            if let Some(h) = handoff {
+                tracing::info!(run_id = %h.run_id, fork = %run.id, "handoff queued");
+                state.events.publish(h);
+            }
             tracing::info!(run_id = %run.id, forked_from = %id, agent = %run.agent, model = %run.model, "fork queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
         }

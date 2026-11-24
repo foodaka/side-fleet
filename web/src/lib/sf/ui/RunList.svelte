@@ -185,6 +185,7 @@
 				{/if}
 			</span>
 			<span class="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
+				{#if r.forked_from}<span class="shrink-0" title="Forked from another thread" aria-label="Forked"><GitFork class="size-3 text-faint" /></span>{/if}
 				{#if r.isolation === 'checkout'}<span class="shrink-0" title="In the repo's own checkout, not a worktree"><FolderGit2 class="size-3 text-faint" /></span>{/if}
 				<span class="tnum min-w-0 flex-1 truncate">
 					{#if asking}

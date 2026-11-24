@@ -1732,6 +1732,106 @@ async fn forks_start_a_thread_with_any_agent_where_the_files_are() {
 }
 
 #[tokio::test]
+async fn a_fork_on_another_machine_gets_the_files_sent_over_first() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    let agents = json!({"claude": {"version": "1", "signed_in": true}});
+    for id in ["w", "w2"] {
+        let caps = json!({"repos": [{"name": "r", "path": "/tmp/r"}], "agents": agents, "can_hand_off_files": true});
+        let r = api
+            .worker(reqwest::Method::POST, "/v1/worker/register")
+            .json(&json!({"id": id, "display_name": id, "capabilities": caps, "active_runs": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+    let api = &api;
+    let fork = |id: Uuid, body: Value| api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/fork")).json(&body).send();
+    let claim = |worker: &'static str, kinds: Value| async move {
+        let r = api
+            .worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": worker, "repos": ["r"], "busy_repos": [], "agents": ["claude"], "kinds": kinds}))
+            .send()
+            .await
+            .unwrap();
+        if r.status() == StatusCode::NO_CONTENT { None } else { Some(r.json::<Run>().await.unwrap()) }
+    };
+    let all = json!(["agent", "restore", "fork", "pr", "integrate", "handoff"]);
+    let thread = |id: Uuid| async move {
+        api.dev(reqwest::Method::GET, &format!("/v1/runs/{id}/thread")).send().await.unwrap().json::<Vec<Run>>().await.unwrap()
+    };
+    let after = "89abcdef0123456789abcdef0123456789abcdef";
+
+    let (_, body) = api.create_run("build the parser", "r").await;
+    let id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(claim("w", all.clone()).await.unwrap().id, id);
+    api.post_events("w", id, json!([
+        {"kind": "assistant_text", "payload": {"text": "Parser done."}},
+        {"kind": "snapshot", "payload": {"before": after, "after": after, "files": []}},
+    ])).await;
+    api.finish("w", id, "succeeded", json!({})).await;
+
+    // Forked onto w2: w sends the files over a handoff branch first.
+    let r = fork(id, json!({"task": "review it", "agent": "claude", "model": "claude-opus-5-5", "worker_id": "w2"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let fid: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let f = api.get_run(fid).await;
+    let branch = sidefleet_core::handoff_branch(fid);
+    assert_eq!((f.pinned_worker_id.as_deref(), f.fork_commit.as_deref(), f.resume_from_branch.as_deref()), (Some("w2"), None, Some(branch.as_str())));
+    // The handoff shows in the thread it sends the files from.
+    let t = thread(id).await;
+    let h = t.last().unwrap();
+    assert_eq!((h.kind.as_str(), h.pinned_worker_id.as_deref(), h.fork_commit.as_deref()), ("handoff", Some("w"), Some(after)));
+    assert_eq!(h.context.as_deref(), Some(fid.to_string().as_str()));
+
+    // The fork waits for it; a machine that can't send files never gets the handoff.
+    assert!(claim("w2", all.clone()).await.is_none(), "the fork waits for its files");
+    assert!(claim("w", json!(["agent", "fork"])).await.is_none());
+    let hid = claim("w", all.clone()).await.expect("handoff").id;
+    assert_eq!(hid, h.id);
+    assert!(claim("w2", all.clone()).await.is_none(), "still sending");
+    api.finish("w", hid, "succeeded", json!({"branch": branch})).await;
+    let claimed = claim("w2", all.clone()).await.expect("fork");
+    assert_eq!((claimed.id, claimed.resume_from_branch.as_deref()), (fid, Some(branch.as_str())));
+    api.finish("w2", fid, "succeeded", json!({})).await;
+
+    // A handoff that refused to send (a secret in the files): the fork starts without them, and says why.
+    let r = fork(id, json!({"task": "again", "agent": "claude", "model": "claude-opus-5-5", "worker_id": "w2"})).await.unwrap();
+    let f2: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    let h2 = claim("w", all.clone()).await.expect("handoff").id;
+    api.finish("w", h2, "failed", json!({"error": "not sending the files: .env looks like an environment file"})).await;
+    let claimed = claim("w2", all.clone()).await.expect("fork");
+    assert_eq!((claimed.id, claimed.resume_from_branch), (f2, None));
+    let evs = sidefleet_server::db::events_since(&env.pool, f2, 0).await.unwrap();
+    let note = evs.iter().find(|e| e.kind == "error").expect("a note on the fork");
+    assert!(note.payload["message"].as_str().unwrap().contains(".env looks like an environment file"), "{:?}", note.payload);
+    api.finish("w2", f2, "succeeded", json!({})).await;
+
+    // The machine with the files never picks the handoff up: after a while the fork stops waiting.
+    let r = fork(id, json!({"task": "fourth", "agent": "claude", "model": "claude-opus-5-5", "worker_id": "w2"})).await.unwrap();
+    let f4: Uuid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap();
+    assert!(claim("w2", all.clone()).await.is_none());
+    sqlx::query("UPDATE runs SET created_at = now() - interval '11 minutes' WHERE kind = 'handoff' AND context = $1")
+        .bind(f4.to_string())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let claimed = claim("w2", all.clone()).await.expect("fork");
+    assert_eq!((claimed.id, claimed.resume_from_branch), (f4, None));
+    let h4 = thread(id).await.into_iter().rfind(|r| r.kind == "handoff").unwrap();
+    assert_eq!(h4.status, RunStatus::Failed, "called off, so w doesn't push for nobody");
+    api.finish("w2", f4, "succeeded", json!({})).await;
+
+    // Forks of this thread later don't carry the handoff turns in their transcript.
+    let r = fork(id, json!({"task": "third", "agent": "claude", "model": "claude-opus-5-5"})).await.unwrap();
+    let f3 = api.get_run(r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse().unwrap()).await;
+    let ctx = f3.context.unwrap();
+    assert!(ctx.contains("Parser done.") && !ctx.contains("Send the files"), "{ctx}");
+    env.teardown().await;
+}
+
+#[tokio::test]
 async fn a_thread_can_switch_agents_and_the_new_one_gets_the_conversation() {
     let env = TestEnv::start().await;
     let api = Api::new(&env.base_url);

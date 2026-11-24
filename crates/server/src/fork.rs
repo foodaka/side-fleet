@@ -31,19 +31,20 @@ pub fn transcript(runs: &[(Run, Vec<RunEvent>)], budget: usize) -> String {
     // Every agent that took part, in order of first reply (a thread can switch agents).
     let mut agents = vec![root.agent];
     for (r, _) in runs {
-        if r.kind != "restore" && !agents.contains(&r.agent) {
+        if r.kind == "agent" && !agents.contains(&r.agent) {
             agents.push(r.agent);
         }
     }
     let with: Vec<&str> = agents.iter().map(|a| agent_name(*a)).collect();
+    // The machine that runs it swaps the files sentence when the files did not come along.
     let header = format!(
         "This task continues a conversation that started in another session (with {}). \
-         The transcript up to this point is below, for context. The files in your working \
-         directory already include every change made in it. Reply to the new message after the transcript.\n\n<transcript>\n",
-        with.join(", then ")
+         The transcript up to this point is below, for context. {} Reply to the new message after the transcript.\n\n<transcript>\n",
+        with.join(", then "),
+        sidefleet_core::FORK_FILES_HERE,
     );
     let footer = "</transcript>\n\nNew message:";
-    let blocks: Vec<String> = runs.iter().map(|(run, events)| block(run, events)).collect();
+    let blocks: Vec<String> = runs.iter().map(|(run, events)| block(run, events)).filter(|b| !b.is_empty()).collect();
 
     let room = budget.saturating_sub(header.len() + footer.len() + 64);
     let mut kept: Vec<&str> = Vec::new();
@@ -79,6 +80,10 @@ pub fn transcript(runs: &[(Run, Vec<RunEvent>)], budget: usize) -> String {
 }
 
 fn block(run: &Run, events: &[RunEvent]) -> String {
+    if run.kind == "handoff" {
+        // Machinery, not conversation: the files went to another fork.
+        return String::new();
+    }
     if run.kind == "restore" {
         return "[The files were restored to how they were before an earlier message.]\n\n".into();
     }
@@ -161,6 +166,16 @@ mod tests {
         assert!(t.contains("restored to how they were before"));
         assert!(!t.contains("secret thoughts") && !t.contains("big output"));
         assert!(t.ends_with("New message:"));
+    }
+
+    #[test]
+    fn says_the_files_are_here_until_the_fork_machine_says_otherwise() {
+        let runs = vec![(run("build it", Agent::Claude, "agent"), vec![]), (run("Send the files to a fork: x", Agent::Claude, "handoff"), vec![])];
+        let t = transcript(&runs, MAX_CONTEXT_BYTES);
+        assert!(t.contains(sidefleet_core::FORK_FILES_HERE), "{t}");
+        assert!(!t.contains("Send the files"), "handoff turns are left out: {t}");
+        let without = sidefleet_core::fork_context_without_files(&t);
+        assert!(!without.contains(sidefleet_core::FORK_FILES_HERE) && without.contains("are NOT in your working directory"), "{without}");
     }
 
     #[test]

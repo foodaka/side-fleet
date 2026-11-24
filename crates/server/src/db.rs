@@ -756,7 +756,8 @@ pub struct NewFork<'a> {
 }
 
 pub enum ForkOutcome {
-    Created(Run, RunEvent),
+    /// The fork, its first event, and the first event of the handoff run that sends it the files, if any.
+    Created(Run, RunEvent, Option<RunEvent>),
     NotFound,
     /// The message is still queued or running.
     NotFinished(Run),
@@ -775,6 +776,9 @@ pub async fn create_fork(pool: &PgPool, org: Uuid, run_id: Uuid, new: NewFork<'_
         return Ok(ForkOutcome::NotFinished(target));
     }
     let thread = thread_runs(pool, org, target.parent_id.unwrap_or(target.id)).await?;
+    // A handoff turn joins the end of this thread, carrying its session on like a `pr` run.
+    let latest = thread.last().cloned().unwrap_or_else(|| target.clone());
+    let latest_session = session_for(&thread, latest.agent, None);
     let upto = thread.iter().position(|r| r.id == run_id).map(|i| i + 1).unwrap_or(thread.len());
     let mut history = Vec::with_capacity(upto);
     for r in thread.into_iter().take(upto) {
@@ -799,14 +803,20 @@ pub async fn create_fork(pool: &PgPool, org: Uuid, run_id: Uuid, new: NewFork<'_
         }
         None => None,
     };
+    let id = Uuid::new_v4();
+    // On another of your machines, the one with the files pushes them for it first, when it can.
+    let handoff = match (files_on, pinned.as_deref(), &fork_commit) {
+        (Some(from), Some(to), Some(commit)) if from != to && can_hand_off(pool, org, from).await? => Some((from.to_string(), commit.clone())),
+        _ => None,
+    };
+    let resume_from_branch = handoff.as_ref().map(|_| sidefleet_core::handoff_branch(id));
     let fork_commit = fork_commit.filter(|_| pinned.is_some() && pinned.as_deref() == files_on);
 
-    let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, forked_from, fork_commit, context, org_id, effort,
-                           created_by, room_id)
-         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING {RUN_COLS}"
+                           created_by, room_id, resume_from_branch)
+         VALUES ($1, $2, $3, $4, 'queued', $5, 'worktree', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(new.task)
@@ -822,12 +832,116 @@ pub async fn create_fork(pool: &PgPool, org: Uuid, run_id: Uuid, new: NewFork<'_
     .bind(new.effort)
     .bind(new.created_by)
     .bind(target.room_id)
+    .bind(&resume_from_branch)
     .fetch_one(&mut *tx)
     .await?;
     let run = row_to_run(&row);
     let ev = append_event_locked(&mut tx, id, "status", &json!({"status": "queued", "task": new.task, "forked_from": run_id})).await?;
+    let handoff_ev = match handoff {
+        Some((from, commit)) => Some(queue_handoff(&mut tx, org, &target, &latest, latest_session.as_deref(), &from, &commit, &run).await?),
+        None => None,
+    };
     tx.commit().await?;
-    Ok(ForkOutcome::Created(run, ev))
+    Ok(ForkOutcome::Created(run, ev, handoff_ev))
+}
+
+/// A fork being claimed that waited for its files: keep its branch only if its
+/// handoff pushed them. A handoff that never started is called off (its machine
+/// is gone), and the fork is told why the files are missing.
+async fn settle_handoff(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, org: Uuid, fork: &mut Run) -> sqlx::Result<Vec<RunEvent>> {
+    let handoff = sqlx::query("SELECT id, status, result FROM runs WHERE kind = 'handoff' AND context = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 1")
+        .bind(fork.id.to_string())
+        .bind(org)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let Some(h) = handoff else { return Ok(vec![]) };
+    let status: String = h.get("status");
+    if status == "succeeded" {
+        return Ok(vec![]);
+    }
+    let mut events = Vec::new();
+    let handoff_id: Uuid = h.get("id");
+    let why = if status == "queued" || status == "running" {
+        let reason = "the fork stopped waiting for these files and started without them";
+        // Only one that hasn't started: a running push may still finish, harmlessly.
+        let called_off = sqlx::query("UPDATE runs SET status = 'failed', finished_at = now(), result = $2 WHERE id = $1 AND status = 'queued'")
+            .bind(handoff_id)
+            .bind(json!({"error": reason}))
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+        if called_off > 0 {
+            events.push(append_event_locked(tx, handoff_id, "status", &json!({"status": "failed", "reason": reason})).await?);
+        }
+        "the machine with them didn't send them in time".to_string()
+    } else {
+        let err = h.get::<Option<Value>, _>("result").and_then(|r| r.get("error").and_then(Value::as_str).map(str::to_string));
+        err.unwrap_or_else(|| format!("sending them {status}"))
+    };
+    sqlx::query("UPDATE runs SET resume_from_branch = NULL WHERE id = $1").bind(fork.id).execute(&mut **tx).await?;
+    fork.resume_from_branch = None;
+    let message = format!("The files from the thread this was forked from didn't come along: {why}. It starts from this machine's copy of the repo.");
+    events.push(append_event_locked(tx, fork.id, "error", &json!({"message": message})).await?);
+    Ok(events)
+}
+
+/// How long a fork waits for its files before it starts without them.
+pub const HANDOFF_WAIT_SECS: i64 = 600;
+
+/// Whether `worker` is online and can push a thread's files for a fork.
+async fn can_hand_off(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<bool> {
+    let row = sqlx::query(
+        "SELECT (last_heartbeat_at > now() - interval '45 seconds') AS online, capabilities FROM workers WHERE id = $1 AND org_id = $2",
+    )
+    .bind(worker)
+    .bind(org)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some_and(|r| {
+        let caps: Option<Capabilities> = serde_json::from_value(r.get::<Value, _>("capabilities")).ok();
+        r.get::<bool, _>("online") && caps.is_some_and(|c| c.can_hand_off_files)
+    }))
+}
+
+/// Queue a `handoff` run in `target`'s thread, on `worker` (which has its files):
+/// it pushes the snapshot `commit` to `fork`'s handoff branch on `origin`. It
+/// shows in that thread, since it sends the thread's files somewhere.
+#[allow(clippy::too_many_arguments)]
+async fn queue_handoff(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org: Uuid,
+    target: &Run,
+    latest: &Run,
+    session: Option<&str>,
+    worker: &str,
+    commit: &str,
+    fork: &Run,
+) -> sqlx::Result<RunEvent> {
+    let root_id = target.parent_id.unwrap_or(target.id);
+    let task = format!("Send the files to a fork: {}", fork.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(72).collect::<String>());
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO runs (id, task, model, repo, status, parent_id, session_id, pinned_worker_id, permission_mode, isolation, agent, kind, fork_commit, context,
+                           org_id, created_by, room_id)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 'worktree', $9, 'handoff', $10, $11, $12, $13, $14)",
+    )
+    .bind(id)
+    .bind(&task)
+    .bind(&latest.model)
+    .bind(&target.repo)
+    .bind(root_id)
+    .bind(session)
+    .bind(worker)
+    .bind(&latest.permission_mode)
+    .bind(latest.agent.as_str())
+    .bind(commit)
+    .bind(fork.id.to_string())
+    .bind(org)
+    .bind(fork.created_by)
+    .bind(target.room_id)
+    .execute(&mut **tx)
+    .await?;
+    append_event_locked(tx, id, "status", &json!({"status": "queued", "task": task, "fork": fork.id})).await
 }
 
 /// The user a machine belongs to (None: no such machine, or one connected with a static token).
@@ -1195,6 +1309,7 @@ const LEAST_BUSY_GRACE_SECS: i64 = 10;
 /// failed on the way because there was no session left to continue.
 pub struct Claimed {
     pub run: Option<(Run, RunEvent)>,
+    /// Events to publish besides the claim: messages failed on the way, a handoff given up on.
     pub failed: Vec<RunEvent>,
 }
 
@@ -1274,6 +1389,9 @@ pub async fn claim_run(
                   AND r.agent = ANY($4)
                   AND r.kind = ANY($8)
                   AND (r.forked_from IS NULL OR 'fork' = ANY($8))
+                  AND (r.forked_from IS NULL OR r.resume_from_branch IS NULL OR NOT EXISTS (
+                        SELECT 1 FROM runs h WHERE h.kind = 'handoff' AND h.context = r.id::text AND h.org_id = $9
+                           AND h.status IN ('queued', 'running') AND h.created_at > now() - make_interval(secs => $10)))
                   AND NOT EXISTS (SELECT 1 FROM worker_limits l WHERE l.org_id = $9 AND l.worker_id = $1 AND l.agent = r.agent AND l.until > now())
                   AND ($5::int IS NULL OR r.pinned_worker_id IS NOT NULL
                        OR (r.parent_id IS NOT NULL AND r.moved_from IS NULL)
@@ -1293,6 +1411,7 @@ pub async fn claim_run(
         .bind(EXCLUSION_GRACE_SECS as f64)
         .bind(kinds)
         .bind(org)
+        .bind(HANDOFF_WAIT_SECS as f64)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
@@ -1358,6 +1477,9 @@ pub async fn claim_run(
                 failed.push(ev);
                 continue;
             }
+        }
+        if run.forked_from.is_some() && run.resume_from_branch.is_some() {
+            failed.extend(settle_handoff(&mut tx, org, &mut run).await?);
         }
         // One slot fewer free here until the next heartbeat or claim says otherwise.
         sqlx::query("UPDATE workers SET slots_active = slots_active + 1 WHERE id = $1 AND org_id = $2 AND slots_active IS NOT NULL")

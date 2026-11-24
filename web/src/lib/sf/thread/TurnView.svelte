@@ -53,6 +53,10 @@
 	const run = $derived(turn.run);
 	const isRestore = $derived(run.kind === 'restore');
 	const isPr = $derived(run.kind === 'pr');
+	/** Sending this thread's files to a fork on another machine (`context` is the fork). */
+	const isHandoff = $derived(run.kind === 'handoff');
+	/** The fork's first message, from the handoff's task text ("Send the files to a fork: …"). */
+	const handoffFork = $derived(run.task.replace(/^Send the files to a fork:\s*/, '') || 'Open the fork');
 	/** Merging the thread's branch into its room's branch. */
 	const isIntegrate = $derived(run.kind === 'integrate');
 	const integrated = $derived(run.result?.integrated as { branch?: string; commit?: string; files?: string[] } | undefined);
@@ -143,6 +147,12 @@
 				<p class="text-center">Ask the agent to merge <span class="font-mono">origin/{run.context ?? 'the room branch'}</span> into this branch and resolve them, then add it to the room again.</p>
 			{/if}
 		</div>
+	{:else if isHandoff}
+		<p class="flex flex-wrap items-center justify-center gap-x-1.5 text-xs {run.status === 'failed' ? 'text-err-ink' : 'text-muted-foreground'}">
+			<GitFork class="size-3" />
+			<span>{run.status === 'succeeded' ? 'Sent the files to a fork' : run.status === 'failed' || run.status === 'stopped' ? "Didn't send the files to a fork" : 'Sending the files to a fork'}{run.worker_id ? ` from ${fleet.workerName(run.worker_id)}` : ''}</span>
+			{#if run.context}<a href="#/runs/{run.context}" class="max-w-[18rem] truncate text-foreground/80 underline decoration-dotted underline-offset-2 hover:text-foreground">{handoffFork}</a>{/if}
+		</p>
 	{:else if isRestore || isPr}
 		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">{#if isPr}<GitPullRequest class="size-3" />{:else}<RotateCcw class="size-3" />{/if}{run.task}</p>
 	{:else if !first}
@@ -172,7 +182,7 @@
 					<button type="button" class="rounded-full px-2 py-1 whitespace-nowrap hover:bg-accent hover:text-foreground" onclick={oncancel}>Cancel</button>
 				{/if}
 			</p>
-		{:else if !waiting && !isRestore && !isPr && !isIntegrate && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
+		{:else if !waiting && !isRestore && !isPr && !isIntegrate && !isHandoff && ((turn.activity === 'queued' && !turn.machine) || (turn.machine && (relocated || switched)))}
 			<Collapsible.Root class="group/setup">
 				<Collapsible.Trigger class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-left text-xs text-muted-foreground hover:text-foreground">
 					{#if turn.activity === 'queued' && !turn.machine}
@@ -244,7 +254,7 @@
 			</p>
 		{/if}
 
-		{#if finished && !live && !isPr && !isIntegrate}
+		{#if finished && !live && !isPr && !isIntegrate && !isHandoff}
 			<div class="flex justify-end gap-1">
 				{#if onrestore && turn.snapshot}
 					<button

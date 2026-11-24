@@ -38,7 +38,7 @@ export interface Run {
 	files?: { id: string; name: string; media_type: string; bytes: number }[];
 	/** `restore` runs put the thread's worktree back to a snapshot instead of running the agent;
 	 * `pr` runs push the thread's branch and open a pull request. */
-	kind: 'agent' | 'restore' | 'pr' | 'integrate';
+	kind: 'agent' | 'restore' | 'pr' | 'integrate' | 'handoff';
 	restore_to: string | null;
 	/** For a fork: the message (run) of the thread it continues from. */
 	forked_from: string | null;
@@ -105,6 +105,8 @@ export interface SystemStats {
 export interface Capabilities {
 	/** This worker's build answers Clean up. */
 	can_clean_worktrees?: boolean;
+	/** This worker's build sends a thread's files to a fork on another machine. */
+	can_hand_off_files?: boolean;
 	agents: {
 		claude?: { version: string; signed_in: boolean; sign_in_error?: string; models?: Record<string, string> };
 		codex?: { version: string; signed_in?: boolean; models?: string[] };

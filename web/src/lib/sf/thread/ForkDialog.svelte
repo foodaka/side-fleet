@@ -51,8 +51,13 @@
 	const chosen = $derived(choices.find((w) => w.id === machine));
 	/** Where the fork can run: the chosen machine, else the one with the files, else any with the repo. */
 	const machines = $derived(chosen ? [chosen] : filesOn ? choices.filter((w) => w.id === filesOn) : choices);
-	/** It starts from the message's files only on the machine that has them. */
+	/** It starts from the message's files on the machine that has them. */
 	const withFiles = $derived(!!filesOn && (!chosen || chosen.id === filesOn));
+	const filesMachine = $derived(filesOn ? fleet.mine.find((w) => w.id === filesOn) : undefined);
+	/** On another machine, the one with the files sends them first, if it is online and new enough. */
+	const elsewhere = $derived(!!filesOn && !!chosen && chosen.id !== filesOn);
+	const canSend = $derived(!!filesMachine?.online && !!filesMachine.capabilities.can_hand_off_files);
+	const sending = $derived(elsewhere && canSend);
 	const where = $derived(chosen?.display_name ?? (filesOn ? filesOn : `a machine with ${repoLabel(run.repo)}`));
 	const models = $derived(machineModels(machines, agent));
 	const can = $derived(!!task.trim() && modelValid(agent, model) && machines.some((w) => hasAgent(w, agent)) && !busy);
@@ -85,7 +90,7 @@
 				{#if theirs}
 					A new thread of yours, on one of your machines, that knows {fleet.login(run.created_by) ? `@${fleet.login(run.created_by)}'s` : 'the'} conversation up to this message. It starts from {repoLabel(run.repo)} as it is on your machine, without their changes. Their thread stays as it is.
 				{:else}
-					A new thread that knows the conversation up to this message{withFiles ? ', and starts with the files as they were after it, on its own branch' : ''}. This thread stays as it is.
+					A new thread that knows the conversation up to this message{withFiles || sending ? ', and starts with the files as they were after it, on its own branch' : ''}. This thread stays as it is.
 				{/if}
 			</Dialog.Description>
 		</Dialog.Header>
@@ -113,7 +118,7 @@
 							<Select.Item value={w.id === filesOn ? DEFAULT : w.id} label={w.display_name}>
 								<span class="flex flex-col">
 									<span>{w.display_name}{#if !w.online}<span class="ml-1.5 text-xs text-muted-foreground">offline</span>{/if}</span>
-									<span class="text-xs text-muted-foreground">{w.id === filesOn ? 'Starts with the files as they were after this message' : filesOn ? `Starts from ${repoLabel(run.repo)} as it is there, without this thread's files` : `${w.capabilities.slots ? `${w.capabilities.slots.active} of ${w.capabilities.slots.parallel} slots busy` : 'Has the repo'}`}</span>
+									<span class="text-xs text-muted-foreground">{w.id === filesOn ? 'Starts with the files as they were after this message' : canSend ? `Gets the files from ${filesMachine?.display_name ?? filesOn} first` : filesOn ? `Starts from ${repoLabel(run.repo)} as it is there, without this thread's files` : `${w.capabilities.slots ? `${w.capabilities.slots.active} of ${w.capabilities.slots.parallel} slots busy` : 'Has the repo'}`}</span>
 								</span>
 							</Select.Item>
 						{/each}
@@ -143,6 +148,11 @@
 						<span class="text-err-ink">{agentName(agent)} isn't on {where}.</span>
 					{:else}
 						Runs with {agentName(agent)} on {where}{offline ? ', once it is back online' : ''}.
+						{#if sending}
+							{filesMachine?.display_name ?? filesOn} sends it the files first, through a temporary branch on origin. Nothing that looks like a secret is sent.
+						{:else if elsewhere}
+							It starts without this thread's files: {filesMachine?.display_name ?? filesOn} {filesMachine?.online ? 'needs an update to send them' : 'is offline'}.
+						{/if}
 					{/if}
 				</p>
 				<Button type="submit" size="sm" class="rounded-full" disabled={!can}><GitFork class="size-3.5" />{busy ? 'Forking…' : 'Fork'}</Button>

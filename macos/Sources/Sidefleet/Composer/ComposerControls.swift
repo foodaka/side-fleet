@@ -301,8 +301,9 @@ struct StartLaterPicker: View {
         } label: {
             HStack(spacing: 6) {
                 if until != nil {
-                    Image(systemName: "moon").font(.system(size: 11))
-                    Text("Night shift").font(SF.font(small ? 12 : 13))
+                    // Just the moon: the controls row is nearly full, and words here would stack it.
+                    // The hint under the box says when it starts and stops.
+                    Image(systemName: "moon.fill").font(.system(size: 11))
                 } else {
                 Image(systemName: "alarm").font(.system(size: 11))
                 if let value {
@@ -313,12 +314,12 @@ struct StartLaterPicker: View {
                 }
             }
             .foregroundStyle(value != nil || until != nil ? SF.ink : open ? SF.ink : SF.muted)
-            .padding(.horizontal, value == nil && until == nil ? 0 : 10)
+            .padding(.horizontal, value == nil || until != nil ? 0 : 10)
             .frame(minWidth: small ? 28 : 32, minHeight: small ? 28 : 32)
-            .hoverBackground(active: open, cornerRadius: small ? 14 : 16)
+            .hoverBackground(active: open || until != nil, cornerRadius: small ? 14 : 16)
         }
         .buttonStyle(.plain)
-        .help("Start later")
+        .help(until.map { end in "Night shift, until \(Format.startTime(end, now: Date()))" } ?? "Start later")
         .accessibilityLabel(until != nil ? "On the night shift" : value == nil ? "Start later" : "Starts \(Format.startTime(value!, now: Date()))")
         .popover(isPresented: $open, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {

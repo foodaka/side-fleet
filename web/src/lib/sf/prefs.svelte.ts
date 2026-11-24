@@ -4,6 +4,7 @@
 
 import { api } from './api';
 import { cleanPresets, DEFAULT_SNOOZE_PRESETS, type SnoozePreset } from './snooze';
+import { DEFAULT_NIGHT, validTime } from './night';
 
 const KEY = 'sidefleet_prefs';
 
@@ -29,6 +30,9 @@ interface Stored {
 	workspace: Workspace;
 	/** The choices in a task's Snooze menu. */
 	snoozePresets: SnoozePreset[];
+	/** The night shift's hours, `HH:MM` in this browser's time zone (see `night.ts`). */
+	nightStart: string;
+	nightEnd: string;
 }
 
 const DEFAULTS: Stored = {
@@ -40,12 +44,14 @@ const DEFAULTS: Stored = {
 	permission: 'bypassPermissions',
 	roomPermission: 'acceptEdits',
 	workspace: 'worktree',
-	snoozePresets: DEFAULT_SNOOZE_PRESETS
+	snoozePresets: DEFAULT_SNOOZE_PRESETS,
+	nightStart: DEFAULT_NIGHT.start,
+	nightEnd: DEFAULT_NIGHT.end
 };
 const MODES = ['acceptEdits', 'bypassPermissions', 'plan', 'ask'];
 
 /** What follows you between browsers. How the Changes panel looks (and the theme) suits each screen, so it stays put. */
-const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop', 'snoozePresets'] as const;
+const SYNCED = ['permission', 'roomPermission', 'workspace', 'sendKey', 'confirmStop', 'snoozePresets', 'nightStart', 'nightEnd'] as const;
 const synced = (s: Partial<Stored>) =>
 	Object.fromEntries(SYNCED.filter((k) => s[k] !== undefined).map((k) => [k, s[k]])) as Partial<Stored>;
 const savedHere = () => { try { return localStorage.getItem(KEY) !== null; } catch { return false; } };
@@ -77,6 +83,8 @@ class Prefs {
 	roomPermission = $state(DEFAULTS.roomPermission);
 	workspace = $state<Workspace>(DEFAULTS.workspace);
 	snoozePresets = $state<SnoozePreset[]>(DEFAULTS.snoozePresets);
+	nightStart = $state(DEFAULTS.nightStart);
+	nightEnd = $state(DEFAULTS.nightEnd);
 
 	/** Signed in: the synced ones are kept with your account too. */
 	account = $state(false);
@@ -97,6 +105,8 @@ class Prefs {
 		this.roomPermission = MODES.includes(s.roomPermission) ? s.roomPermission : DEFAULTS.roomPermission;
 		this.workspace = s.workspace === 'checkout' ? 'checkout' : 'worktree';
 		this.snoozePresets = cleanPresets(s.snoozePresets);
+		this.nightStart = validTime(s.nightStart) ? s.nightStart : DEFAULTS.nightStart;
+		this.nightEnd = validTime(s.nightEnd) ? s.nightEnd : DEFAULTS.nightEnd;
 	}
 
 	#stored(): Stored {
@@ -109,7 +119,9 @@ class Prefs {
 			permission: this.permission,
 			roomPermission: this.roomPermission,
 			workspace: this.workspace,
-			snoozePresets: this.snoozePresets
+			snoozePresets: this.snoozePresets,
+			nightStart: this.nightStart,
+			nightEnd: this.nightEnd
 		};
 	}
 

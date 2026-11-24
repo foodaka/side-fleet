@@ -118,6 +118,11 @@ impl Default for Inbox {
 }
 
 impl Inbox {
+    /// The client pushes go out with.
+    pub fn http(&self) -> reqwest::Client {
+        self.inner.http.clone()
+    }
+
     fn subscribe(&self, org: Uuid) -> broadcast::Receiver<()> {
         self.inner.orgs.lock().unwrap().entry(org).or_insert_with(|| broadcast::channel(16).0).subscribe()
     }
@@ -392,6 +397,12 @@ pub async fn touch(state: &AppState, org: Uuid, root: Uuid) -> sqlx::Result<()> 
             Err(e) => return tracing::warn!(error = %e, "push recheck failed"),
         };
         let Some(item) = now.filter(|i| (i.reason, i.since) == key && !i.snoozed_now(Utc::now())) else { return };
+        // A night-shift task: the night's summary covers it, in the morning.
+        match crate::night::holds_push(&state.pool, root).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => return tracing::warn!(error = %e, "push night check failed"),
+        }
         if !state.inbox.mark_pushed(root, key) {
             return;
         }

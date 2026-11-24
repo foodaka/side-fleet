@@ -58,6 +58,8 @@
 	let failover = $state(false);
 	// Start later (ISO time); '' starts now. Not remembered: each task picks its own.
 	let startAt = $state('');
+	/** On the night shift: when it stops if still going. */
+	let stopAt = $state('');
 	let busy = $state(false);
 	let box: HTMLTextAreaElement | undefined = $state();
 	let picker: HTMLInputElement | undefined = $state();
@@ -151,10 +153,11 @@
 		try {
 			const r = await api<{ id: string }>('/v1/runs', {
 				method: 'POST',
-				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined })
+				body: JSON.stringify({ task: task.trim(), agent, model, effort: effort || undefined, repo, permission_mode: effectivePerm, isolation: iso, worker_id: pinned?.id, failover: iso === 'worktree' && failover, ...(await attachments.payload()), start_at: startAt || undefined, stop_at: stopAt || undefined })
 			});
 			task = '';
 			startAt = '';
+			stopAt = '';
 			attachments.clear();
 			void fleet.refresh();
 			await goto('#/runs/' + r.id);
@@ -294,7 +297,7 @@
 						oniso={(v) => (iso = v)}
 						bind:failover
 					/>
-					<StartAtPicker bind:value={startAt} />
+					<StartAtPicker bind:value={startAt} bind:until={stopAt} />
 					</div>
 					<span class="flex shrink-0 items-center gap-2">
 						{#if task.length > 2000}<span class="tnum text-xs text-faint">{task.length.toLocaleString()} characters</span>{/if}
@@ -320,7 +323,8 @@
 					{:else}
 						Runs with {agentName(agent)} on <span class="text-foreground">{target.display_name}</span>{#if warning}, <span class="text-err-ink">{warning}</span>{/if}
 					{/if}{effectivePerm === 'bypassPermissions' ? ' with full access' : ''}{iso === 'worktree' ? ', on a new branch so your checkout stays untouched.' : ', directly in the checkout.'}
-					{#if startAt}<br />Starts <span class="text-foreground">{startTime(startAt, fleet.now)}</span>; until then no machine picks it up, and you can start it early or cancel it from its page.{/if}
+					{#if stopAt}<br />On the night shift: starts <span class="text-foreground">{startAt ? startTime(startAt, fleet.now) : 'now'}</span> on a machine with nothing else running, and stops at <span class="text-foreground">{startTime(stopAt, fleet.now)}</span> if it's still going. One notification sums up the night.
+					{:else if startAt}<br />Starts <span class="text-foreground">{startTime(startAt, fleet.now)}</span>; until then no machine picks it up, and you can start it early or cancel it from its page.{/if}
 					{#if iso === 'worktree' && failover}<br />If that machine drops, the task moves to another one; its branch is pushed to origin as it goes.{/if}
 				{/if}
 			</p>

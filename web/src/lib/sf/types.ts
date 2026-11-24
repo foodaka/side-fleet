@@ -59,6 +59,8 @@ export interface Run {
 	context?: string | null;
 	/** A task scheduled to start later: no machine picks it up before this time. */
 	start_at?: string | null;
+	/** A night-shift task: only a machine with nothing else running takes it, and it is stopped at this time if still going. */
+	stop_at?: string | null;
 }
 
 export interface PullRequest {

@@ -46,6 +46,12 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Start later**: pick "Tonight", "Tomorrow morning" or any date and time in the composer, and
   the task waits until then: no machine picks it up early. The sidebar lists it as scheduled, and
   its page has Start now and Cancel. Chat apps can schedule one too.
+- **Night shift**: pick "Night shift" in the same menu and the task runs during your night hours
+  (01:00–07:00 by default; change them in Settings). Only a machine with nothing else running
+  takes it, so it never competes with your own work. One still going at the end is stopped (its
+  branch is kept, and a reply carries on), one no machine took moves to the next night, and
+  instead of a notification per task in the small hours you get one in the morning: "Night shift:
+  6 tasks in web · 4 ready to merge · 1 failed its checks · 1 ran out of time".
 - **Restore**: every message's files are snapshotted before and after it, so "Restore to before"
   puts the worktree back to how it was before any message. The conversation carries on, and a
   restore can itself be undone.

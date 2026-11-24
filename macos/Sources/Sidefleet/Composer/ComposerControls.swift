@@ -275,12 +275,24 @@ private struct OptionSection: View {
     }
 }
 
-/// Start a task later: a few presets and a date-and-time picker.
+/// Start a task later: the night shift, a few presets and a date-and-time picker. "Night shift" also
+/// sets `until`, the end of the night (see `NightShift`).
 struct StartLaterPicker: View {
     @Binding var value: Date?
+    @Binding var until: Date?
     var small = false
+    @Environment(Stores.self) private var stores
     @State private var open = false
     @State private var picked = Date()
+
+    private var night: (start: Date, end: Date, open: Bool) {
+        NightShift.next(start: stores.prefs.nightStart, end: stores.prefs.nightEnd)
+    }
+
+    private static func hm(_ d: Date) -> String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: d)
+        return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+    }
 
     var body: some View {
         Button {
@@ -288,28 +300,56 @@ struct StartLaterPicker: View {
             open.toggle()
         } label: {
             HStack(spacing: 6) {
+                if until != nil {
+                    // Just the moon: the controls row is nearly full, and words here would stack it.
+                    // The hint under the box says when it starts and stops.
+                    Image(systemName: "moon.fill").font(.system(size: 11))
+                } else {
                 Image(systemName: "alarm").font(.system(size: 11))
                 if let value {
                     LiveText(every: 30) { now in
                         Text(Format.startTime(value, now: now)).font(SF.font(small ? 12 : 13)).monospacedDigit()
                     }
                 }
+                }
             }
-            .foregroundStyle(value != nil ? SF.ink : open ? SF.ink : SF.muted)
-            .padding(.horizontal, value == nil ? 0 : 10)
+            .foregroundStyle(value != nil || until != nil ? SF.ink : open ? SF.ink : SF.muted)
+            .padding(.horizontal, value == nil || until != nil ? 0 : 10)
             .frame(minWidth: small ? 28 : 32, minHeight: small ? 28 : 32)
-            .hoverBackground(active: open, cornerRadius: small ? 14 : 16)
+            .hoverBackground(active: open || until != nil, cornerRadius: small ? 14 : 16)
         }
         .buttonStyle(.plain)
-        .help("Start later")
-        .accessibilityLabel(value == nil ? "Start later" : "Starts \(Format.startTime(value!, now: Date()))")
+        .help(until.map { end in "Night shift, until \(Format.startTime(end, now: Date()))" } ?? "Start later")
+        .accessibilityLabel(until != nil ? "On the night shift" : value == nil ? "Start later" : "Starts \(Format.startTime(value!, now: Date()))")
         .popover(isPresented: $open, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Start later").font(SF.font(11, .medium)).foregroundStyle(SF.faint).padding(.horizontal, 8)
+                Button {
+                    let n = night
+                    value = n.open ? nil : n.start
+                    until = n.end
+                    open = false
+                } label: {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Night shift").font(SF.font(13))
+                            Text("Idle machines only; one summary in the morning").font(SF.font(11.5)).foregroundStyle(SF.muted)
+                        }
+                        Spacer()
+                        let n = night
+                        Text("\(n.open ? "now" : Format.startTime(n.start, now: Date()))–\(Self.hm(n.end))").font(SF.font(12)).monospacedDigit().foregroundStyle(SF.muted)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .hoverBackground()
+                }
+                .buttonStyle(.plain)
+                Divider()
                 VStack(spacing: 1) {
                     ForEach(NewTaskModel.startPresets(now: Date()), id: \.label) { preset in
                         Button {
                             value = preset.at
+                            until = nil
                             open = false
                         } label: {
                             HStack {
@@ -331,14 +371,16 @@ struct StartLaterPicker: View {
                         .labelsHidden()
                     Button("Set") {
                         value = picked
+                        until = nil
                         open = false
                     }
                     .buttonStyle(SecondaryButtonStyle(height: 24))
                 }
                 .padding(.horizontal, 8)
-                if value != nil {
+                if value != nil || until != nil {
                     Button {
                         value = nil
+                        until = nil
                         open = false
                     } label: {
                         Label("Start now instead", systemImage: "xmark").font(SF.font(13)).padding(.horizontal, 8).padding(.vertical, 5)

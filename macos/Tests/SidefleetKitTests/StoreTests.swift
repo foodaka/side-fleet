@@ -47,7 +47,7 @@ final class StoreTests: XCTestCase {
         await fleet.refresh()
         let s = SidebarSections(runs: fleet.runs, userID: nil, teamScope: true, filtering: false, now: Date())
         XCTAssertEqual(s.active.first?.id, "demo-rate", "waiting on you comes first")
-        XCTAssertEqual(s.active.map(\.id), ["demo-rate", "demo-guide", "demo-audit"], "then running, then scheduled")
+        XCTAssertEqual(s.active.map(\.id), ["demo-rate", "demo-guide", "demo-night", "demo-audit"], "then running, then scheduled, soonest first")
         XCTAssertEqual(s.snoozed.map(\.id), ["demo-review"])
         XCTAssertEqual(s.pinned.map(\.id), ["demo-images"], "pinned sits apart, at the top")
         XCTAssertFalse(s.groups.flatMap(\.runs).contains { $0.id == "demo-images" })
@@ -201,6 +201,33 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(model.modelOK)
     }
 
+    func testAComposerPutsATaskOnTheNightShift() async throws {
+        let (api, fleet, prefs, d) = world()
+        await fleet.refresh()
+        let model = NewTaskModel(fleet: fleet, prefs: prefs, defaults: d)
+        model.syncSelection()
+        model.pick(repo: "github.com/acme/storefront")
+        model.task = "Fix the flaky search tests"
+        let evening = Calendar.current.date(bySettingHour: 21, minute: 0, second: 0, of: Date())!
+        model.pickNight(start: "01:00", end: "07:00", now: evening)
+        XCTAssertNotNil(model.body["start_at"]?.string)
+        XCTAssertNotNil(model.body["stop_at"]?.string)
+        XCTAssertEqual(model.explanation(now: evening).last?.map(\.text).joined(), "On the night shift: starts \(Format.startTime(model.startAt!, now: evening)) on a machine with nothing else running, and stops at \(Format.startTime(model.stopAt!, now: evening)) if it's still going. One notification sums up the night.")
+        // Inside the night: it can start now, and only the end applies.
+        let small = Calendar.current.date(bySettingHour: 3, minute: 0, second: 0, of: Date())!
+        model.pickNight(start: "01:00", end: "07:00", now: small)
+        XCTAssertNil(model.startAt)
+        XCTAssertNil(model.body["start_at"])
+        // Sent now, so the night it goes on is still ahead of the demo's clock.
+        model.pickNight(start: "01:00", end: "07:00")
+        let id = await model.run()
+        XCTAssertNotNil(id)
+        XCTAssertNil(model.stopAt, "the next task starts without it")
+        let run = try await api.thread(id!)[0]
+        XCTAssertNotNil(run.stopAt)
+        XCTAssertTrue(run.isScheduled(now: Date()), "the demo has no idle machine, so it waits")
+    }
+
     func testForkModelExplains() async throws {
         let (api, fleet, prefs, _) = world()
         await fleet.refresh()
@@ -294,7 +321,10 @@ final class StoreTests: XCTestCase {
         prefs.set(\.permission, "ask")
         XCTAssertEqual(prefs.sendKeys(.reply), "⌘↵")
         XCTAssertEqual(prefs.permission(for: .codex), "acceptEdits")
+        prefs.set(\.nightStart, "22:30")
         let again = PrefsStore(defaults: d)
+        XCTAssertEqual(again.nightStart, "22:30")
+        XCTAssertEqual(again.nightEnd, NightShift.defaultEnd)
         XCTAssertEqual(again.sendKey, .modEnter)
         XCTAssertEqual(again.diffView, .split)
         XCTAssertEqual(again.permission, "ask")

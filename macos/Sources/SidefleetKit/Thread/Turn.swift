@@ -315,7 +315,10 @@ public struct Turn: Sendable, Hashable, Identifiable {
             }
             if status == .queued {
                 activity = "queued"
-                if p["started_early"]?.bool == true { run.startAt = nil }
+                if p["started_early"]?.bool == true {
+                    run.startAt = nil
+                    run.stopAt = nil
+                }
                 if p["moved_from"]?.string != nil { movedFromMachine = p["lost_worker"]?.string }
             } else if status == .running {
                 run.startedAt = run.startedAt ?? ev.at

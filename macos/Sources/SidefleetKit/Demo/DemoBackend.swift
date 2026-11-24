@@ -244,6 +244,7 @@ private actor DemoWorld {
             return try encode(.object(run.json))
         case ("POST", "start-now"):
             runs[id]?.json["start_at"] = .null
+            runs[id]?.json["stop_at"] = .null
             append(id, "status", ["status": "queued", "started_early": true], now: now)
             play(id, script: DemoData.followUpScript(machine: "mac-mini"))
             return try encode(.object(runs[id]?.json ?? run.json))
@@ -321,6 +322,7 @@ private actor DemoWorld {
         json["snoozed_until"] = .null
         json["pinned_at"] = .null
         json["start_at"] = .null
+        json["stop_at"] = .null
         json["kind"] = "agent"
         json["images"] = .array([])
         if let v = body?["agent"] { json["agent"] = v }
@@ -358,6 +360,12 @@ private actor DemoWorld {
         if let v = body?["worker_id"] { json["pinned_worker_id"] = v }
         let startAt = body?["start_at"]?.string.flatMap(Timestamp.parse)
         if let startAt, startAt > now { json["start_at"] = .string(Timestamp.format(startAt)) }
+        // The night shift. Already night: no machine is idle in the demo, so it waits like a scheduled one.
+        let night = body?["stop_at"]?.string.flatMap(Timestamp.parse)
+        if let night, night > now {
+            json["stop_at"] = .string(Timestamp.format(night))
+            if json["start_at"]?.string == nil { json["start_at"] = .string(Timestamp.format(now.addingTimeInterval(60))) }
+        }
         let worker = body?["worker_id"]?.string ?? "mac-mini"
         let run = DemoRun(json: json)
         runs[run.id] = run

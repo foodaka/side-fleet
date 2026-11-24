@@ -426,3 +426,59 @@ final class SVGPathTests: XCTestCase {
         XCTAssertEqual(SVGPath.parse(BrandPaths.strands[0].path).first, .move(6, 16))
     }
 }
+
+final class NightShiftTests: XCTestCase {
+    private let cal: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "Europe/Amsterdam")!
+        return c
+    }()
+
+    private func at(_ s: String) -> Date {
+        let f = DateFormatter()
+        f.calendar = cal
+        f.timeZone = cal.timeZone
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return f.date(from: s)!
+    }
+
+    private func check(_ start: String, _ end: String, now: String, open: Bool, from: String, to: String, file: StaticString = #filePath, line: UInt = #line) {
+        let n = NightShift.next(start: start, end: end, now: at(now), calendar: cal)
+        XCTAssertEqual(n.open, open, file: file, line: line)
+        XCTAssertEqual(n.start, at(from), file: file, line: line)
+        XCTAssertEqual(n.end, at(to), file: file, line: line)
+    }
+
+    /// The same cases as web/src/lib/sf/night.ts was checked with.
+    func testTheNextNight() {
+        check("01:00", "07:00", now: "2026-11-24T21:00", open: false, from: "2026-11-25T01:00", to: "2026-11-25T07:00")
+        check("01:00", "07:00", now: "2026-11-25T00:30", open: false, from: "2026-11-25T01:00", to: "2026-11-25T07:00")
+        check("01:00", "07:00", now: "2026-11-25T03:00", open: true, from: "2026-11-25T03:00", to: "2026-11-25T07:00")
+        check("01:00", "07:00", now: "2026-11-25T08:00", open: false, from: "2026-11-26T01:00", to: "2026-11-26T07:00")
+        check("22:00", "06:00", now: "2026-11-24T12:00", open: false, from: "2026-11-24T22:00", to: "2026-11-25T06:00")
+        check("22:00", "06:00", now: "2026-11-24T23:00", open: true, from: "2026-11-24T23:00", to: "2026-11-25T06:00")
+        check("22:00", "06:00", now: "2026-11-25T03:00", open: true, from: "2026-11-25T03:00", to: "2026-11-25T06:00")
+        // A bad time falls back to the defaults.
+        check("25:00", "x", now: "2026-11-24T21:00", open: false, from: "2026-11-25T01:00", to: "2026-11-25T07:00")
+    }
+
+    func testHowLongANightIs() {
+        XCTAssertEqual(NightShift.minutes(start: "01:00", end: "07:00"), 360)
+        XCTAssertEqual(NightShift.minutes(start: "22:00", end: "06:00"), 480)
+        XCTAssertEqual(NightShift.minutes(start: "07:00", end: "07:00"), 1440, "the same start and end is a whole day")
+        XCTAssertTrue(NightShift.isValid("23:59"))
+        XCTAssertFalse(NightShift.isValid("24:00"))
+        XCTAssertFalse(NightShift.isValid("7:00"))
+    }
+
+    func testARunOnTheNightShift() throws {
+        let run = try JSONDecoder().decode(Run.self, from: JSONEncoder().encode(JSONValue.object([
+            "id": "r", "status": "stopped", "created_at": "2026-11-25T00:00:00Z", "stop_at": "2026-11-25T06:00:00Z", "finished_at": "2026-11-25T06:00:04Z",
+        ])))
+        XCTAssertNotNil(run.stopAt)
+        XCTAssertTrue(run.nightEnded)
+        var t = Turn(run: run)
+        t.apply(RunEvent(runID: "r", seq: 1, kind: "status", payload: ["status": "queued", "started_early": true], at: Date()))
+        XCTAssertNil(t.run.stopAt, "Start now takes it off the night shift")
+    }
+}

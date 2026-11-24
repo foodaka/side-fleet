@@ -13,6 +13,7 @@
 	import * as Select from '#lib/components/ui/select';
 	import Switch from '#lib/sf/ui/Switch.svelte';
 	import SnoozePresets from '#lib/sf/ui/SnoozePresets.svelte';
+	import { validTime } from '#lib/sf/night';
 	import { PERMISSIONS, WORKSPACES } from '#lib/sf/format';
 	import { isMac, prefs, type SendKey, type Workspace } from '#lib/sf/prefs.svelte';
 
@@ -40,6 +41,24 @@
 		tryText = '';
 		clearTimeout(sentTimer);
 		sentTimer = setTimeout(() => (sent = null), 1600);
+	}
+
+	// The night shift's hours. The control plane takes a night of at most 16 hours.
+	let nightError = $state('');
+	function setNight(which: 'nightStart' | 'nightEnd', input: HTMLInputElement) {
+		const v = input.value;
+		// Refused: the field goes back to the hours in use.
+		const undo = () => (input.value = prefs[which]);
+		if (!validTime(v)) return undo();
+		const next = { start: prefs.nightStart, end: prefs.nightEnd, [which === 'nightStart' ? 'start' : 'end']: v };
+		const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+		const length = (mins(next.end) - mins(next.start) + 1440) % 1440 || 1440;
+		if (length > 16 * 60) {
+			nightError = 'A night shift can last at most 16 hours.';
+			return undo();
+		}
+		nightError = '';
+		prefs.set({ [which]: v });
 	}
 </script>
 
@@ -206,6 +225,28 @@
 			<p class="mt-0.5 text-[12.5px] text-muted-foreground">The choices in a task’s Snooze menu. A snoozed task leaves the list and the bell until its time, or until it finishes, fails or asks you something.</p>
 		</div>
 		<SnoozePresets />
+	</div>
+
+	<!-- Night shift -->
+	<div class="flex flex-col gap-3">
+		<div>
+			<h2 class="text-[15px] font-medium">Night shift</h2>
+			<p class="mt-0.5 text-[12.5px] text-muted-foreground">When <span class="text-foreground/80">Night shift</span> in the composer’s start-later menu runs a task: only on a machine with nothing else running, stopped at the end if it’s still going, and summed up in one notification instead of one per task.</p>
+		</div>
+		<div class="rounded-xl border bg-card">
+			<div class="flex flex-wrap items-center justify-between gap-x-6 gap-y-2.5 px-4 py-3.5 sm:px-5">
+				<div class="min-w-0">
+					<p class="text-[13.5px] font-medium">Hours</p>
+					<p class="mt-0.5 text-[12.5px] leading-relaxed text-muted-foreground">In this device’s time zone. Tasks no machine took by the end move to the same hours the next night.</p>
+					{#if nightError}<p class="mt-1 text-[12.5px] text-err-ink" role="alert">{nightError}</p>{/if}
+				</div>
+				<div class="flex items-center gap-2 text-[13px]">
+					<input type="time" aria-label="Night shift starts" value={prefs.nightStart} onchange={(e) => setNight('nightStart', e.currentTarget)} class="tnum h-8 rounded-lg border border-input bg-transparent px-2" />
+					<span class="text-muted-foreground">to</span>
+					<input type="time" aria-label="Night shift ends" value={prefs.nightEnd} onchange={(e) => setNight('nightEnd', e.currentTarget)} class="tnum h-8 rounded-lg border border-input bg-transparent px-2" />
+				</div>
+			</div>
+		</div>
 	</div>
 
 	<!-- Safety -->

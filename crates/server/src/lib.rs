@@ -14,6 +14,7 @@ pub mod machines;
 pub mod prefs;
 pub mod projects;
 pub mod mcp;
+pub mod night;
 pub mod notify;
 pub mod oauth;
 pub mod push;
@@ -185,6 +186,7 @@ impl AppState {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(inbox::watch(state.clone()));
             rt.spawn(claims::watch(state.clone()));
+            rt.spawn(night::watch(state.clone()));
         }
         state
     }

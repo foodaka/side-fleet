@@ -114,6 +114,8 @@ public struct Run: Sendable, Hashable, Decodable, Identifiable {
     public var roomID: String?
     public var context: String?
     public var startAt: Date?
+    /// A night-shift task: only a machine with nothing else running takes it, and it is stopped at this time if still going.
+    public var stopAt: Date?
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
@@ -149,6 +151,13 @@ public struct Run: Sendable, Hashable, Decodable, Identifiable {
         roomID = f.opt("room_id")
         context = f.opt("context")
         startAt = f.date("start_at")
+        stopAt = f.date("stop_at")
+    }
+
+    /// A night-shift task the end of the night stopped.
+    public var nightEnded: Bool {
+        guard status == .stopped, let stopAt, let finishedAt else { return false }
+        return finishedAt >= stopAt
     }
 
     /// A queued run still waiting for its start time.

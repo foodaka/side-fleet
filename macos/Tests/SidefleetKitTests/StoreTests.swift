@@ -91,6 +91,8 @@ final class StoreTests: XCTestCase {
         await eventually("the pull request opens") { thread.root?.pr?.isOpen == true }
         let note = thread.turns.last?.items.compactMap { if case .note(let n) = $0 { n.text } else { nil } }.last
         XCTAssertEqual(note, "Opened draft pull request #\(thread.root?.pr?.number ?? 0): left out tests/e2e/checkout.spec.ts")
+        // Pushed once the run that pushed it has finished.
+        await eventually("the push finishes") { thread.latest?.status == .succeeded }
         XCTAssertFalse(thread.unpushed)
 
         let coupons = ThreadStore(api: api, liveInterval: .milliseconds(1), retryAfter: .milliseconds(50))

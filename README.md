@@ -46,6 +46,15 @@ outbound calls to your control plane. One Rust binary, macOS and Linux.
 - **Start later**: pick "Tonight", "Tomorrow morning" or any date and time in the composer, and
   the task waits until then: no machine picks it up early. The sidebar lists it as scheduled, and
   its page has Start now and Cancel. Chat apps can schedule one too.
+- **Checks before you look**: list a repo's own checks in `.sidefleet.json` at its root, e.g.
+  `{"checks": [{"name": "tests", "run": "cargo test"}, {"name": "lint", "run": "cargo clippy -- -D warnings"}]}`
+  (optional `"timeout_minutes"`, default 15). After any message that changes files, the worker
+  runs them in that task's worktree, in order, until one fails. A failure gets the agent one more
+  go with the end of the check's output, then the checks run again. The thread shows each check
+  and its output, and the sidebar marks the task with a check or a cross. The list is read from
+  the repo's committed history (`origin/HEAD`, else `HEAD`), never from the agent's worktree, so
+  an agent can't change what runs. Checks run the agent's code, so read-only and "Ask me" tasks
+  skip them.
 - **Restore**: every message's files are snapshotted before and after it, so "Restore to before"
   puts the worktree back to how it was before any message. The conversation carries on, and a
   restore can itself be undone.

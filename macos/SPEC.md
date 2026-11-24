@@ -184,7 +184,7 @@ is the normal case here.
 
 | Action | Call |
 |---|---|
-| New task | `POST /v1/runs` `{task, agent, model, effort?, repo, permission_mode, isolation, worker_id?, failover, images, start_at?}` |
+| New task | `POST /v1/runs` `{task, agent, model, effort?, repo, permission_mode, isolation, worker_id?, failover, images, start_at?, stop_at?}`. `stop_at` puts it on the night shift: only an idle machine takes it, and it stops then if still going |
 | Reply, or switch agent | `POST /v1/runs/:root/messages` `{task, agent?, model?, effort?, permission_mode?, images?}`. Absent `effort` keeps it, `""` is the agent's default. |
 | Skills after `/` | `GET /v1/workers/:id/commands?repo=` the target machine's Claude Code skills and commands, the repo's own first. Only for its owner. |
 | Stop all | `POST /v1/runs/:id/stop` for every non-terminal run, newest first, so nothing queued starts |
@@ -199,7 +199,7 @@ is the normal case here.
 | Repos | `PUT /v1/repos {added}` |
 | Project icons | `GET /v1/project-icons` `[{repo, kind, value, updated_at}]`; `PUT /v1/project-icons {repo, icon: {kind, value} \| null}` answers the same list. `kind` is `emoji`, `letter` (value `#rrggbb`) or `image` (a PNG `data:` URL, cropped square to 64 px, at most 48 KB). Optimistic with rollback |
 | Worker tokens | `GET`/`POST`/`DELETE /v1/orgs/:org/tokens` |
-| Prefs | `GET`/`PUT /v1/me/prefs`, synced keys only: `permission`, `roomPermission`, `workspace`, `sendKey`, `confirmStop`, `snoozePresets` |
+| Prefs | `GET`/`PUT /v1/me/prefs`, synced keys only: `permission`, `roomPermission`, `workspace`, `sendKey`, `confirmStop`, `snoozePresets`, `nightStart`, `nightEnd` |
 | Sign-in discovery | `GET /v1/auth` `{github, dev_key, hosted}` |
 
 **Errors.** Non-2xx bodies carry `{error}`; show that text. `402` is a plan limit, `409` a state

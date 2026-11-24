@@ -31,6 +31,8 @@ public final class NewTaskModel {
     public var failover = false
     /// Not remembered: each task picks its own.
     public var startAt: Date?
+    /// On the night shift: when it stops if still going. With no `startAt`, the night has begun.
+    public var stopAt: Date?
     public var busy = false
     public var images: [AttachedImage] = []
 
@@ -125,7 +127,15 @@ public final class NewTaskModel {
         first.append(HintPart(tail))
 
         var lines = [first]
-        if let startAt {
+        if let stopAt {
+            lines.append([
+                HintPart("On the night shift: starts "),
+                HintPart(startAt.map { Format.startTime($0, now: now) } ?? "now", .strong),
+                HintPart(" on a machine with nothing else running, and stops at "),
+                HintPart(Format.startTime(stopAt, now: now), .strong),
+                HintPart(" if it's still going. One notification sums up the night."),
+            ])
+        } else if let startAt {
             lines.append([
                 HintPart("Starts "),
                 HintPart(Format.startTime(startAt, now: now), .strong),
@@ -213,6 +223,7 @@ public final class NewTaskModel {
         if let id = pinned?.id { b["worker_id"] = .string(id) }
         if !images.isEmpty { b["images"] = .array(images.map(\.payload)) }
         if let startAt { b["start_at"] = .string(Timestamp.format(startAt)) }
+        if let stopAt { b["stop_at"] = .string(Timestamp.format(stopAt)) }
         return .object(b)
     }
 
@@ -225,6 +236,7 @@ public final class NewTaskModel {
             let id = try await fleet.api.createRun(body)
             task = ""
             startAt = nil
+            stopAt = nil
             images = []
             await fleet.refresh()
             return id
@@ -247,6 +259,13 @@ public final class NewTaskModel {
         out.append(("Tomorrow morning", at(7, days: 1)))
         out.append(("Tomorrow, 9:00", at(9, days: 1)))
         return out
+    }
+
+    /// Put the task on the next night shift. Already night: it can start now, and only the end applies.
+    public func pickNight(start: String, end: String, now: Date = Date()) {
+        let night = NightShift.next(start: start, end: end, now: now)
+        startAt = night.open ? nil : night.start
+        stopAt = night.end
     }
 
     /// How far ahead the control plane accepts.

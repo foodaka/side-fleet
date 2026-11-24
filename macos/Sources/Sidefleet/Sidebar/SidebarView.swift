@@ -601,7 +601,9 @@ struct RunRow: View {
                     Text("\(run.latestWorkerID ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
                 }
             } else if let start = run.run.startAt, run.run.isScheduled(now: fleet.now) {
-                withRepo("Scheduled · \(Format.startTime(start, now: fleet.now))")
+                withRepo("\(run.run.stopAt != nil ? "Night shift" : "Scheduled") · \(Format.startTime(start, now: fleet.now))")
+            } else if run.run.stopAt != nil {
+                withRepo("Night shift · waiting for an idle machine")
             } else {
                 withRepo("Waiting for a machine")
             }

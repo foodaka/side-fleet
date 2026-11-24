@@ -221,6 +221,12 @@ private struct TurnRows: View {
             if let diff = turn.turnDiff {
                 ChangesCard(set: diff) { path in onOpenDiff(run.id, path) }
             }
+            if run.nightEnded, let end = run.stopAt {
+                Label("Stopped at \(Format.startTime(end, now: stores.fleet.now)), when the night shift ended. Reply to carry on.", systemImage: "moon")
+                    .font(SF.font(13))
+                    .foregroundStyle(SF.muted)
+                    .padding(.vertical, 4)
+            }
             stats
             footerActions
         }
@@ -286,9 +292,28 @@ private struct TurnRows: View {
     @ViewBuilder private var setupLine: some View {
         if let start = run.startAt, run.isScheduled(now: stores.fleet.now) {
             HStack(spacing: 8) {
-                Image(systemName: "alarm").font(.system(size: 12))
-                (Text("Scheduled to start ") + Text(Format.startTime(start, now: stores.fleet.now)).foregroundColor(SF.ink.opacity(0.8))
-                    + Text(" (\(Format.until(start, now: stores.fleet.now))) on \(run.pinnedWorkerID ?? "a machine with \(Format.agentName(run.agent)) and \(Format.repoLabel(run.repo))")"))
+                Image(systemName: run.stopAt != nil ? "moon" : "alarm").font(.system(size: 12))
+                if let end = run.stopAt {
+                    (Text("On the night shift: starts ") + Text(Format.startTime(start, now: stores.fleet.now)).foregroundColor(SF.ink.opacity(0.8))
+                        + Text(" (\(Format.until(start, now: stores.fleet.now))) on \(run.pinnedWorkerID ?? "a machine") with nothing else running, until ")
+                        + Text(Format.startTime(end, now: stores.fleet.now)).foregroundColor(SF.ink.opacity(0.8)))
+                } else {
+                    (Text("Scheduled to start ") + Text(Format.startTime(start, now: stores.fleet.now)).foregroundColor(SF.ink.opacity(0.8))
+                        + Text(" (\(Format.until(start, now: stores.fleet.now))) on \(run.pinnedWorkerID ?? "a machine with \(Format.agentName(run.agent)) and \(Format.repoLabel(run.repo))")"))
+                }
+                if !theirs {
+                    Button("Start now") { startNow() }.buttonStyle(PrimaryButtonStyle(height: 22))
+                    Button("Cancel") { cancel() }.buttonStyle(SecondaryButtonStyle(height: 22))
+                }
+            }
+            .font(SF.font(12))
+            .foregroundStyle(SF.muted)
+            .padding(.bottom, 8)
+        } else if let end = run.stopAt, run.status == .queued {
+            HStack(spacing: 8) {
+                Image(systemName: "moon").font(.system(size: 12))
+                Text("Night shift: waiting for \(run.pinnedWorkerID ?? "a machine") with \(Format.agentName(run.agent)) and \(Format.repoLabel(run.repo)) to have nothing else running, until ")
+                    + Text(Format.startTime(end, now: stores.fleet.now)).foregroundColor(SF.ink.opacity(0.8))
                 if !theirs {
                     Button("Start now") { startNow() }.buttonStyle(PrimaryButtonStyle(height: 22))
                     Button("Cancel") { cancel() }.buttonStyle(SecondaryButtonStyle(height: 22))

@@ -224,7 +224,10 @@ public final class ThreadStore {
     /// Start a task scheduled for later right away.
     public func startNow(_ id: String) async throws {
         let run = try await api.startNow(run: id)
-        update(id) { $0.run.startAt = run.startAt }
+        update(id) {
+            $0.run.startAt = run.startAt
+            $0.run.stopAt = run.stopAt
+        }
     }
 
     /// Drop one waiting message.

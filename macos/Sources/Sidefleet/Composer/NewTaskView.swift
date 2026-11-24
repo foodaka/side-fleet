@@ -117,7 +117,7 @@ private struct NewTaskForm: View {
                         machines: model.machines, machine: model.pinned?.id ?? "", onMachine: { model.pick(machine: $0) },
                         iso: model.iso, onIso: { model.iso = $0 }, failover: $model.failover
                     )
-                    StartLaterPicker(value: $model.startAt)
+                    StartLaterPicker(value: $model.startAt, until: $model.stopAt)
                 }
                 HStack(spacing: 8) {
                     if model.task.count > 2000 {

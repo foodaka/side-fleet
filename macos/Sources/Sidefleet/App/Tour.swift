@@ -26,6 +26,7 @@ enum Tour {
                 ("thread-live", .thread("demo-guide")),
                 ("thread-failed", .thread("demo-stripe")),
                 ("thread-scheduled", .thread("demo-audit")),
+                ("thread-night", .thread("demo-night")),
                 // The sidebar By project, then the icon picker over it.
                 ("sidebar-projects", .overview),
                 ("machines", .machines),
@@ -47,6 +48,14 @@ enum Tour {
                     try? await Task.sleep(for: .seconds(2.5))
                     capture(folder.appendingPathComponent("new-task-slash-\(suffix).png"))
                     stores.newTask.task = ""
+                    // A task put on the night shift: the start-later button and the hint under the box.
+                    stores.newTask.task = "Fix the flaky search tests and the type errors in packages/ui"
+                    stores.newTask.pickNight(start: stores.prefs.nightStart, end: stores.prefs.nightEnd)
+                    try? await Task.sleep(for: .seconds(2.5))
+                    capture(folder.appendingPathComponent("new-task-night-\(suffix).png"))
+                    stores.newTask.task = ""
+                    stores.newTask.startAt = nil
+                    stores.newTask.stopAt = nil
                 }
                 if name == "sidebar-projects" {
                     stores.fleet.projects.picking = "github.com/acme/storefront"

@@ -12,6 +12,7 @@ struct SettingsView: View {
                 SendingSettings().tabItem { Label("Sending", systemImage: "paperplane") }
                 ReviewSettings().tabItem { Label("Reviewing", systemImage: "doc.text.magnifyingglass") }
                 SnoozeSettings().tabItem { Label("Snooze", systemImage: "alarm") }
+                NightShiftSettings().tabItem { Label("Night shift", systemImage: "moon") }
                 GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
                 AccountSettings(session: session).tabItem { Label("Account", systemImage: "person.crop.circle") }
             }
@@ -234,6 +235,50 @@ private struct ReviewSettings: View {
         }
         .formStyle(.grouped)
         .frame(height: 220)
+    }
+}
+
+/// The night shift's hours, in this Mac's time zone. Saved at once, as on the page; a window longer
+/// than the control plane takes is refused and the pickers go back to the hours in use.
+private struct NightShiftSettings: View {
+    @Environment(Stores.self) private var stores
+    @State private var error: String?
+
+    private func binding(_ path: ReferenceWritableKeyPath<PrefsStore, String>) -> Binding<Date> {
+        Binding {
+            let t = stores.prefs[keyPath: path]
+            return Calendar.current.date(bySettingHour: Int(t.prefix(2)) ?? 0, minute: Int(t.suffix(2)) ?? 0, second: 0, of: Date()) ?? Date()
+        } set: { date in
+            let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+            let t = String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+            let start = path == \PrefsStore.nightStart ? t : stores.prefs.nightStart
+            let end = path == \PrefsStore.nightEnd ? t : stores.prefs.nightEnd
+            guard NightShift.minutes(start: start, end: end) <= NightShift.maxHours * 60 else {
+                error = "A night shift can last at most \(NightShift.maxHours) hours."
+                return
+            }
+            error = nil
+            stores.prefs.set(path, t)
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                DatePicker("Starts", selection: binding(\.nightStart), displayedComponents: .hourAndMinute)
+                DatePicker("Ends", selection: binding(\.nightEnd), displayedComponents: .hourAndMinute)
+                if let error {
+                    Text(error).foregroundStyle(SF.errInk)
+                }
+            } header: {
+                Text("When Night shift in the new task's start-later menu runs a task: only on a machine with nothing else running, stopped at the end if it's still going, and summed up in one notification instead of one per task.")
+            } footer: {
+                Text("In this Mac's time zone. Tasks no machine took by the end move to the same hours the next night.")
+                    .foregroundStyle(SF.muted)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(height: 280)
     }
 }
 

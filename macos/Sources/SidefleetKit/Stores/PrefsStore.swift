@@ -35,6 +35,9 @@ public final class PrefsStore {
     public var roomPermission = "acceptEdits"
     public var workspace = "worktree"
     public var snoozePresets = SnoozePreset.defaults
+    /// The night shift's hours, `HH:MM` in this Mac's time zone (see `NightShift`).
+    public var nightStart = NightShift.defaultStart
+    public var nightEnd = NightShift.defaultEnd
     // Only on this Mac.
     public var appearance: Appearance = .system
     public var notifications = true
@@ -65,6 +68,8 @@ public final class PrefsStore {
         if let s = p["roomPermission"]?.string, Self.modes.contains(s) { roomPermission = s }
         if let s = p["workspace"]?.string { workspace = s == "checkout" ? "checkout" : "worktree" }
         if let v = p["snoozePresets"] { snoozePresets = SnoozePreset.clean(v) }
+        if let s = p["nightStart"]?.string, NightShift.isValid(s) { nightStart = s }
+        if let s = p["nightEnd"]?.string, NightShift.isValid(s) { nightEnd = s }
         if let s = p["appearance"]?.string, let v = Appearance(rawValue: s) { appearance = v }
         if let b = p["notifications"]?.bool { notifications = b }
         if let b = p["keepRunningInMenuBar"]?.bool { keepRunningInMenuBar = b }
@@ -79,6 +84,8 @@ public final class PrefsStore {
             "sendKey": .string(sendKey.rawValue),
             "confirmStop": .bool(confirmStop),
             "snoozePresets": .array(snoozePresets.map(\.json)),
+            "nightStart": .string(nightStart),
+            "nightEnd": .string(nightEnd),
         ]
     }
 

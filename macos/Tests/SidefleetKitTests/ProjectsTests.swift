@@ -71,10 +71,10 @@ final class ProjectsTests: XCTestCase {
         XCTAssertEqual(store.runs.first?.id, "demo-rate")
         XCTAssertFalse(store.runs.contains { $0.id == "demo-images" }, "pinned stays in Pinned")
         XCTAssertFalse(store.runs.contains { $0.id == "demo-review" }, "snoozed stays apart")
-        XCTAssertEqual(store.runs.count, 7)
+        XCTAssertEqual(store.runs.count, 8)
         XCTAssertEqual(store.visible(showAll: false, openID: nil).count, ProjectGroup.shown)
         XCTAssertEqual(store.visible(showAll: false, openID: "demo-contrast").last?.id, "demo-contrast", "the open thread is always shown")
-        XCTAssertEqual(store.visible(showAll: true, openID: nil).count, 7)
+        XCTAssertEqual(store.visible(showAll: true, openID: nil).count, 8)
         let finished = store.runs.filter { !$0.isLive }
         XCTAssertEqual(finished.map(\.lastActivityAt), finished.map(\.lastActivityAt).sorted(by: >), "then the latest first")
         XCTAssertEqual(s.projects[1].running, 1)

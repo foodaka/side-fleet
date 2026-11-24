@@ -24,7 +24,7 @@ enum DemoData {
         "finished_at": .null, "result": .null, "parent_id": .null, "session_id": .null, "resume_session_id": .null,
         "pinned_worker_id": .null, "permission_mode": "acceptEdits", "isolation": "worktree", "failover": false, "moved_from": .null,
         "resume_from_branch": .null, "images": [], "kind": "agent", "restore_to": .null, "forked_from": .null, "fork_commit": .null,
-        "archived_at": .null, "snoozed_until": .null, "pinned_at": .null, "pr": .null, "created_by": "u-ada", "room_id": .null, "context": .null, "start_at": .null,
+        "archived_at": .null, "snoozed_until": .null, "pinned_at": .null, "pr": .null, "created_by": "u-ada", "room_id": .null, "context": .null, "start_at": .null, "stop_at": .null,
     ]
 
     private static func iso(_ d: Date) -> JSONValue { .string(Timestamp.format(d)) }
@@ -202,6 +202,14 @@ enum DemoData {
         out.append([SeedRun(
             json: run("demo-audit", "Audit dependencies and open a PR for anything with a known vulnerability", status: "queued", created: ago(40), session: nil, extra: ["start_at": iso(tomorrow)]),
             events: [("status", ["status": "queued"], ago(40))])])
+
+        // On tonight's night shift.
+        let night = NightShift.next(start: NightShift.defaultStart, end: NightShift.defaultEnd, now: now)
+        let nightStart = night.open ? now.addingTimeInterval(60) : night.start
+        out.append([SeedRun(
+            json: run("demo-night", "Fix the flaky search tests and the type errors in packages/ui", status: "queued", created: ago(12), session: nil,
+                      extra: ["start_at": iso(nightStart), "stop_at": iso(night.end)]),
+            events: [("status", ["status": "queued", "start_at": iso(nightStart), "stop_at": iso(night.end)], ago(12))])])
 
         // A read-only answer.
         let taxAt = ago(26)

@@ -3,3 +3,5 @@
 *.log
 .claude/launch.json
 .gstack/
+.worktrees/
+.artifacts/

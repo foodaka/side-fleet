@@ -68,3 +68,5 @@ its description. Skip it for changes with nothing visible, like a refactor.
   Afterwards, check the description shows the images.
 
 If you can't capture one of the two, say why in the description instead of leaving it out.
+
+@AGENTS.md

@@ -156,6 +156,15 @@ pub async fn recipients(pool: &PgPool, org: Uuid, root: Uuid, since: chrono::Dat
         .collect())
 }
 
+/// Every browser `viewer` turned on "Notify me" in.
+pub async fn for_viewer(pool: &PgPool, viewer: Uuid) -> sqlx::Result<Vec<Subscription>> {
+    let rows = sqlx::query("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE viewer_id = $1").bind(viewer).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|r| Subscription { endpoint: r.get("endpoint"), keys: SubscriptionKeys { p256dh: r.get("p256dh"), auth: r.get("auth") } })
+        .collect())
+}
+
 pub async fn forget_endpoint(pool: &PgPool, endpoint: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM push_subscriptions WHERE endpoint = $1").bind(endpoint).execute(pool).await?;
     Ok(())

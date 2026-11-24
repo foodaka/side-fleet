@@ -87,7 +87,8 @@ fn tools() -> Vec<(Scope, Value)> {
                     "model": { "type": "string", "description": "Model for that agent: for claude one of sonnet (default), opus, fable, haiku." },
                     "access": { "type": "string", "enum": ["edit", "ask", "read_only", "full"],
                         "description": "edit (default): reads and edits files, refuses shell commands. ask: edits files and asks for approval before commands (claude only). read_only: looks and answers, changes nothing. full: also runs commands without asking." },
-                    "start_at": { "type": "string", "description": "Start later, once, at this time: RFC 3339 with the user's UTC offset, e.g. 2026-11-03T07:00:00+01:00. At most 30 days ahead. Optional: starts now." }
+                    "start_at": { "type": "string", "description": "Start later, once, at this time: RFC 3339 with the user's UTC offset, e.g. 2026-11-03T07:00:00+01:00. At most 30 days ahead. Optional: starts now." },
+                    "stop_at": { "type": "string", "description": "Run it on the night shift: stop it at this time if it is still going (RFC 3339 with the user's UTC offset, at most 16 hours after start_at; use with start_at, e.g. 01:00 to 07:00). Only a machine with nothing else running takes it, and the user gets one summary in the morning instead of a notification per task. Optional." }
                 } }
             }),
         ),
@@ -325,7 +326,18 @@ async fn call_tool(api: &Api<'_>, name: &str, args: &Value) -> Result<String, St
                         .with_timezone(&chrono::Utc),
                 ),
             };
+            let stop_at = match arg(args, "stop_at") {
+                None => None,
+                Some(t) => Some(
+                    chrono::DateTime::parse_from_rfc3339(t)
+                        .map_err(|_| format!("stop_at {t:?} must be RFC 3339 with an offset, e.g. 2026-11-04T07:00:00+01:00."))?
+                        .with_timezone(&chrono::Utc),
+                ),
+            };
             let mut body = json!({ "task": task, "repo": repo, "agent": agent, "model": model, "permission_mode": mode });
+            if let Some(at) = stop_at {
+                body["stop_at"] = json!(at);
+            }
             if let Some(m) = machine {
                 body["worker_id"] = json!(m);
             }
@@ -337,8 +349,12 @@ async fn call_tool(api: &Api<'_>, name: &str, args: &Value) -> Result<String, St
             let s = api.call(Method::GET, &format!("/v1/runs/{id}/summary"), None).await.ok();
             let url = s.as_ref().and_then(|s| s["url"].as_str()).unwrap_or("");
             if let Some(at) = s.as_ref().and_then(|s| s["start_at"].as_str()) {
+                let night = match s.as_ref().and_then(|s| s["night_shift_until"].as_str()) {
+                    Some(end) => format!(" on the night shift, until {end} (UTC): only a machine with nothing else running takes it, and the user gets one summary in the morning"),
+                    None => String::new(),
+                };
                 return Ok(format!(
-                    "Scheduled task {id} in {} with {} to start at {at} (UTC). Until then no machine picks it up; stop_task cancels it. Page: {url}",
+                    "Scheduled task {id} in {} with {} to start at {at} (UTC){night}. Until then no machine picks it up; stop_task cancels it. Page: {url}",
                     repo_label(&repo),
                     agent_name(agent)
                 ));

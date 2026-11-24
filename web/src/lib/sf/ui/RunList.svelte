@@ -193,8 +193,12 @@
 					{:else if detail}
 						{#if r.thread_status === 'running'}
 							<span class="flex min-w-0 gap-1"><span class="truncate">{r.latest_worker_id ? fleet.workerName(r.latest_worker_id) : 'Starting'}</span><span class="shrink-0">· {duration(r.started_at, null, fleet.now) || 'starting'}</span></span>
+						{:else if r.stop_at && later(r)}
+							Night shift · {startTime(r.start_at!, fleet.now)}{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
 						{:else if r.start_at && later(r)}
 							Scheduled · {startTime(r.start_at, fleet.now)}{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
+						{:else if r.stop_at}
+							Night shift · waiting for an idle machine{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
 						{:else}
 							Waiting for a machine{#if other}&nbsp;· {@render repoTag(r.repo)}{/if}
 						{/if}

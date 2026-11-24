@@ -152,6 +152,10 @@ pub struct Run {
     /// A task scheduled to start later: no machine claims it before this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_at: Option<DateTime<Utc>>,
+    /// A night-shift task: only a machine with nothing else running takes it, it is stopped
+    /// at this time if still going, and one push sums up the night afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_at: Option<DateTime<Utc>>,
 }
 
 /// A GitHub pull request for a thread's branch.
@@ -601,7 +605,15 @@ pub struct CreateRunRequest {
     /// `MAX_START_DELAY_DAYS` ahead). Absent: as soon as a machine can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_at: Option<DateTime<Utc>>,
+    /// Run it on the night shift (needs `start_at`): only an idle machine takes it, it is
+    /// stopped at this time if still going, and the night ends with one push instead of one
+    /// per task. At most `MAX_NIGHT_HOURS` after `start_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_at: Option<DateTime<Utc>>,
 }
+
+/// The longest a night shift can be.
+pub const MAX_NIGHT_HOURS: i64 = 16;
 
 /// How far ahead a task can be scheduled to start.
 pub const MAX_START_DELAY_DAYS: i64 = 30;

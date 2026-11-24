@@ -46,6 +46,7 @@ fn row_to_run(r: &PgRow) -> Run {
         created_by: r.get("created_by"),
         room_id: r.get("room_id"),
         start_at: r.get("start_at"),
+        stop_at: r.get("stop_at"),
     }
 }
 
@@ -176,7 +177,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, files, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pinned_at, pr, created_by, room_id, start_at";
+    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, files, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pinned_at, pr, created_by, room_id, start_at, stop_at";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -234,16 +235,18 @@ pub struct NewRun<'a> {
     pub resume_from_branch: Option<&'a str>,
     /// Start later: no machine claims it before then.
     pub start_at: Option<DateTime<Utc>>,
+    /// The night shift: stopped at this time if still going.
+    pub stop_at: Option<DateTime<Utc>>,
 }
 
 pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
-    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images, files, created_by, room_id, context, resume_from_branch, start_at } = new;
+    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images, files, created_by, room_id, context, resume_from_branch, start_at, stop_at } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images, org_id, effort,
-                           created_by, room_id, context, resume_from_branch, start_at)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING {RUN_COLS}"
+                           created_by, room_id, context, resume_from_branch, start_at, stop_at)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -262,6 +265,7 @@ pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Resu
     .bind(context)
     .bind(resume_from_branch)
     .bind(start_at)
+    .bind(stop_at)
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
@@ -270,6 +274,9 @@ pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Resu
     let mut payload = json!({"status": "queued", "task": task});
     if let Some(at) = start_at {
         payload["start_at"] = json!(at);
+    }
+    if let Some(at) = stop_at {
+        payload["stop_at"] = json!(at);
     }
     let ev = append_event_locked(&mut tx, id, "status", &payload).await?;
     tx.commit().await?;
@@ -284,11 +291,12 @@ pub async fn start_now(pool: &PgPool, org: Uuid, run_id: Uuid) -> sqlx::Result<O
     let Some(run) = lock_run(&mut tx, Some(org), run_id).await? else {
         return Ok(None);
     };
-    if run.status != RunStatus::Queued || run.start_at.is_none_or(|at| at <= Utc::now()) {
+    // A night-shift task waiting for an idle machine starts now too, as an ordinary task.
+    if run.status != RunStatus::Queued || (run.start_at.is_none_or(|at| at <= Utc::now()) && run.stop_at.is_none()) {
         tx.commit().await?;
         return Ok(Some((run, None)));
     }
-    let row = sqlx::query(&format!("UPDATE runs SET start_at = NULL WHERE id = $1 RETURNING {RUN_COLS}")).bind(run_id).fetch_one(&mut *tx).await?;
+    let row = sqlx::query(&format!("UPDATE runs SET start_at = NULL, stop_at = NULL WHERE id = $1 RETURNING {RUN_COLS}")).bind(run_id).fetch_one(&mut *tx).await?;
     // A queued status again: the page drops the schedule, and waiting claims look again.
     let ev = append_event_locked(&mut tx, run_id, "status", &json!({"status": "queued", "started_early": true})).await?;
     tx.commit().await?;
@@ -1340,6 +1348,8 @@ pub async fn claim_run(
     max_running: Option<i64>,
 ) -> sqlx::Result<Claimed> {
     let free = slots.map(|s| s.parallel.saturating_sub(s.active) as i32);
+    // Night-shift tasks only go to a machine with nothing else running (unknown for older workers).
+    let idle = slots.map(|s| s.active == 0);
     if let Some(s) = slots {
         sqlx::query("UPDATE workers SET slots_parallel = $2, slots_active = $3 WHERE id = $1 AND org_id = $4")
             .bind(worker_id)
@@ -1372,6 +1382,7 @@ pub async fn claim_run(
                 SELECT r.id FROM runs r WHERE r.status = 'queued' AND r.org_id = $9 AND r.repo = ANY($2)
                   AND NOT (r.repo = ANY($3))
                   AND (r.start_at IS NULL OR r.start_at <= now())
+                  AND (r.stop_at IS NULL OR (r.stop_at > now() AND ($11::bool IS NULL OR $11)))
                   AND r.created_by IS NOT DISTINCT FROM (SELECT o.owner_id FROM workers o WHERE o.org_id = $9 AND o.id = $1)
                   AND COALESCE(r.pinned_worker_id,
                         (SELECT p.worker_id FROM runs p
@@ -1412,6 +1423,7 @@ pub async fn claim_run(
         .bind(kinds)
         .bind(org)
         .bind(HANDOFF_WAIT_SECS as f64)
+        .bind(idle)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {

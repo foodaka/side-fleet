@@ -10,6 +10,7 @@
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import GitMerge from '@lucide/svelte/icons/git-merge';
 	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
+	import Moon from '@lucide/svelte/icons/moon';
 	import { fleet } from '../state.svelte';
 	import { agentModel, agentName, clock, durationMs, effortName, permName, repoLabel, scheduled, startTime, until } from '../format';
 	import ToolGroup from './ToolGroup.svelte';
@@ -62,6 +63,8 @@
 	const integrated = $derived(run.result?.integrated as { branch?: string; commit?: string; files?: string[] } | undefined);
 	const conflicts = $derived((run.result?.conflicts as string[] | undefined) ?? []);
 	const finished = $derived(run.status === 'succeeded' || run.status === 'failed' || run.status === 'stopped');
+	/** A night-shift task the end of the night stopped. */
+	const nightEnded = $derived(run.status === 'stopped' && !!run.stop_at && !!run.finished_at && new Date(run.finished_at) >= new Date(run.stop_at));
 	let forking = $state(false);
 	let restoring = $state(false);
 	let confirming = $state(false);
@@ -175,8 +178,21 @@
 	<div class="flex flex-col gap-1.5">
 		{#if run.start_at && scheduled(run, fleet.now)}
 			<p class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-				<AlarmClock class="size-3.5 shrink-0" />
-				<span>Scheduled to start <span class="text-foreground/80">{startTime(run.start_at, fleet.now)}</span> ({until(run.start_at, fleet.now)}) on {run.pinned_worker_id ?? `a machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}</span>
+				{#if run.stop_at}<Moon class="size-3.5 shrink-0" />{:else}<AlarmClock class="size-3.5 shrink-0" />{/if}
+				{#if run.stop_at}
+					<span>On the night shift: starts <span class="text-foreground/80">{startTime(run.start_at, fleet.now)}</span> ({until(run.start_at, fleet.now)}) on {run.pinned_worker_id ?? 'a machine'} with nothing else running, until <span class="text-foreground/80">{startTime(run.stop_at, fleet.now)}</span></span>
+				{:else}
+					<span>Scheduled to start <span class="text-foreground/80">{startTime(run.start_at, fleet.now)}</span> ({until(run.start_at, fleet.now)}) on {run.pinned_worker_id ?? `a machine with ${agentName(run.agent)} and ${repoLabel(run.repo)}`}</span>
+				{/if}
+				{#if onstartnow}
+					<button type="button" class="rounded-full bg-primary px-2.5 py-1 font-medium whitespace-nowrap text-primary-foreground hover:opacity-90" onclick={onstartnow}>Start now</button>
+					<button type="button" class="rounded-full px-2 py-1 whitespace-nowrap hover:bg-accent hover:text-foreground" onclick={oncancel}>Cancel</button>
+				{/if}
+			</p>
+		{:else if run.stop_at && run.status === 'queued'}
+			<p class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+				<Moon class="size-3.5 shrink-0" />
+				<span>Night shift: waiting for {run.pinned_worker_id ?? 'a machine'} with {agentName(run.agent)} and {repoLabel(run.repo)} to have nothing else running, until <span class="text-foreground/80">{startTime(run.stop_at, fleet.now)}</span></span>
 				{#if onstartnow}
 					<button type="button" class="rounded-full bg-primary px-2.5 py-1 font-medium whitespace-nowrap text-primary-foreground hover:opacity-90" onclick={onstartnow}>Start now</button>
 					<button type="button" class="rounded-full px-2 py-1 whitespace-nowrap hover:bg-accent hover:text-foreground" onclick={oncancel}>Cancel</button>
@@ -243,6 +259,10 @@
 
 		{#if turn.diff && onopendiff}
 			<ChangesCard set={turn.diff.turn} onopen={(path) => onopendiff(run.id, path)} />
+		{/if}
+
+		{#if nightEnded}
+			<p class="flex items-center gap-1.5 py-1 text-[13px] text-muted-foreground"><Moon class="size-3.5 shrink-0" />Stopped at {startTime(run.stop_at!, fleet.now)}, when the night shift ended. Reply to carry on.</p>
 		{/if}
 
 		{#if turn.result}

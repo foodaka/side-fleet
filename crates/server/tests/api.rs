@@ -2421,3 +2421,90 @@ async fn a_task_scheduled_for_later_waits_for_its_time_or_start_now() {
 
     env.teardown().await;
 }
+
+// ---- night shift ----
+
+async fn create_night(api: &Api, task: &str, start_at: Value, stop_at: Value) -> reqwest::Response {
+    api.dev(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({"task": task, "model": "claude-haiku-5-5", "repo": "r", "start_at": start_at, "stop_at": stop_at}))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn end_the_night(env: &TestEnv) {
+    sqlx::query("UPDATE runs SET start_at = now() - interval '6 hours', stop_at = now() - interval '1 minute' WHERE stop_at IS NOT NULL AND night_reported_at IS NULL")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_night_shift_task_only_goes_to_an_idle_machine_and_stops_when_the_night_ends() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let now = chrono::Utc::now();
+    let id_of = |v: Value| -> Uuid { v["id"].as_str().unwrap().parse().unwrap() };
+
+    // The night ends after it starts, and lasts at most 16 hours.
+    assert_eq!(create_night(&api, "x", json!(now + chrono::Duration::hours(2)), json!(now + chrono::Duration::hours(1))).await.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(create_night(&api, "x", json!(now + chrono::Duration::hours(1)), json!(now + chrono::Duration::hours(18))).await.status(), StatusCode::BAD_REQUEST);
+
+    // Started from inside the night: no start time, so it can start now.
+    let r = create_night(&api, "tidy the logs", Value::Null, json!(now + chrono::Duration::hours(6))).await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let id = id_of(r.json().await.unwrap());
+    assert!(api.get_run(id).await.stop_at.is_some());
+    assert!(claim_with(&api, "w1", &["claude"], 2, 1).await.is_none(), "a busy machine took a night task");
+    assert_eq!(claim_with(&api, "w1", &["claude"], 2, 0).await.expect("an idle machine takes it").id, id);
+    // Its push waits for the night's summary.
+    assert!(sidefleet_server::night::holds_push(&env.pool, id).await.unwrap());
+
+    // The night ends while it runs: it is asked to stop, and the night is summed up once it has.
+    end_the_night(&env).await;
+    assert!(sidefleet_server::night::sweep(&env.state).await.unwrap().is_empty(), "summed up before the task stopped");
+    assert!(api.get_run(id).await.stop_requested);
+    api.finish("w1", id, "stopped", json!({})).await;
+    let reports = sidefleet_server::night::sweep(&env.state).await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].title, "Night shift: 1 task in r");
+    assert_eq!(reports[0].label, "1 ran out of time");
+    assert!(!sidefleet_server::night::holds_push(&env.pool, id).await.unwrap());
+    assert!(sidefleet_server::night::sweep(&env.state).await.unwrap().is_empty(), "a night is summed up once");
+    env.teardown().await;
+}
+
+#[tokio::test]
+async fn the_night_is_summed_up_in_one_push_and_untaken_tasks_move_to_the_next_night() {
+    let env = TestEnv::start().await;
+    let api = Api::new(&env.base_url);
+    api.register("w1", &["r"]).await;
+    let (start, stop) = (json!(chrono::Utc::now() + chrono::Duration::hours(1)), json!(chrono::Utc::now() + chrono::Duration::hours(7)));
+    let mut ids = Vec::new();
+    for task in ["fix the flaky test", "update deps", "rename the module"] {
+        let r = create_night(&api, task, start.clone(), stop.clone()).await;
+        ids.push(r.json::<Value>().await.unwrap()["id"].as_str().unwrap().parse::<Uuid>().unwrap());
+    }
+    // Not before the night starts.
+    assert!(claim_with(&api, "w1", &["claude"], 2, 0).await.is_none());
+    sqlx::query("UPDATE runs SET start_at = now() - interval '1 minute' WHERE id = ANY($1)").bind(&ids[..2]).execute(&env.pool).await.unwrap();
+    let a = claim_with(&api, "w1", &["claude"], 2, 0).await.unwrap().id;
+    api.finish("w1", a, "succeeded", json!({"checks": {"verdict": "passed"}})).await;
+    let b = claim_with(&api, "w1", &["claude"], 2, 0).await.unwrap().id;
+    api.finish("w1", b, "succeeded", json!({})).await;
+
+    end_the_night(&env).await;
+    let reports = sidefleet_server::night::sweep(&env.state).await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].title, "Night shift: 3 tasks in r");
+    assert_eq!(reports[0].label, "1 ready to merge · 1 done · 1 moved to tomorrow night");
+
+    // The one no machine took waits for the same hours tomorrow.
+    let moved = api.get_run(ids[2]).await;
+    assert_eq!(moved.status, RunStatus::Queued);
+    let (s, e) = (moved.start_at.unwrap(), moved.stop_at.unwrap());
+    assert!(e > chrono::Utc::now() && e - s == chrono::Duration::hours(6) + chrono::Duration::minutes(-1), "{s} {e}");
+    assert!(sidefleet_server::night::sweep(&env.state).await.unwrap().is_empty());
+    env.teardown().await;
+}

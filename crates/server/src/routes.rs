@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use sidefleet_core::{
     Agent, Approval, ApprovalRequest, ArchiveRequest, ClaimRequest, PinRequest, SnoozeRequest, DecideApprovalRequest, CreateRunRequest, CreateRunResponse, FinishRunRequest, FollowUpRequest, ForkRequest,
     HeartbeatRequest, HeartbeatResponse, FileUpload, ImageUpload, LiveTextRequest, WorktreeCleanupRequest, WorktreeCleanupResult, PostEventsRequest, RegisterWorkerRequest, Run, RunControl, RunEvent,
-    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_FILES, MAX_ATTACHED_IMAGES, MAX_START_DELAY_DAYS, PERMISSION_MODES,
+    RunStatus, RunSummary, ISOLATION_MODES, LIVE_TEXT, LIVE_TEXT_MAX_BYTES, MAX_ATTACHED_FILES, MAX_ATTACHED_IMAGES, MAX_NIGHT_HOURS, MAX_START_DELAY_DAYS, PERMISSION_MODES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -318,6 +318,7 @@ async fn start_run(
         Some(_) => return Err(ApiError(StatusCode::BAD_REQUEST, format!("isolation must be one of {}", ISOLATION_MODES.join(", ")))),
     };
     let start_at = check_start_at(req.start_at)?;
+    let stop_at = check_stop_at(start_at, req.stop_at)?;
     if room.is_some() && start_at.is_some() {
         // Its brief says what teammates are doing now, which would be stale by then.
         return Err(ApiError(StatusCode::BAD_REQUEST, "a room's tasks start right away; start_at is for tasks outside rooms".into()));
@@ -347,6 +348,7 @@ async fn start_run(
         context: brief.as_deref(),
         resume_from_branch: from_branch.as_deref(),
         start_at,
+        stop_at,
     };
     check_run_limit(state, caller).await?;
     let (run, ev) = db::create_run(&state.pool, caller.org_id(), new).await?;
@@ -354,6 +356,20 @@ async fn start_run(
     state.events.publish(ev);
     tracing::info!(run_id = %run.id, agent = %run.agent, model = %run.model, repo = %run.repo, start_at = ?run.start_at, "run queued");
     Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+}
+
+/// The end of a night shift: after the task's start time, and at most `MAX_NIGHT_HOURS` later.
+fn check_stop_at(start_at: Option<DateTime<Utc>>, stop_at: Option<DateTime<Utc>>) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(stop) = stop_at else { return Ok(None) };
+    // A start time already past (a night shift started from inside the night) means now.
+    let start = start_at.unwrap_or_else(Utc::now);
+    if stop <= start {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "stop_at must be after the task's start time".into()));
+    }
+    if stop > start + chrono::Duration::hours(MAX_NIGHT_HOURS) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("a night shift can last at most {MAX_NIGHT_HOURS} hours")));
+    }
+    Ok(Some(stop))
 }
 
 /// A start time for a new task: in the future and at most `MAX_START_DELAY_DAYS`

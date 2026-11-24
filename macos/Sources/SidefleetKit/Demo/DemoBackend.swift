@@ -50,6 +50,8 @@ private actor DemoWorld {
     private var workers: [JSONValue]
     private var inbox: [JSONValue] = []
     private var repos: [String]
+    /// Project icons, by repo: `{repo, kind, value, updated_at}`.
+    private var icons: [String: JSONValue]
     private var images: [String: Data] = [:]
     private var subscribers: [String: [UUID: AsyncThrowingStream<SSEFrame, Error>.Continuation]] = [:]
     private var inboxSubscribers: [UUID: AsyncThrowingStream<SSEFrame, Error>.Continuation] = [:]
@@ -75,6 +77,11 @@ private actor DemoWorld {
         self.speed = speed
         workers = DemoData.workers(now: Date())
         repos = ["github.com/acme/storefront", "github.com/acme/cli", "github.com/acme/docs"]
+        icons = DemoData.projectIcons(now: Date())
+    }
+
+    private func iconList() -> JSONValue {
+        .array(icons.keys.sorted().compactMap { icons[$0] })
     }
 
     private func bootIfNeeded() {
@@ -167,6 +174,19 @@ private actor DemoWorld {
         case ("PUT", "repos"):
             repos = body?["added"]?.array?.compactMap(\.string) ?? repos
             return try encode(["added": .array(repos.map { .string($0) })])
+        case ("GET", "project-icons"):
+            return try encode(iconList())
+        case ("PUT", "project-icons"):
+            guard let repo = body?["repo"]?.string, !repo.isEmpty else { throw APIError.status(400, "repo is required") }
+            if let icon = body?["icon"], !icon.isNull {
+                guard let kind = icon["kind"]?.string, ["emoji", "letter", "image"].contains(kind), let value = icon["value"]?.string, !value.isEmpty else {
+                    throw APIError.status(400, "kind is emoji, letter or image")
+                }
+                icons[repo] = ["repo": .string(repo), "kind": .string(kind), "value": .string(value), "updated_at": .string(Timestamp.format(now))]
+            } else {
+                icons[repo] = nil
+            }
+            return try encode(iconList())
         case ("GET", "enrollments"):
             return try encode(.array([]))
         case ("GET", "setup"):

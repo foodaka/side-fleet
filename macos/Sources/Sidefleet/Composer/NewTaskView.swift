@@ -163,7 +163,8 @@ private struct NewTaskForm: View {
     private var repoPicker: some View {
         let online = model.onlineRepos
         var options = model.repos.map { r in
-            PickerOption(id: r, title: Format.repoLabel(r), disabledReason: online.contains(r) ? nil : "offline", mono: true)
+            PickerOption(id: r, title: Format.repoLabel(r), disabledReason: online.contains(r) ? nil : "offline", mono: true,
+                         icon: AnyView(ProjectIconView(repo: r, icon: stores.fleet.projects.icon(r), size: 14)))
         }
         options.append(PickerOption(id: "__pick__", title: model.repos.isEmpty ? "Choose from \(online.count) repos…" : "Add or remove repos…"))
         return PickerPill(
@@ -176,7 +177,11 @@ private struct NewTaskForm: View {
                 }
             }
         ) {
-            Text(model.repo.isEmpty ? "Choose a repo" : Format.repoLabel(model.repo)).font(SF.mono(12.5)).lineLimit(1).frame(maxWidth: 200)
+            HStack(spacing: 6) {
+                if !model.repo.isEmpty { ProjectIconView(repo: model.repo, icon: stores.fleet.projects.icon(model.repo), size: 14) }
+                Text(model.repo.isEmpty ? "Choose a repo" : Format.repoLabel(model.repo)).font(SF.mono(12.5)).lineLimit(1)
+            }
+            .frame(maxWidth: 220)
         }
     }
 

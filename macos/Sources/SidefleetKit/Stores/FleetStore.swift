@@ -72,6 +72,8 @@ public final class FleetStore {
 
     public let api: API
     public let toasts: ToastCenter
+    /// Project icons and how the list groups by repo; the icons load with the fleet.
+    public let projects: ProjectsStore
     /// After each refresh that worked: the app keeps its badge, read marks and notifications up to date from here.
     @ObservationIgnored public var onRefreshed: (@MainActor () -> Void)?
     @ObservationIgnored private let defaults: UserDefaults
@@ -91,6 +93,7 @@ public final class FleetStore {
         self.api = api
         self.toasts = toasts
         self.defaults = defaults
+        projects = ProjectsStore(api: api, toasts: toasts, defaults: defaults)
         orgID = defaults.string(forKey: Self.orgKey) ?? ""
         updatesCleared = defaults.string(forKey: Self.clearedKey) ?? ""
         api.backend.setOrg(orgID)
@@ -212,6 +215,8 @@ public final class FleetStore {
             conn = .ok
             loaded = true
             onRefreshed?()
+            // At most once a minute; an older control plane without icons keeps the defaults.
+            await projects.load()
         } catch APIError.status(403, _) where !orgID.isEmpty && retry {
             // The remembered org is gone (left it, or another account): fall back to the first one.
             switchOrg("")
@@ -385,6 +390,7 @@ public final class FleetStore {
         pending = []
         members = []
         membersFor = ""
+        projects.reset()
         added = nil
         setup = nil
         loaded = false
@@ -428,9 +434,24 @@ public struct SidebarSections: Sendable {
     public var homeRepo = ""
     /// Teammates' tasks, for the Team tab's count.
     public var theirs = 0
+    /// By project: one group per repo (pinned threads aside), most urgent first.
+    public var projects: [ProjectGroup] = []
     public var isEmpty: Bool { pinned.isEmpty && active.isEmpty && groups.isEmpty }
     /// Top to bottom, as the sidebar shows them (snoozed aside).
     public var order: [RunSummary] { pinned + active + groups.flatMap(\.runs) }
+
+    /// Top to bottom as the list By project shows them: hidden and folded groups leave theirs out.
+    public func projectOrder(hidden: Set<String>, folded: Set<String>, showAll: Set<String>, openID: String?) -> [RunSummary] {
+        pinned + projects.filter { !hidden.contains($0.repo) && !folded.contains($0.repo) }
+            .flatMap { $0.visible(showAll: showAll.contains($0.repo), openID: openID) }
+    }
+
+    /// Threads waiting on you first, then running, then queued, then those scheduled for later.
+    static func rank(_ r: RunSummary, now: Date) -> Int {
+        if r.pendingApprovals > 0 { return 0 }
+        if r.threadStatus == .running { return 1 }
+        return r.run.isScheduled(now: now) ? 3 : 2
+    }
 
     public init(runs all: [RunSummary], userID: String?, teamScope: Bool, filtering: Bool, now: Date, calendar: Calendar = .current) {
         let scoped = filtering && !teamScope ? all.filter { $0.run.createdBy == userID } : all
@@ -446,11 +467,7 @@ public struct SidebarSections: Sendable {
         let rest = awake.filter { $0.run.pinnedAt == nil }
 
         // Threads waiting on you first, then running, then queued, then those scheduled for later (soonest first).
-        func rank(_ r: RunSummary) -> Int {
-            if r.pendingApprovals > 0 { return 0 }
-            if r.threadStatus == .running { return 1 }
-            return r.run.isScheduled(now: now) ? 3 : 2
-        }
+        func rank(_ r: RunSummary) -> Int { Self.rank(r, now: now) }
         active = rest.filter(\.isLive).enumerated().sorted { a, b in
             let (ra, rb) = (rank(a.element), rank(b.element))
             if ra != rb { return ra < rb }
@@ -466,6 +483,7 @@ public struct SidebarSections: Sendable {
                 groups.append(Group(label: label, runs: [r]))
             }
         }
+        projects = ProjectGroup.make(rest, now: now)
     }
 
     /// Search covers title, repo and machine, and archived tasks once their list has been opened.

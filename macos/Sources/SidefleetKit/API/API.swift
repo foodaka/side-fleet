@@ -46,6 +46,16 @@ public struct API: Sendable {
         return (try Self.decode(data) as AddedRepos).added
     }
 
+    // MARK: Project icons
+
+    public func projectIcons() async throws -> [StoredProjectIcon] { try await get("/v1/project-icons") }
+
+    /// Set a repo's icon for everyone in the org, or nil for the default. Answers with every icon.
+    public func setProjectIcon(repo: String, icon: ProjectIcon?) async throws -> [StoredProjectIcon] {
+        let body: JSONValue = ["repo": .string(repo), "icon": icon.map { ["kind": .string($0.kind.rawValue), "value": .string($0.value)] } ?? .null]
+        return try Self.decode(try await backend.send("PUT", "/v1/project-icons", body: body))
+    }
+
     // MARK: Threads
 
     public func thread(_ id: String) async throws -> [Run] { try await get("/v1/runs/\(id)/thread") }

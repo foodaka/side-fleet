@@ -61,6 +61,7 @@ estimate for Swift, leaving Rooms, Team and Chat apps for later: 3,000 lines of 
 | `lib/sf/state.svelte.ts` | Polling, derived fleet state, archive, snooze and pin with rollback, org switching |
 | `lib/sf/diff/parse.ts` | Patch parsing, word-level marks, split rows, whitespace hiding, diffstat blocks |
 | `lib/sf/snooze.ts`, `prefs.svelte.ts`, `seen.svelte.ts`, `telemetry.svelte.ts` | Presets, send-key rules, unread marks, CPU history and fleet events |
+| `lib/sf/projects.svelte.ts`, `RunList.svelte`'s `projectGroups` | Project icons (defaults, optimistic save), grouping By project, folded, show-all and hidden groups (`ProjectsStore`, `ProjectGroup`) |
 
 **What has no direct equivalent and needs real work:**
 
@@ -165,7 +166,7 @@ Credentials live in the Keychain. On a redirect to another origin the client doe
 
 **Polling, every 5 s while the app is active, 30 s when it's in the background:**
 `/v1/me`, `/v1/workers`, `/v1/runs?limit=100`, `/v1/repos`, `/v1/enrollments`, `/v1/me/machines`;
-`/v1/setup` until loaded; `/v1/orgs/:org/members` about once a minute. Refresh at once on wake,
+`/v1/setup` until loaded; `/v1/orgs/:org/members` and `/v1/project-icons` about once a minute (icons reset on an org switch). Refresh at once on wake,
 on activation and when a followed run ends.
 
 **Streams** use a dedicated `URLSession` with long timeouts and a raised per-host connection limit,
@@ -196,6 +197,7 @@ is the normal case here.
 | Inbox | `POST /v1/inbox/:id/dismiss`, `POST /v1/inbox/dismiss-all` |
 | Machines | `POST /v1/workers/:id/update`, `DELETE /v1/workers/:id`, `POST /v1/enrollments/lookup`, `/approve`, `/deny` |
 | Repos | `PUT /v1/repos {added}` |
+| Project icons | `GET /v1/project-icons` `[{repo, kind, value, updated_at}]`; `PUT /v1/project-icons {repo, icon: {kind, value} \| null}` answers the same list. `kind` is `emoji`, `letter` (value `#rrggbb`) or `image` (a PNG `data:` URL, cropped square to 64 px, at most 48 KB). Optimistic with rollback |
 | Worker tokens | `GET`/`POST`/`DELETE /v1/orgs/:org/tokens` |
 | Prefs | `GET`/`PUT /v1/me/prefs`, synced keys only: `permission`, `roomPermission`, `workspace`, `sendKey`, `confirmStop`, `snoozePresets` |
 | Sign-in discovery | `GET /v1/auth` `{github, dev_key, hosted}` |
@@ -259,6 +261,18 @@ search, then the list, then nav.
 - Context menu in place of the hover ⋯: Fork, Pin to Top or Unpin, Snooze with presets and wake times, Pick a date and
   time, Archive or Unarchive, Open in New Window.
 - Mine and Team switch when the org has several members. The choice sticks.
+- By time or By project (`projects.svelte.ts`), remembered on this Mac. By project keeps Pinned on top
+  (its rows show the project's icon and name), then a group per repo: chevron, 18 pt icon, bold name, an
+  orange count waiting on you and a violet count running; folded with neither, a dot if something is
+  new, else how long ago. Groups go waiting, running, queued, then latest activity; inside, the first 5
+  rows then "Show N more" (the open thread always shows). Group menu (right-click or ⋯): Set Icon…, New
+  Task in … (only when one of your online machines has the repo; the composer offers it even if it isn't
+  one of your chosen repos), Fold or Unfold, Hide from the List; "Show N hidden projects" at the foot.
+  Folded, show-all and hidden groups are remembered on this Mac.
+- Project icons are the org's: an emoji, the first letter on one of nine colours, or a small picture.
+  Without one, the letter on `TILE_COLORS[hash(repo) % 9]`, the page's hash. The icon picker is a sheet
+  with Emoji, Letter and Image tabs, Reset to Default and Save. By time, rows from another repo show its
+  icon before the repo; so do the composer's repo menu and pill.
 - Search covers title, repo and machine, plus archived once loaded.
 - Nav: Overview, Machines with `● 2/3` and an update icon, Rooms, Team (GitHub sign-in only), Chat
   apps, Settings.

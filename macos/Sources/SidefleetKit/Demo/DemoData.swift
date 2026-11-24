@@ -79,6 +79,14 @@ enum DemoData {
         return .array(list)
     }
 
+    /// Icons set on two of the three repos: an emoji and a letter on a colour picked by hand. The CLI keeps its default.
+    static func projectIcons(now: Date) -> [String: JSONValue] {
+        [
+            "github.com/acme/storefront": ["repo": "github.com/acme/storefront", "kind": "emoji", "value": "🚀", "updated_at": iso(now.addingTimeInterval(-86400 * 3))],
+            "github.com/acme/docs": ["repo": "github.com/acme/docs", "kind": "letter", "value": "#22a06b", "updated_at": iso(now.addingTimeInterval(-86400 * 2))],
+        ]
+    }
+
     static func inbox(now: Date) -> [JSONValue] {
         [
             ["id": "demo-checkout", "run_id": "demo-checkout", "title": "The checkout e2e test is flaky on CI. Find out why and fix it", "repo": "github.com/acme/storefront", "agent": "claude", "reason": "finished", "label": "Finished, waiting for a reply", "since": iso(now.addingTimeInterval(-35 * 60))],
@@ -294,6 +302,9 @@ enum DemoData {
             ])]
         }
         out.append(simple("demo-images", "Compress hero images in the marketing pages", hours: 51, machine: "hetzner-vps", extra: ["pinned_at": iso(now.addingTimeInterval(-40 * 3600))]))
+        // Two more in the storefront, so its group By project folds the rest under "Show 2 more".
+        out.append(simple("demo-coupons", "Let coupon codes stack with gift cards", hours: 98, machine: "hetzner-vps"))
+        out.append(simple("demo-contrast", "Fix the colour contrast on the product cards", hours: 122, machine: "mac-mini"))
         out.append(simple("demo-sitemap", "Generate the sitemap from the route table", hours: 76, machine: "mac-mini", repo: "github.com/acme/docs"))
         out.append(simple("demo-review", "Summarise what changed on main this week", hours: 30, machine: "mac-mini", extra: ["snoozed_until": iso(now.addingTimeInterval(3 * 3600))]))
         out.append(simple("demo-old", "Remove the old feature flag for guest checkout", hours: 200, machine: "hetzner-vps", extra: ["archived_at": iso(now.addingTimeInterval(-100 * 3600))]))

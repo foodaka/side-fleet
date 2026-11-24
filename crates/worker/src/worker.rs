@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::agent::{self, AgentSpec, ApprovalHook};
 use crate::approval::{self, Bridge};
 use crate::checkpoint::{self, ChangeTracker};
+use crate::checks::{self, Verdict};
 use crate::cleanup::{self, ActiveRuns};
 use crate::client::{Backoff, ClientError, ControlClient, Rejected};
 use crate::diff;
@@ -882,9 +883,25 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         approval,
     };
 
+    // The check gate: the repo's own checks, run after a turn that changed files in its worktree.
+    let gate = if run.kind == "agent" && in_worktree {
+        match checks::load(&repo_dir).await {
+            Some(Ok(c)) if c.checks.is_empty() => None,
+            Some(Ok(c)) => Some(match checks::allowed_for(&spec.permission_mode) {
+                Ok(()) => Gate::Run(c),
+                Err(why) => Gate::Skip(why),
+            }),
+            Some(Err(e)) => Some(Gate::Broken(e)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let before_tree = before.as_ref().map(|p| p.tree.clone());
+
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);
 
-    let exec = tokio::spawn(agent::execute(spec, event_tx, stop_rx));
+    let exec = tokio::spawn(execute_checked(spec, gate, before_tree, event_tx, stop_rx));
     // A run cut off by `end_finished_run` takes its agent with it.
     let _exec_guard = AbortOnDrop(exec.abort_handle());
 
@@ -962,9 +979,9 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         })
     };
 
-    let outcome = match exec.await {
+    let (outcome, checked) = match exec.await {
         Ok(o) => o,
-        Err(e) => agent::Outcome::new(RunStatus::Failed, json!({"error": format!("executor task panicked: {e}")})),
+        Err(e) => (agent::Outcome::new(RunStatus::Failed, json!({"error": format!("executor task panicked: {e}")})), None),
     };
     watcher.abort();
     // Executor dropped its sender; forwarder drains the channel and exits.
@@ -992,7 +1009,99 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         }
     }
 
-    report_finish(client, run_id, outcome.status, outcome.result, outcome.usage_limit).await;
+    let mut result = outcome.result;
+    if let (Some(c), Some(obj)) = (checked, result.as_object_mut()) {
+        obj.insert("checks".into(), c);
+    }
+    report_finish(client, run_id, outcome.status, result, outcome.usage_limit).await;
+}
+
+/// What the check gate does for a run (see [`execute_checked`]).
+enum Gate {
+    Run(checks::Config),
+    /// The repo has checks, but this run may not run them.
+    Skip(&'static str),
+    /// The repo's check list could not be used.
+    Broken(String),
+}
+
+/// The agent's turn, then the repo's checks when it has a gate and the turn changed files.
+/// A failed check gets the agent one more go, in the same session, with the failure as its
+/// task; then the checks run again. Returns the outcome to report and what goes in the
+/// result's `checks`.
+async fn execute_checked(
+    spec: AgentSpec,
+    gate: Option<Gate>,
+    before_tree: Option<String>,
+    events: mpsc::Sender<NewEvent>,
+    mut stop: watch::Receiver<bool>,
+) -> (agent::Outcome, Option<serde_json::Value>) {
+    let retry = spec.clone();
+    let cwd = spec.cwd.clone();
+    let mut outcome = agent::execute(spec, events.clone(), stop.clone()).await;
+    let Some(gate) = gate else { return (outcome, None) };
+    if outcome.status != RunStatus::Succeeded {
+        return (outcome, None);
+    }
+    // A turn that only looked or answered leaves nothing new to check.
+    if let Some(before) = &before_tree {
+        if diff::snapshot(&cwd).await.ok().as_ref() == Some(before) {
+            return (outcome, None);
+        }
+    }
+    let send = |ev: NewEvent| {
+        let events = events.clone();
+        async move {
+            let _ = events.send(ev).await;
+        }
+    };
+    let config = match gate {
+        Gate::Run(c) => c,
+        Gate::Skip(why) => {
+            send(checks::event(1, Verdict::Skipped, &[], false, Some(why))).await;
+            return (outcome, Some(checks::summary(Verdict::Skipped, 0, &[])));
+        }
+        Gate::Broken(e) => {
+            send(checks::event(1, Verdict::Error, &[], false, Some(&e))).await;
+            return (outcome, Some(checks::summary(Verdict::Error, 0, &[])));
+        }
+    };
+    let names: Vec<&str> = config.checks.iter().map(|c| c.name.trim()).collect();
+    let mut attempt = 1;
+    loop {
+        send(checks::running_event(attempt, &names)).await;
+        let Some(results) = checks::run_all(&cwd, &config.checks, &mut stop).await else {
+            return (agent::Outcome::new(RunStatus::Stopped, json!({"reason": "stopped while its checks ran", "partial_result": outcome.result})), None);
+        };
+        let Some(failed) = results.iter().find(|r| !r.passed).cloned() else {
+            send(checks::event(attempt, Verdict::Passed, &results, false, None)).await;
+            return (outcome, Some(checks::summary(Verdict::Passed, attempt, &results)));
+        };
+        let session = outcome.result.get("session_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+        let retrying = attempt == 1 && session.is_some() && !*stop.borrow();
+        send(checks::event(attempt, Verdict::Failed, &results, retrying, None)).await;
+        if !retrying {
+            return (outcome, Some(checks::summary(Verdict::Failed, attempt, &results)));
+        }
+        let mut again = retry.clone();
+        again.task = checks::retry_task(&failed);
+        again.resume_session_id = session;
+        again.images.clear();
+        again.files.clear();
+        let second = agent::execute(again, events.clone(), stop.clone()).await;
+        match second.status {
+            RunStatus::Succeeded => {
+                outcome = second;
+                attempt += 1;
+            }
+            RunStatus::Stopped => return (second, None),
+            _ => {
+                let msg = "The agent's go at fixing the failed check didn't finish, so the checks still fail.";
+                send(NewEvent { kind: "error".into(), payload: json!({"message": msg}) }).await;
+                return (outcome, Some(checks::summary(Verdict::Failed, attempt, &results)));
+            }
+        }
+    }
 }
 
 /// How long snapshotting and diffing a finished turn may take before the run is

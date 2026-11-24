@@ -79,6 +79,30 @@ export interface RunSummary extends Run {
 	latest_effort: string | null;
 	/** The last machine to take a message of the thread. */
 	latest_worker_id: string | null;
+	/** The repo's checks (`.sidefleet.json`) on the thread's latest message that ran them. */
+	latest_checks?: ChecksSummary | null;
+}
+
+/** How a message's checks went, as kept in its result (`result.checks`). */
+export interface ChecksSummary {
+	verdict: 'passed' | 'failed' | 'skipped' | 'error';
+	/** 2 when the agent had a go at fixing a failed check. */
+	attempts: number;
+	passed: number;
+	total: number;
+	failed: string[];
+}
+
+/** One check from the repo's `.sidefleet.json`, run in the message's worktree. */
+export interface CheckResult {
+	name: string;
+	run: string;
+	passed: boolean;
+	exit_code: number | null;
+	timed_out: boolean;
+	duration_ms: number;
+	/** The end of what it printed. */
+	output: string;
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';

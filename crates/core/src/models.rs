@@ -264,6 +264,10 @@ pub struct RunSummary {
     /// The last machine to take a message of the thread; a moved thread has changed machines.
     #[serde(default)]
     pub latest_worker_id: Option<String>,
+    /// The repo's checks on the thread's latest message that ran them (`result.checks`):
+    /// verdict passed, failed, skipped or error. None when no message ran any.
+    #[serde(default)]
+    pub latest_checks: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

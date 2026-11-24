@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod approval;
 pub mod checkpoint;
+pub mod checks;
 pub mod cleanup;
 pub mod client;
 pub mod commands;

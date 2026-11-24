@@ -586,6 +586,82 @@ async fn each_turn_reports_its_changes_and_the_thread_total() {
     h.teardown().await;
 }
 
+/// Commit a check list to the `demo` repo, as its owner would.
+fn commit_checks(h: &Harness, checks: serde_json::Value) {
+    let demo = h._repos.path().join("demo");
+    std::fs::write(demo.join(".sidefleet.json"), json!({ "checks": checks }).to_string()).unwrap();
+    for args in [&["add", ".sidefleet.json"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "checks"]] {
+        let st = std::process::Command::new("git").arg("-C").arg(&demo).args(args).output().unwrap();
+        assert!(st.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&st.stderr));
+    }
+}
+
+/// The `checks` events of a run, as (verdict, attempt, retrying).
+async fn checks_events(h: &Harness, id: Uuid) -> Vec<(String, i64, bool)> {
+    sidefleet_server::db::events_since(&h.env.pool, id, 0)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "checks")
+        .map(|e| (e.payload["verdict"].as_str().unwrap().to_string(), e.payload["attempt"].as_i64().unwrap(), e.payload["retrying"].as_bool().unwrap_or(false)))
+        .collect()
+}
+
+fn v(verdict: &str, attempt: i64, retrying: bool) -> (String, i64, bool) {
+    (verdict.to_string(), attempt, retrying)
+}
+
+#[tokio::test]
+async fn a_failed_check_gets_the_agent_one_retry_and_passes() {
+    let h = Harness::start(1).await;
+    commit_checks(&h, json!([{ "name": "fixed", "run": "grep -q fixed README.md" }]));
+    let id = h.create("edit the readme", "demo").await;
+    let run = h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(30)).await;
+    assert_eq!(checks_events(&h, id).await, [v("running", 1, false), v("failed", 1, true), v("running", 2, false), v("passed", 2, false)]);
+    let checks = &run.result.as_ref().unwrap()["checks"];
+    assert_eq!(checks["verdict"], "passed");
+    assert_eq!(checks["attempts"], 2);
+    let events = sidefleet_server::db::events_since(&h.env.pool, id, 0).await.unwrap();
+    let failed = events.iter().find(|e| e.kind == "checks" && e.payload["verdict"] == "failed").unwrap();
+    assert_eq!(failed.payload["checks"][0]["name"], "fixed");
+    assert_eq!(failed.payload["checks"][0]["exit_code"], 1);
+    // Both of the agent's turns are in the run, and its changes are recorded after the checks.
+    assert_eq!(events.iter().filter(|e| e.kind == "result").count(), 2);
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).filter(|k| *k != "stderr").collect();
+    assert_eq!(&kinds[kinds.len() - 4..], ["checks", "snapshot", "diff", "status"], "{kinds:?}");
+
+    // The run list says how the thread's checks went.
+    let list: Vec<serde_json::Value> = h.dev_get("/v1/runs").await;
+    assert_eq!(list[0]["latest_checks"]["verdict"], "passed");
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn a_check_that_still_fails_after_the_retry_marks_the_run_failed_checks() {
+    let h = Harness::start(1).await;
+    commit_checks(&h, json!([{ "name": "never", "run": "echo nope; exit 1" }, { "name": "later", "run": "true" }]));
+    let id = h.create("edit the readme", "demo").await;
+    let run = h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(30)).await;
+    assert_eq!(checks_events(&h, id).await, [v("running", 1, false), v("failed", 1, true), v("running", 2, false), v("failed", 2, false)]);
+    let checks = &run.result.as_ref().unwrap()["checks"];
+    assert_eq!(checks["verdict"], "failed");
+    assert_eq!(checks["failed"], json!(["never"]));
+    // The run itself finished: the agent did its work, the checks are what failed.
+    assert_eq!(run.status, RunStatus::Succeeded);
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn a_turn_that_changes_nothing_runs_no_checks() {
+    let h = Harness::start(1).await;
+    commit_checks(&h, json!([{ "name": "fails", "run": "exit 1" }]));
+    let id = h.create("look around", "demo").await;
+    let run = h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+    assert!(checks_events(&h, id).await.is_empty());
+    assert!(run.result.as_ref().unwrap().get("checks").is_none());
+    h.teardown().await;
+}
+
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));

@@ -1001,7 +1001,8 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
                 coalesce(latest.agent, r.agent) AS latest_agent,
                 coalesce(latest.model, r.model) AS latest_model,
                 latest.effort AS latest_effort,
-                (SELECT l.worker_id FROM runs l WHERE (l.id = r.id OR l.parent_id = r.id) AND l.worker_id IS NOT NULL ORDER BY l.created_at DESC LIMIT 1) AS latest_worker_id
+                (SELECT l.worker_id FROM runs l WHERE (l.id = r.id OR l.parent_id = r.id) AND l.worker_id IS NOT NULL ORDER BY l.created_at DESC LIMIT 1) AS latest_worker_id,
+                (SELECT l.result->'checks' FROM runs l WHERE (l.id = r.id OR l.parent_id = r.id) AND l.result->'checks' IS NOT NULL ORDER BY l.created_at DESC LIMIT 1) AS latest_checks
          FROM runs r
          LEFT JOIN LATERAL (
              SELECT l.agent, l.model, l.effort FROM runs l
@@ -1033,6 +1034,7 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
                 latest_model: r.get("latest_model"),
                 latest_effort: r.get("latest_effort"),
                 latest_worker_id: r.get("latest_worker_id"),
+                latest_checks: r.get("latest_checks"),
             }
         })
         .collect())

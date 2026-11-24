@@ -17,10 +17,10 @@ use tokio::sync::{mpsc, watch};
 /// kill them instead of leaving orphans that keep consuming the user's plan.
 static LIVE_GROUPS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 
-fn track(pid: i32) {
+pub(crate) fn track(pid: i32) {
     LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
 }
-fn untrack(pid: i32) {
+pub(crate) fn untrack(pid: i32) {
     LIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid);
 }
 

@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "web", "run": "pnpm --dir web install --frozen-lockfile --silent && pnpm --dir web check" },
+    { "name": "clippy", "run": "cargo clippy --workspace --all-targets --locked -- -D warnings", "timeout_minutes": 30 },
+    { "name": "unit tests", "run": "cargo test --workspace --lib --locked", "timeout_minutes": 30 }
+  ]
+}

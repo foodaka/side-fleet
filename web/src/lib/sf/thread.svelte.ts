@@ -1,7 +1,7 @@
 import { api } from './api';
 import { followRun } from './sse';
 import { fleet } from './state.svelte';
-import type { AgentId, ApprovalStatus, Run, RunEvent } from './types';
+import type { AgentId, ApprovalStatus, CheckResult, Run, RunEvent } from './types';
 import { agentName } from './format';
 import type { DiffSet } from './diff/parse';
 import type { AttachedPayload } from './attach.svelte';
@@ -51,7 +51,22 @@ export type Item =
 			at: string;
 	  }
 	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string; href?: string }
-	| { kind: 'stderr'; key: string; text: string; at: string };
+	| { kind: 'stderr'; key: string; text: string; at: string }
+	| ChecksItem;
+
+/** The repo's checks after the agent's turn (see `ChecksCard`). */
+export interface ChecksItem {
+	kind: 'checks';
+	key: string;
+	at: string;
+	verdict: 'passed' | 'failed' | 'skipped' | 'error';
+	attempt: number;
+	/** The agent was asked to fix the failure, and its fix follows. */
+	retrying: boolean;
+	/** Why they didn't run (skipped), or what is wrong with the list (error). */
+	reason: string | null;
+	checks: CheckResult[];
+}
 
 /** A message you just sent that the server hasn't taken yet, or couldn't. It shows at once, in place of its turn. */
 export interface Outgoing {
@@ -98,6 +113,8 @@ export interface Turn {
 	diff: { turn: DiffSet; total: DiffSet | null } | null;
 	/** Snapshots (commits) of the files before and after this turn, to restore to or fork from. */
 	snapshot: { before: string; after: string } | null;
+	/** How the repo's checks went on what the turn left, when it ran them. */
+	checks: ChecksItem | null;
 }
 
 /** Tokens in the agent's context window, and the window's size when known. */
@@ -124,7 +141,8 @@ function newTurn(run: Run): Turn {
 		liveText: '',
 		reconnecting: false,
 		diff: null,
-		snapshot: null
+		snapshot: null,
+		checks: null
 	};
 }
 
@@ -487,6 +505,27 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			};
 			t.activity = null;
 			break;
+		case 'checks': {
+			if (p.verdict === 'running') {
+				t.activity = p.attempt > 1 ? 'Running the checks again' : 'Running the checks';
+				break;
+			}
+			const c: ChecksItem = {
+				kind: 'checks', key, at: ev.at, verdict: p.verdict, attempt: p.attempt ?? 1,
+				retrying: !!p.retrying, reason: p.reason ?? null, checks: p.checks ?? []
+			};
+			if (c.retrying) {
+				// The agent's first answer stays in the narration, then the failure, then its fix.
+				if (t.result?.text) t.items.push({ kind: 'text', key: `${key}-reply`, text: t.result.text, at: ev.at });
+				t.items.push(c);
+				t.result = null;
+				t.activity = 'Fixing the failed check';
+			} else {
+				t.checks = c;
+				t.activity = null;
+			}
+			break;
+		}
 		case 'snapshot':
 			if (p.before && p.after) t.snapshot = { before: p.before, after: p.after };
 			break;

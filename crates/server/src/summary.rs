@@ -57,6 +57,9 @@ pub async fn thread(pool: &PgPool, org: Uuid, id: Uuid, base: &str) -> sqlx::Res
         break;
     }
 
+    // The repo's checks on the newest message that ran them.
+    let checks = runs.iter().rev().find_map(|r| r.result.as_ref()?.get("checks").cloned());
+
     let pending: Vec<Value> = approvals::list(pool, org, latest.id)
         .await?
         .into_iter()
@@ -78,6 +81,7 @@ pub async fn thread(pool: &PgPool, org: Uuid, id: Uuid, base: &str) -> sqlx::Res
         "reply": reply,
         "error": error,
         "changed_files": changed,
+        "checks": checks,
         "pending_approvals": pending,
         "pr": root.pr,
         "url": format!("{}/#/runs/{}", base.trim_end_matches('/'), root.id),

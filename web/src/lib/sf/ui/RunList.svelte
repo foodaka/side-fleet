@@ -18,6 +18,8 @@
 	import ChevronRight from '@lucide/svelte/icons/chevron-right';
 	import AlarmClock from '@lucide/svelte/icons/alarm-clock';
 	import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
+	import CircleCheck from '@lucide/svelte/icons/circle-check';
+	import CircleX from '@lucide/svelte/icons/circle-x';
 	import Pin from '@lucide/svelte/icons/pin';
 	import PinOff from '@lucide/svelte/icons/pin-off';
 	import * as Dialog from '#lib/components/ui/dialog';
@@ -171,6 +173,11 @@
 			<span class="flex min-w-0 items-center gap-1.5">
 				{#if filtering && fleet.othersRun(r)}<Avatar login={fleet.login(r.created_by)} size={14} class="ring-0" />{/if}
 				<span class="min-w-0 flex-1 truncate {unread ? 'font-medium text-foreground' : ''}">{r.task}</span>
+				{#if r.latest_checks?.verdict === 'passed'}
+					<span class="shrink-0 group-hover/row:invisible" role="img" aria-label="Checks passed" title="All {r.latest_checks.total} checks passed"><CircleCheck class="size-3 text-ok-ink" /></span>
+				{:else if r.latest_checks?.verdict === 'failed'}
+					<span class="shrink-0 group-hover/row:invisible" role="img" aria-label="Checks failed" title="Check failed: {r.latest_checks.failed.join(', ')}"><CircleX class="size-3 text-err-ink" /></span>
+				{/if}
 				{#if r.pr}
 					<span class="tnum flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground group-hover/row:invisible" title="Pull request #{r.pr.number}: {r.pr.state}">
 						<PrIcon state={r.pr.state} />{r.pr.number}

@@ -1,22 +1,15 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
-	import { setMode, userPrefersMode } from 'mode-watcher';
 	import * as Tooltip from '#lib/components/ui/tooltip';
-	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import { Kbd } from '#lib/components/ui/kbd';
-	import MessageSquare from '@lucide/svelte/icons/message-square';
-	import MessagesSquare from '@lucide/svelte/icons/messages-square';
-	import UsersRound from '@lucide/svelte/icons/users-round';
 	import Boxes from '@lucide/svelte/icons/boxes';
 	import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
-	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, Settings, X } from '#lib/components/movingicons';
+	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
 	import RunList from './RunList.svelte';
-	import OrgSwitcher from './OrgSwitcher.svelte';
+	import AccountMenu from './AccountMenu.svelte';
 	import InboxBell from './InboxBell.svelte';
 	import { fleet } from '../state.svelte';
-	import { parseBuild } from '../format';
 
 	let { path, onClose, drawer = false, closeKeys = '' }: {
 		path: string;
@@ -30,24 +23,21 @@
 	const closeLabel = $derived(drawer ? 'Close menu' : 'Hide sidebar');
 
 	let query = $state('');
-	let settingsOpen = $state(false);
 	let search = $state<HTMLInputElement | null>(null);
 
 	const activeId = $derived(/^\/runs\/([^/?#]+)/.exec(path)?.[1] ?? null);
-	const build = $derived(parseBuild(fleet.setup?.build));
 	const connLabel = $derived(
 		fleet.conn === 'unreachable' ? 'Control plane unreachable'
 		: !fleet.loaded ? 'Connecting…'
 		: `${fleet.online.length} of ${fleet.workers.length} machine${fleet.workers.length === 1 ? '' : 's'} online`
 			+ (fleet.updatable.length ? `, ${fleet.updatable.length} can update` : '')
 	);
-	const nav = $derived([
+	// Places you go often sit above the tasks; setup (team, chat apps, settings) lives in the account menu below.
+	const nav = [
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
-		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') },
-		...(fleet.me?.user ? [{ href: '#/team', label: 'Team', icon: UsersRound, on: (p: string) => p.startsWith('/team') }] : []),
-		{ href: '#/chat', label: 'Chat apps', icon: MessagesSquare, on: (p: string) => p.startsWith('/chat') }
-	]);
+		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
+	];
 
 	function onkeydown(e: KeyboardEvent) {
 		// `/` jumps to search, unless you're typing somewhere or this copy of the sidebar is hidden.
@@ -69,7 +59,6 @@
 	<div class="flex items-center gap-1 pt-3.5 pr-2.5 pb-3 pl-4">
 		<a href="#/" class="flex items-center gap-2 text-[15px] font-semibold tracking-tight"><Logo />Sidefleet</a>
 		<span class="ml-auto"></span>
-		{#if !drawer}<InboxBell />{/if}
 		<Tooltip.Root>
 			<Tooltip.Trigger
 				class="mi-hover grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
@@ -83,7 +72,6 @@
 	</div>
 
 	<div class="flex flex-col gap-2 px-3">
-		<OrgSwitcher />
 		<a
 			href="#/"
 			aria-current={path === '/' ? 'page' : undefined}
@@ -114,9 +102,8 @@
 		</label>
 	</div>
 
-	<RunList {query} {activeId} />
-
-	<nav class="flex flex-col gap-0.5 border-t border-sidebar-border px-3 py-2.5" aria-label="Main">
+	<nav class="mt-1 flex flex-col gap-0.5 px-3" aria-label="Main">
+		{#if !drawer}<InboxBell row side="right" />{/if}
 		{#each nav as n (n.href)}
 			<a href={n.href} aria-current={n.on(path) ? 'page' : undefined} class={item(n.on(path))}>
 				<n.icon size={14} />
@@ -133,38 +120,11 @@
 				{/if}
 			</a>
 		{/each}
-		<DropdownMenu.Root bind:open={settingsOpen}>
-			<DropdownMenu.Trigger class="{item(path === '/settings')} w-full data-[state=open]:bg-sidebar-accent data-[state=open]:text-foreground">
-				<Settings size={14} animate={settingsOpen} />Settings
-			</DropdownMenu.Trigger>
-			<DropdownMenu.Content align="start" side="top" class="w-60">
-				<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Appearance</DropdownMenu.Label>
-				<DropdownMenu.RadioGroup value={userPrefersMode.current} onValueChange={(v) => setMode(v as 'light' | 'dark' | 'system')}>
-					<DropdownMenu.RadioItem value="system">Match system</DropdownMenu.RadioItem>
-					<DropdownMenu.RadioItem value="light">Light</DropdownMenu.RadioItem>
-					<DropdownMenu.RadioItem value="dark">Dark</DropdownMenu.RadioItem>
-				</DropdownMenu.RadioGroup>
-				<DropdownMenu.Separator />
-				<DropdownMenu.Item onclick={() => goto('#/settings')}>All settings…</DropdownMenu.Item>
-				<DropdownMenu.Item onclick={() => (fleet.pickerOpen = true)}>Choose repos…</DropdownMenu.Item>
-				{#if fleet.me?.user}
-					<DropdownMenu.Separator />
-					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Signed in as {fleet.me.user.login}{fleet.org ? `, working in ${fleet.org.name}` : ''}</DropdownMenu.Label>
-					<DropdownMenu.Item onclick={() => (fleet.machinesOpen = true)}>Your machines…</DropdownMenu.Item>
-					{#if fleet.isOwner && fleet.org}<DropdownMenu.Item onclick={() => (fleet.renameOrgOpen = true)}>Rename {fleet.org.name}…</DropdownMenu.Item>{/if}
-					<DropdownMenu.Item onclick={() => (fleet.newOrgOpen = true)}>New org…</DropdownMenu.Item>
-					<DropdownMenu.Item onclick={() => fleet.signOut()}>Sign out</DropdownMenu.Item>
-				{:else}
-					<DropdownMenu.Item onclick={() => fleet.signOut()}>Change developer key…</DropdownMenu.Item>
-				{/if}
-				{#if build.sha}
-					<DropdownMenu.Separator />
-					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Control plane {build.version}, build <span class="font-mono">{build.sha}</span> from {build.date}</DropdownMenu.Label>
-				{/if}
-			</DropdownMenu.Content>
-		</DropdownMenu.Root>
-		<button type="button" class="{item(false)} w-full" onclick={() => (fleet.feedbackOpen = true)}>
-			<MessageSquare size={14} />Feedback
-		</button>
 	</nav>
+
+	<RunList {query} {activeId} />
+
+	<div class="border-t border-sidebar-border px-2 py-2">
+		<AccountMenu {path} />
+	</div>
 </div>

@@ -2,13 +2,16 @@
 	import { goto } from '$app/navigation';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu';
 	import Bell from '@lucide/svelte/icons/bell';
+	import Inbox from '@lucide/svelte/icons/inbox';
 	import { fleet } from '../state.svelte';
 	import { inbox, reasonTone } from '../inbox.svelte';
 	import { ago, repoLabel } from '../format';
 
-	let { side = 'bottom', align = 'start', class: className = '' }: {
+	let { side = 'bottom', align = 'start', row = false, class: className = '' }: {
 		side?: 'bottom' | 'right';
 		align?: 'start' | 'end';
+		/** A labelled sidebar row ("Inbox") rather than a bell icon. */
+		row?: boolean;
 		class?: string;
 	} = $props();
 
@@ -48,6 +51,18 @@
 </script>
 
 <DropdownMenu.Root bind:open>
+	{#if row}
+	<DropdownMenu.Trigger
+		class="mi-hover flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] transition-colors hover:bg-sidebar-accent/60 hover:text-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-foreground {count ? 'text-foreground' : 'text-muted-foreground'} {className}"
+		aria-label={count ? `Inbox: ${count} waiting on you` : 'Inbox: nothing waiting on you'}
+	>
+		<Inbox class="size-3.5 shrink-0" />
+		<span class="flex-1">Inbox</span>
+		{#if count}
+			<span class="tnum grid h-4 min-w-4 place-items-center rounded-full bg-queue-soft px-1 text-[10.5px] font-semibold text-queue-ink">{count > 99 ? '99+' : count}</span>
+		{/if}
+	</DropdownMenu.Trigger>
+	{:else}
 	<DropdownMenu.Trigger
 		class="mi-hover relative grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-foreground {className}"
 		aria-label={count ? `Waiting on you: ${count}` : 'Waiting on you: nothing'}
@@ -60,6 +75,7 @@
 			</span>
 		{/if}
 	</DropdownMenu.Trigger>
+	{/if}
 	<DropdownMenu.Content {side} {align} class="w-80 p-0">
 		<div class="flex items-center justify-between gap-2 border-b px-3 py-2">
 			<span class="text-[13px] font-medium">Waiting on you</span>

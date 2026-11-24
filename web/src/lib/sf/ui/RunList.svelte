@@ -32,6 +32,7 @@
 	import EyeOff from '@lucide/svelte/icons/eye-off';
 	import ChevronsDownUp from '@lucide/svelte/icons/chevrons-down-up';
 	import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
+	import ListFilter from '@lucide/svelte/icons/list-filter';
 
 	let { query = '', activeId = null }: { query?: string; activeId?: string | null } = $props();
 
@@ -112,6 +113,8 @@
 	// By project: one group per repo, the ones waiting on you or busy first, then the latest.
 	const SHOWN = 5;
 	const byProject = $derived(projects.view === 'project');
+	// The view button says what the list shows, so the choice stays visible with the menu closed.
+	const viewLabel = $derived([filtering ? (scope === 'team' ? 'Team' : 'Mine') : '', byProject ? 'By project' : 'By time'].filter(Boolean).join(' · '));
 	const projectGroups = $derived.by(() => {
 		const by = new Map<string, RunSummary[]>();
 		for (const r of runs) {
@@ -316,20 +319,6 @@
 	{/if}
 {/snippet}
 
-{#snippet segment(label: string, options: string[][], value: string, set: (v: string) => void, badge = 0)}
-	<div class="grid flex-1 grid-cols-2 rounded-md bg-sidebar-accent/60 p-0.5" role="tablist" aria-label={label}>
-		{#each options as [id, text] (id)}
-			<button
-				type="button"
-				role="tab"
-				aria-selected={value === id}
-				class="truncate rounded px-1.5 py-1 transition-colors {value === id ? 'bg-background font-medium text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}"
-				onclick={() => set(id)}
-			>{text}{#if id === 'team' && badge}<span class="tnum ml-1 text-faint">{badge}</span>{/if}</button>
-		{/each}
-	</div>
-{/snippet}
-
 {#snippet heading(label: string, count?: number)}
 	<h3 class="flex items-center gap-1.5 px-2.5 pt-4 pb-1 text-[11px] font-medium text-faint">
 		{label}{#if count}<span class="tnum rounded-full bg-run-soft px-1.5 text-[10.5px] leading-4 text-run-ink">{count}</span>{/if}
@@ -356,17 +345,39 @@
 			<p class="px-2.5 py-2 text-xs text-muted-foreground">Nothing in the latest {fleet.runs.length} tasks mentions “{query.trim()}”.</p>
 		{/if}
 	{:else}
-		<div class="mx-1 mt-3 flex flex-col gap-1.5 text-[12px]">
-			{#if filtering}
-				{@render segment('Whose tasks', [['mine', 'Mine'], ['team', 'Team']], scope, (v) => setScope(v as 'mine' | 'team'), theirs)}
-			{/if}
-			{@render segment('Group tasks', [['time', 'By time'], ['project', 'By project']], projects.view, (v) => projects.setView(v as 'time' | 'project'))}
+		<div class="mt-2 flex items-center gap-1 pr-1 pl-2.5">
+			<h3 class="text-[11px] font-medium text-faint">Tasks</h3>
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger
+					class="ml-auto flex h-6 min-w-0 items-center gap-1.5 rounded px-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-foreground"
+					aria-label="Change the list view: {viewLabel}"
+				>
+					<ListFilter class="size-3 shrink-0" /><span class="truncate">{viewLabel}</span>
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" class="w-52">
+					{#if filtering}
+						<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Show</DropdownMenu.Label>
+						<DropdownMenu.RadioGroup value={scope} onValueChange={(v) => setScope(v as 'mine' | 'team')}>
+							<DropdownMenu.RadioItem value="mine">Mine</DropdownMenu.RadioItem>
+							<DropdownMenu.RadioItem value="team">
+								<span class="flex-1">Team</span>{#if theirs}<span class="tnum ml-2 text-xs text-muted-foreground">{theirs} more</span>{/if}
+							</DropdownMenu.RadioItem>
+						</DropdownMenu.RadioGroup>
+						<DropdownMenu.Separator />
+					{/if}
+					<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Group by</DropdownMenu.Label>
+					<DropdownMenu.RadioGroup value={projects.view} onValueChange={(v) => projects.setView(v as 'time' | 'project')}>
+						<DropdownMenu.RadioItem value="time">Time</DropdownMenu.RadioItem>
+						<DropdownMenu.RadioItem value="project">Project</DropdownMenu.RadioItem>
+					</DropdownMenu.RadioGroup>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
 		</div>
 	{/if}
 	{#if fleet.loaded && !q && !awake.length}
 		<div class="mx-1 mt-4 rounded-lg border border-dashed border-sidebar-border px-3 py-4 text-xs leading-relaxed text-muted-foreground">
 			{#if filtering && scope === 'mine' && fleet.runs.length}
-				You haven't started a task here yet. Switch to Team to see what everyone else is running.
+				You haven't started a task here yet. Choose Team in the view menu above to see what everyone else is running.
 			{:else}
 				No tasks yet. Each one you start shows up here, so you can jump between them.
 			{/if}

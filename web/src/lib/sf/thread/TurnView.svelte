@@ -55,6 +55,8 @@
 	const isPr = $derived(run.kind === 'pr');
 	/** Sending this thread's files to a fork on another machine (`context` is the fork). */
 	const isHandoff = $derived(run.kind === 'handoff');
+	/** The fork's first message, from the handoff's task text ("Send the files to a fork: …"). */
+	const handoffFork = $derived(run.task.replace(/^Send the files to a fork:\s*/, '') || 'Open the fork');
 	/** Merging the thread's branch into its room's branch. */
 	const isIntegrate = $derived(run.kind === 'integrate');
 	const integrated = $derived(run.result?.integrated as { branch?: string; commit?: string; files?: string[] } | undefined);
@@ -146,9 +148,10 @@
 			{/if}
 		</div>
 	{:else if isHandoff}
-		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-			<GitFork class="size-3" />{run.task.replace(/^Send the files to a fork: /, 'Sending the files to the fork ')}
-			{#if run.context}<a href="#/runs/{run.context}" class="underline decoration-dotted underline-offset-2 hover:text-foreground">Open the fork</a>{/if}
+		<p class="flex flex-wrap items-center justify-center gap-x-1.5 text-xs {run.status === 'failed' ? 'text-err-ink' : 'text-muted-foreground'}">
+			<GitFork class="size-3" />
+			<span>{run.status === 'succeeded' ? 'Sent the files to a fork' : run.status === 'failed' || run.status === 'stopped' ? "Didn't send the files to a fork" : 'Sending the files to a fork'}{run.worker_id ? ` from ${fleet.workerName(run.worker_id)}` : ''}</span>
+			{#if run.context}<a href="#/runs/{run.context}" class="max-w-[18rem] truncate text-foreground/80 underline decoration-dotted underline-offset-2 hover:text-foreground">{handoffFork}</a>{/if}
 		</p>
 	{:else if isRestore || isPr}
 		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">{#if isPr}<GitPullRequest class="size-3" />{:else}<RotateCcw class="size-3" />{/if}{run.task}</p>

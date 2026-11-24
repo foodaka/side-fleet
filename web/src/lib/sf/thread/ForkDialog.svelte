@@ -56,7 +56,8 @@
 	const filesMachine = $derived(filesOn ? fleet.mine.find((w) => w.id === filesOn) : undefined);
 	/** On another machine, the one with the files sends them first, if it is online and new enough. */
 	const elsewhere = $derived(!!filesOn && !!chosen && chosen.id !== filesOn);
-	const sending = $derived(elsewhere && !!filesMachine?.online && !!filesMachine.capabilities.can_hand_off_files);
+	const canSend = $derived(!!filesMachine?.online && !!filesMachine.capabilities.can_hand_off_files);
+	const sending = $derived(elsewhere && canSend);
 	const where = $derived(chosen?.display_name ?? (filesOn ? filesOn : `a machine with ${repoLabel(run.repo)}`));
 	const models = $derived(machineModels(machines, agent));
 	const can = $derived(!!task.trim() && modelValid(agent, model) && machines.some((w) => hasAgent(w, agent)) && !busy);
@@ -117,7 +118,7 @@
 							<Select.Item value={w.id === filesOn ? DEFAULT : w.id} label={w.display_name}>
 								<span class="flex flex-col">
 									<span>{w.display_name}{#if !w.online}<span class="ml-1.5 text-xs text-muted-foreground">offline</span>{/if}</span>
-									<span class="text-xs text-muted-foreground">{w.id === filesOn ? 'Starts with the files as they were after this message' : filesOn ? `Starts from ${repoLabel(run.repo)} as it is there, without this thread's files` : `${w.capabilities.slots ? `${w.capabilities.slots.active} of ${w.capabilities.slots.parallel} slots busy` : 'Has the repo'}`}</span>
+									<span class="text-xs text-muted-foreground">{w.id === filesOn ? 'Starts with the files as they were after this message' : canSend ? `Gets the files from ${filesMachine?.display_name ?? filesOn} first` : filesOn ? `Starts from ${repoLabel(run.repo)} as it is there, without this thread's files` : `${w.capabilities.slots ? `${w.capabilities.slots.active} of ${w.capabilities.slots.parallel} slots busy` : 'Has the repo'}`}</span>
 								</span>
 							</Select.Item>
 						{/each}

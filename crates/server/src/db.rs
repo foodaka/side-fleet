@@ -993,7 +993,7 @@ pub async fn list_runs(pool: &PgPool, org: Uuid, limit: i64, archived: bool) -> 
     let cols = RUN_COLS.split(", ").map(|c| format!("r.{c}")).collect::<Vec<_>>().join(", ");
     let rows = sqlx::query(&format!(
         "SELECT {cols},
-                (SELECT count(*) FROM runs f WHERE f.parent_id = r.id) AS follow_ups,
+                (SELECT count(*) FROM runs f WHERE f.parent_id = r.id AND f.kind <> 'handoff') AS follow_ups,
                 (SELECT l.status FROM runs l WHERE l.id = r.id OR l.parent_id = r.id ORDER BY (l.status = 'running') DESC, l.created_at DESC LIMIT 1) AS thread_status,
                 (SELECT max(greatest(l.created_at, coalesce(l.finished_at, l.created_at))) FROM runs l WHERE l.id = r.id OR l.parent_id = r.id) AS last_activity_at,
                 (SELECT count(*) FROM approvals a JOIN runs l ON l.id = a.run_id

@@ -58,6 +58,8 @@
 
 	// Fork asked for from the sidebar: from the latest finished message, once the thread has loaded.
 	let forkOpen = $state(false);
+	/** Messages in the thread; a handoff (sending files to a fork) isn't one. */
+	const messages = $derived(thread?.runs.filter((r) => r.kind !== 'handoff').length ?? 0);
 	// The latest finished message (not a pull request, handoff or the like, which have no files of their own).
 	const forkTurn = $derived(thread?.turns.findLast((t) => ['agent', 'restore'].includes(t.run.kind) && ['succeeded', 'failed', 'stopped'].includes(t.run.status)));
 	$effect(() => {
@@ -284,7 +286,7 @@
 							<PrIcon state={pr.state} /><span class="tnum text-foreground/80">#{pr.number}</span>{prLabel[pr.state]}
 						</a>
 					{/if}
-					{#if thread.runs.length > 1}<span class="tnum max-md:hidden">{thread.runs.length} messages</span>{/if}
+					{#if messages > 1}<span class="tnum max-md:hidden">{messages} messages</span>{/if}
 					<!-- On phones the composer has no room for it. -->
 					{#if thread.context && !theirs}
 						<ContextMeter context={thread.context.context} agent={thread.context.agent} class="-my-2 sm:hidden" />

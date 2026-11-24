@@ -710,13 +710,35 @@ pub async fn record_prs(pool: &PgPool, org: Uuid, worker_id: &str, prs: &[PrRepo
     Ok(())
 }
 
-/// Open pull requests this worker opened and hasn't checked in a while; marks
+/// Have the thread's open pull request checked on its machine's next heartbeat. False
+/// when the thread has no open pull request.
+pub async fn check_pr_soon(pool: &PgPool, org: Uuid, root: Uuid) -> sqlx::Result<bool> {
+    let open: Option<bool> = sqlx::query_scalar("SELECT pr->>'state' = 'open' FROM runs WHERE id = $1 AND org_id = $2 AND parent_id IS NULL")
+        .bind(root)
+        .bind(org)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+    if open != Some(true) {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE runs SET pr_checked_at = NULL WHERE id = $1 AND org_id = $2 AND pr_checked_at < now() - interval '30 seconds'")
+        .bind(root)
+        .bind(org)
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
+/// Open pull requests this worker opened and hasn't checked in a while (sooner while
+/// checks are running); marks
 /// them checked now so a failing check isn't handed out on every heartbeat.
 pub async fn prs_to_check(pool: &PgPool, org: Uuid, worker_id: &str) -> sqlx::Result<Vec<PrCheck>> {
     let rows = sqlx::query(
         "UPDATE runs SET pr_checked_at = now() WHERE id IN (
              SELECT id FROM runs WHERE org_id = $1 AND pr_worker = $2 AND pr->>'state' = 'open'
-               AND (pr_checked_at IS NULL OR pr_checked_at < now() - interval '3 minutes')
+               AND (pr_checked_at IS NULL OR pr_checked_at < now() - interval '3 minutes'
+                    OR (COALESCE((pr->'checks'->>'pending')::int, 0) > 0 AND pr_checked_at < now() - interval '1 minute'))
              ORDER BY pr_checked_at NULLS FIRST LIMIT 20)
          RETURNING id, pr->>'url' AS url",
     )

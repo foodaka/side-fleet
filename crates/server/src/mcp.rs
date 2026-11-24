@@ -559,6 +559,18 @@ fn summary_text(s: &Value) -> String {
     }
     if let Some(url) = s["pr"]["url"].as_str() {
         out.push_str(&format!("Pull request #{} ({}): {url}\n", s["pr"]["number"], s["pr"]["state"].as_str().unwrap_or("")));
+        let ch = &s["pr"]["checks"];
+        if ch.is_object() {
+            let names: Vec<&str> = ch["failing"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect();
+            let failing = if names.is_empty() { String::new() } else { format!(" ({})", names.join(", ")) };
+            out.push_str(&format!("Checks: {} passed, {} failed{failing}, {} running\n", ch["passed"], ch["failed"], ch["pending"]));
+        }
+        if let Some(r) = s["pr"]["review"].as_str() {
+            out.push_str(&format!("Review: {}\n", r.replace('_', " ")));
+        }
+        if s["pr"]["conflicts"] == true {
+            out.push_str("It conflicts with its base branch.\n");
+        }
     }
     out.push_str(&format!("Page: {}", s["url"].as_str().unwrap_or("")));
     out

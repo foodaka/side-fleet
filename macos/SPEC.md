@@ -191,6 +191,7 @@ is the normal case here.
 | Send now | Stop only the running one |
 | Start now, cancel scheduled | `POST /start-now`, `POST /stop` |
 | Restore, fork, open PR | `POST /restore`, `POST /fork`, `POST /:root/pr` |
+| Check a PR now | `POST /:root/pr/check`: the machine looks at the open PR on its next heartbeat (409 with none open). The thread asks once when it opens. A run's `pr` carries `title`, `base`, `draft`, `review` (`approved`, `changes_requested`, `review_required`), `conflicts` and `checks {passed, failed, pending, failing: [{name, url?}]}` when the machine reports them |
 | Approve, deny | `POST /approvals/:id/approve`, `/deny` |
 | Archive, snooze | `POST /archive {archived}`, `POST /snooze {until}`, optimistic with rollback and Undo |
 | Pin | `POST /pin {pinned}`, optimistic with rollback; the list puts pinned threads first |

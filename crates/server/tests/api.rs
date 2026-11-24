@@ -2254,11 +2254,33 @@ async fn pull_requests_are_opened_on_the_threads_machine_and_kept_on_the_thread(
     sqlx::query("UPDATE runs SET pr_checked_at = now() - interval '10 minutes'").execute(&env.pool).await.unwrap();
     assert_eq!(hb().await["check_prs"], json!([{"thread": id, "url": "https://github.com/o/r/pull/7"}]));
     assert!(hb().await.get("check_prs").is_none(), "handed out once");
+
+    // What the machine saw is kept, minus links that aren't https; running checks are looked at again sooner.
+    let rich = json!({"url": "https://github.com/o/r/pull/7", "number": 7, "state": "open", "title": "Fix the login bug", "base": "main", "draft": true,
+        "review": "changes_requested", "conflicts": true, "checks": {"passed": 2, "failed": 1, "pending": 1,
+        "failing": [{"name": "test", "url": "javascript:alert(1)"}]}});
+    let r = api.worker(reqwest::Method::POST, "/v1/worker/prs").json(&json!({"worker_id": "w", "prs": [{"thread": id, "pr": rich}]})).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let runs: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
+    let pr = listed(runs);
+    assert_eq!((pr["title"].clone(), pr["draft"].clone(), pr["review"].clone(), pr["conflicts"].clone()), (json!("Fix the login bug"), json!(true), json!("changes_requested"), json!(true)));
+    assert_eq!(pr["checks"]["failing"], json!([{"name": "test"}]));
+    sqlx::query("UPDATE runs SET pr_checked_at = now() - interval '90 seconds'").execute(&env.pool).await.unwrap();
+    assert_eq!(hb().await["check_prs"][0]["thread"], json!(id), "checks running: due after a minute");
+
+    // Asked for from the page: due on the next heartbeat, once per half minute.
+    let check = || api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/pr/check")).send();
+    assert_eq!(check().await.unwrap().status(), StatusCode::ACCEPTED);
+    assert!(hb().await.get("check_prs").is_none(), "just checked");
+    sqlx::query("UPDATE runs SET pr_checked_at = now() - interval '40 seconds'").execute(&env.pool).await.unwrap();
+    assert_eq!(check().await.unwrap().status(), StatusCode::ACCEPTED);
+    assert_eq!(hb().await["check_prs"][0]["thread"], json!(id));
     report("merged").await.unwrap();
     sqlx::query("UPDATE runs SET pr_checked_at = now() - interval '10 minutes'").execute(&env.pool).await.unwrap();
     assert!(hb().await.get("check_prs").is_none(), "merged ones aren't checked again");
     let runs: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/runs").send().await.unwrap().json().await.unwrap();
     assert_eq!(listed(runs)["state"], "merged");
+    assert_eq!(api.dev(reqwest::Method::POST, &format!("/v1/runs/{id}/pr/check")).send().await.unwrap().status(), StatusCode::CONFLICT, "nothing open to check");
 
     // Nonsense is refused.
     let r = api.worker(reqwest::Method::POST, "/v1/worker/prs")

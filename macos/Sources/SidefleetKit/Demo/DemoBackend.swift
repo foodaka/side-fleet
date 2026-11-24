@@ -251,6 +251,9 @@ private actor DemoWorld {
             let new = kindRun("restore", "Restoring the files to before this message", rootID: rootID, from: run.json, now: now)
             play(new.id, script: [DemoStep(1, "status", ["status": "running", "worker_id": run.json["worker_id"] ?? "mac-mini"]), DemoStep(1.2, "restored"), DemoStep(0.2, "status", ["status": "succeeded"])])
             return try encode(["id": .string(new.id), "status": "queued"])
+        case ("POST", "pr") where rest.dropFirst().first == "check":
+            guard runs[rootID]?.json["pr"]?["state"]?.string == "open" else { throw APIError.status(409, "this thread has no open pull request to check") }
+            return try encode(["checking": true])
         case ("POST", "pr"):
             let new = kindRun("pr", "Opening a pull request", rootID: rootID, from: run.json, now: now)
             let number = 142 + threads.count

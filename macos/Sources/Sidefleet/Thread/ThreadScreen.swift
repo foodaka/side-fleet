@@ -121,6 +121,11 @@ private struct ThreadContent: View {
             if let id = root?.roomID, let detail = try? await stores.api.room(id) { roomName = detail.room.name }
         }
         .sheet(isPresented: $askingStop) { stopSheet }
+        // Opening your thread looks at its open pull request again (the server allows it every
+        // half minute), so its checks are fresh.
+        .task(id: thread.loaded ? root?.id : nil) {
+            if thread.loaded, !theirs, pr?.isOpen == true { try? await thread.checkPR() }
+        }
     }
 
     private func askForkFromSidebar(_ id: String?) {
@@ -142,7 +147,8 @@ private struct ThreadContent: View {
                          reviewing = ReviewRequest(scope: run ?? "all", focus: path)
                      },
                      onFork: { forking = ForkRequest(run: $0.run, hasFiles: $0.hasSnapshot) },
-                     onOpenPR: openPR, onSendNow: sendNow)
+                     onOpenPR: openPR, onCheckPR: checkPR,
+                     onAsk: { reply.text = $0 }, onSendNow: sendNow)
             Divider()
             if let root, theirs { teammateBar(root) } else if root != nil { composer.zIndex(1) }
         }
@@ -238,9 +244,9 @@ private struct ThreadContent: View {
             if let pr, let url = URL(string: pr.url) {
                 Link(destination: url) {
                     HStack(spacing: 4) {
-                        PRIcon(state: pr.state)
+                        PRIcon(state: pr.state, draft: pr.draft)
                         Text("#\(pr.number)").monospacedDigit().foregroundStyle(SF.ink.opacity(0.8))
-                        Text(pr.state.capitalized)
+                        Text(pr.stateLabel)
                     }
                     .padding(.horizontal, 6)
                     .frame(height: 22)
@@ -403,6 +409,17 @@ private struct ThreadContent: View {
                 stores.toasts.error("Could not open a pull request", error)
             }
             opening = false
+        }
+    }
+
+    private func checkPR() {
+        Task {
+            do {
+                try await thread.checkPR()
+                stores.toasts.show("Checking the pull request again", detail: "\(thread.machine ?? "Its machine") looks at it on GitHub; what it finds shows here within a minute.")
+            } catch {
+                stores.toasts.error("Could not check it", error)
+            }
         }
     }
 

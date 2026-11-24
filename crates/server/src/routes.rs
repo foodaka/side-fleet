@@ -72,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/restore", post(restore_run))
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/pr", post(open_pr))
+        .route("/v1/runs/{id}/pr/check", post(check_pr))
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/runs/{id}/snooze", post(snooze_run))
         .route("/v1/runs/{id}/pin", post(pin_run))
@@ -630,6 +631,20 @@ async fn open_pr(
         PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch of its own to open a pull request from".into())),
         PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
     }
+}
+
+/// Ask the machine that opened the thread's pull request to look at it again on its next
+/// heartbeat, rather than when it's next due. Asking again within half a minute does nothing.
+async fn check_pr(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let root = own_thread(&state, &caller, id).await?;
+    if !db::check_pr_soon(&state.pool, caller.org_id(), root.id).await? {
+        return Err(ApiError(StatusCode::CONFLICT, "this thread has no open pull request to check".into()));
+    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Merge a room task's branch into the room's branch, on the machine with its worktree.
@@ -1473,8 +1488,9 @@ async fn report_prs(
     if req.prs.len() > 100 || req.prs.iter().any(|r| !matches!(r.pr.state.as_str(), "open" | "merged" | "closed") || !r.pr.url.starts_with("https://")) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad pull request report".into()));
     }
+    let prs: Vec<_> = req.prs.into_iter().map(|r| sidefleet_core::PrReport { thread: r.thread, pr: r.pr.cleaned() }).collect();
     for org in &auth.orgs {
-        db::record_prs(&state.pool, *org, &req.worker_id, &req.prs).await?;
+        db::record_prs(&state.pool, *org, &req.worker_id, &prs).await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }

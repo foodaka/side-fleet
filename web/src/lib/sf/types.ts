@@ -65,6 +65,17 @@ export interface PullRequest {
 	url: string;
 	number: number;
 	state: 'open' | 'merged' | 'closed';
+	// What its machine saw when it last looked; machines older than these report none of them.
+	title?: string;
+	/** The branch it merges into. */
+	base?: string;
+	draft?: boolean;
+	/** Absent when the repo asks for no review. */
+	review?: 'approved' | 'changes_requested' | 'review_required';
+	/** GitHub can't merge it cleanly into `base`. */
+	conflicts?: boolean;
+	/** The checks on its last commit; absent when it has none. */
+	checks?: { passed: number; failed: number; pending: number; failing?: { name: string; url?: string }[] };
 }
 
 export interface RunSummary extends Run {

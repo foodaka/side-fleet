@@ -26,6 +26,8 @@ enum Tour {
                 ("thread-live", .thread("demo-guide")),
                 ("thread-failed", .thread("demo-stripe")),
                 ("thread-scheduled", .thread("demo-audit")),
+                // An open pull request: a failed check, changes requested, a conflict.
+                ("thread-pr", .thread("demo-coupons")),
                 // The sidebar By project, then the icon picker over it.
                 ("sidebar-projects", .overview),
                 ("machines", .machines),

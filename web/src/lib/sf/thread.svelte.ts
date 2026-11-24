@@ -259,6 +259,11 @@ export class Thread {
 		await this.#action(`/v1/runs/${this.root!.id}/pr`);
 	}
 
+	/** Have the machine look at the pull request again now rather than in a few minutes. */
+	async checkPr() {
+		await api(`/v1/runs/${this.root!.id}/pr/check`, { method: 'POST' });
+	}
+
 	async #action(path: string) {
 		const r = await api<{ id: string }>(path, { method: 'POST' });
 		const run = await api<Run>(`/v1/runs/${r.id}`);

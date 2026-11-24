@@ -154,13 +154,77 @@ pub struct Run {
     pub start_at: Option<DateTime<Utc>>,
 }
 
-/// A GitHub pull request for a thread's branch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A GitHub pull request for a thread's branch. Everything after `state` is what the
+/// machine saw when it last looked; older machines report only the first three.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PullRequest {
     pub url: String,
     pub number: i64,
     /// `open`, `merged` or `closed`.
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The branch it merges into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
+    /// `approved`, `changes_requested` or `review_required`; none when the repo asks for no review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    /// GitHub says it can't merge cleanly into `base`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflicts: bool,
+    /// The checks on its last commit; none when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PrChecks>,
+}
+
+/// A pull request's checks, counted, with the ones that failed by name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrChecks {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+    /// The first few that failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<FailedCheck>,
+}
+
+/// A check that failed on a pull request, and where to read why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FailedCheck {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl PullRequest {
+    /// What the control plane keeps of a machine's report: links that aren't `https`
+    /// are dropped and text is cut short, since the page shows all of it.
+    pub fn cleaned(mut self) -> Self {
+        fn cut(s: &mut String, n: usize) {
+            if let Some((i, _)) = s.char_indices().nth(n) {
+                s.truncate(i);
+            }
+        }
+        for s in [&mut self.title, &mut self.base].into_iter().flatten() {
+            cut(s, 300);
+        }
+        if !matches!(self.review.as_deref(), None | Some("approved" | "changes_requested" | "review_required")) {
+            self.review = None;
+        }
+        if let Some(c) = &mut self.checks {
+            c.failing.truncate(5);
+            for f in &mut c.failing {
+                cut(&mut f.name, 200);
+                if !f.url.as_deref().is_some_and(|u| u.starts_with("https://")) {
+                    f.url = None;
+                }
+            }
+        }
+        self
+    }
 }
 
 /// A thread whose open pull request a worker should look at again.

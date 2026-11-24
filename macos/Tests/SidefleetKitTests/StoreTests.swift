@@ -27,6 +27,29 @@ final class StoreTests: XCTestCase {
         XCTFail("never happened: \(what)")
     }
 
+    /// What the machine saw on GitHub reaches the list, and an open one can be checked again.
+    func testPullRequestDetails() async throws {
+        let (api, fleet, _, _) = world()
+        await fleet.refresh()
+        let pr = try XCTUnwrap(fleet.runs.first { $0.id == "demo-coupons" }?.run.pr)
+        XCTAssertEqual(pr.stateLabel, "Open")
+        XCTAssertEqual(pr.base, "main")
+        XCTAssertEqual(pr.review, "changes_requested")
+        XCTAssertTrue(pr.conflicts)
+        XCTAssertEqual(pr.checks?.summary, "1 of 5 checks failed: test · 1 still running")
+        XCTAssertEqual(pr.checks?.failing.first?.url, "https://github.com/acme/storefront/actions/runs/1")
+        try await api.checkPR(root: "demo-coupons")
+        do {
+            try await api.checkPR(root: "demo-json")
+            XCTFail("a merged pull request isn't checked")
+        } catch {}
+
+        // Older machines report only the link, number and state.
+        XCTAssertEqual(PRChecks(passed: 4, failed: 0, pending: 0).summary, "All 4 checks passed")
+        XCTAssertEqual(PRChecks(passed: 0, failed: 0, pending: 1).summary, "1 of 1 check still running")
+        XCTAssertEqual(PullRequest(url: "u", number: 1, state: "open", draft: true).stateLabel, "Draft")
+    }
+
     func testFleetLoadsAndDerives() async {
         let (_, fleet, _, _) = world()
         await fleet.refresh()

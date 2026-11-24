@@ -211,6 +211,12 @@ public final class ThreadStore {
         append(try await api.run(try await api.openPR(root: root.id)))
     }
 
+    /// Have the machine look at the pull request again now rather than in a few minutes.
+    public func checkPR() async throws {
+        guard let root else { return }
+        try await api.checkPR(root: root.id)
+    }
+
     /// Stop everything: drop the waiting messages first so none starts once the running one ends.
     public func stop() async throws {
         for run in runs.filter({ $0.status.isLive }).reversed() { try await api.stop(run: run.id) }

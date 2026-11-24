@@ -303,7 +303,18 @@ enum DemoData {
         }
         out.append(simple("demo-images", "Compress hero images in the marketing pages", hours: 51, machine: "hetzner-vps", extra: ["pinned_at": iso(now.addingTimeInterval(-40 * 3600))]))
         // Two more in the storefront, so its group By project folds the rest under "Show 2 more".
-        out.append(simple("demo-coupons", "Let coupon codes stack with gift cards", hours: 98, machine: "hetzner-vps"))
+        // An open pull request with a failed check, a review asking for changes and a conflict.
+        var coupons = simple("demo-coupons", "Let coupon codes stack with gift cards", hours: 98, machine: "hetzner-vps")
+        coupons[0].json["pr"] = [
+            "url": "https://github.com/acme/storefront/pull/131", "number": 131, "state": "open", "title": "Let coupon codes stack with gift cards", "base": "main",
+            "review": "changes_requested", "conflicts": true,
+            "checks": ["passed": 3, "failed": 1, "pending": 1, "failing": [["name": "test", "url": "https://github.com/acme/storefront/actions/runs/1"]]],
+        ]
+        let couponsAt = now.addingTimeInterval(-98 * 3600)
+        let couponsDiff: JSONValue = ["files": [diffFile("src/lib/cart/discounts.ts", add: 2, del: 1, patch: "@@ -12,3 +12,4 @@ export function applyDiscounts(cart: Cart) {\n-  if (cart.giftCard) return cart.total;\n+  const coupons = cart.coupons.filter((c) => c.stacks);\n+  return coupons.reduce((t, c) => c.apply(t), cart.total);\n }\n")], "file_count": 1, "additions": 2, "deletions": 1]
+        coupons[0].events.insert(("workspace", ["mode": "worktree", "branch": "sidefleet/5d2a90c4", "from": ["ref": "origin/main", "commit": "9a41c07e2b"]], couponsAt), at: 1)
+        coupons[0].events.insert(("diff", ["turn": couponsDiff], couponsAt.addingTimeInterval(230)), at: coupons[0].events.count - 2)
+        out.append(coupons)
         out.append(simple("demo-contrast", "Fix the colour contrast on the product cards", hours: 122, machine: "mac-mini"))
         out.append(simple("demo-sitemap", "Generate the sitemap from the route table", hours: 76, machine: "mac-mini", repo: "github.com/acme/docs"))
         out.append(simple("demo-review", "Summarise what changed on main this week", hours: 30, machine: "mac-mini", extra: ["snoozed_until": iso(now.addingTimeInterval(3 * 3600))]))

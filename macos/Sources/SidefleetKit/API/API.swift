@@ -66,6 +66,8 @@ public struct API: Sendable {
     public func fork(run: String, body: JSONValue) async throws -> String { (try await post("/v1/runs/\(run)/fork", body) as CreatedRun).id }
     public func restore(run: String) async throws -> String { (try await post("/v1/runs/\(run)/restore") as CreatedRun).id }
     public func openPR(root: String) async throws -> String { (try await post("/v1/runs/\(root)/pr") as CreatedRun).id }
+    /// Have the machine look at the thread's open pull request again on its next heartbeat.
+    public func checkPR(root: String) async throws { try await call("POST", "/v1/runs/\(root)/pr/check") }
     public func stop(run: String) async throws { try await call("POST", "/v1/runs/\(run)/stop") }
     public func startNow(run: String) async throws -> Run { try await post("/v1/runs/\(run)/start-now") }
 

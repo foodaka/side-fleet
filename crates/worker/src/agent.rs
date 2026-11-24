@@ -69,6 +69,19 @@ pub struct AgentSpec {
     pub files: Vec<PathBuf>,
     /// "Ask me" with Claude Code: where its permission prompts go (see [`crate::approval`]).
     pub approval: Option<ApprovalHook>,
+    /// A budget: the pay tool (see [`crate::pay`]), for Claude Code and Codex.
+    pub pay: Option<PayHook>,
+}
+
+/// How Claude Code reaches the worker to pay for a request: `exe pay-mcp --socket <socket>`.
+#[derive(Debug, Clone)]
+pub struct PayHook {
+    pub exe: PathBuf,
+    pub socket: PathBuf,
+    /// Tells the agent about the tool and its budget.
+    pub hint: String,
+    /// How long a payment may wait for approval.
+    pub timeout: Duration,
 }
 
 /// How Claude Code reaches the page for a permission: `exe approval-mcp --socket <socket>`.
@@ -102,6 +115,7 @@ impl AgentSpec {
                 if !self.files.is_empty() {
                     p.push_str(&Self::attached_note("a file", "files", "read", "", &self.files));
                 }
+                p.push_str(&self.budget_note());
                 return p;
             }
             Agent::Claude => {}
@@ -116,6 +130,11 @@ impl AgentSpec {
             p.push_str(&Self::attached_note("a file", "files", "read", " with the Read tool", &self.files));
         }
         p
+    }
+
+    /// Codex has no system prompt to append to: the budget goes with the task.
+    fn budget_note(&self) -> String {
+        self.pay.as_ref().map(|p| format!("\n\n---\n{}", p.hint)).unwrap_or_default()
     }
 
     fn attached_note(one: &str, many: &str, verb: &str, how: &str, paths: &[PathBuf]) -> String {
@@ -148,11 +167,26 @@ impl AgentSpec {
             // "Ask me" edits files on its own and asks about everything else.
             if self.permission_mode == ASK_MODE { "acceptEdits".into() } else { self.permission_mode.clone() },
         ];
-        if let (true, Some(h)) = (self.permission_mode == ASK_MODE, &self.approval) {
+        let ask = self.approval.as_ref().filter(|_| self.permission_mode == ASK_MODE);
+        let mut servers = serde_json::Map::new();
+        if let Some(h) = ask {
+            servers.insert(crate::approval::MCP_SERVER.into(), crate::approval::mcp_server(&h.exe, &h.socket));
+        }
+        if let Some(p) = &self.pay {
+            servers.insert(crate::pay::MCP_SERVER.into(), crate::pay::mcp_server(&p.exe, &p.socket));
+        }
+        if !servers.is_empty() {
             a.push("--mcp-config".into());
-            a.push(crate::approval::mcp_config(&h.exe, &h.socket));
+            a.push(serde_json::json!({"mcpServers": servers}).to_string());
+        }
+        if ask.is_some() {
             a.push("--permission-prompt-tool".into());
             a.push(crate::approval::PROMPT_TOOL.into());
+        }
+        // The pay tool asks the user itself, above the run's threshold.
+        if self.pay.is_some() {
+            a.push("--allowedTools".into());
+            a.push(crate::pay::PAY_TOOL.into());
         }
         if let Some(e) = self.claude_effort() {
             a.extend(["--effort".to_string(), e.to_string()]);
@@ -174,7 +208,10 @@ impl AgentSpec {
         }
         if !self.extra_args.iter().any(|x| x.starts_with("--append-system-prompt")) {
             a.push("--append-system-prompt".into());
-            a.push(CLAUDE_PAGE_HINT.into());
+            a.push(match &self.pay {
+                Some(p) => format!("{CLAUDE_PAGE_HINT}\n\n{}", p.hint),
+                None => CLAUDE_PAGE_HINT.into(),
+            });
         }
         a.extend(self.extra_args.iter().cloned());
         a
@@ -198,6 +235,23 @@ impl AgentSpec {
         }
         if let Some(e) = &self.effort {
             a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
+        }
+        // The pay tool for this run only (TOML values; paths quoted like TOML basic strings). Codex
+        // would ask before each call and, run headless, refuse it: the tool asks the user itself.
+        // Its calls may wait for that approval, past Codex's 60 s default.
+        if let Some(p) = &self.pay {
+            let server = crate::pay::MCP_SERVER;
+            let toml = |s: &std::path::Path| format!("{:?}", s.to_string_lossy());
+            a.extend([
+                "-c".into(),
+                format!("mcp_servers.{server}.command={}", toml(&p.exe)),
+                "-c".into(),
+                format!("mcp_servers.{server}.args=[\"pay-mcp\", \"--socket\", {}]", toml(&p.socket)),
+                "-c".into(),
+                format!("mcp_servers.{server}.tool_timeout_sec={}", (p.timeout + Duration::from_secs(60)).as_secs()),
+                "-c".into(),
+                format!("mcp_servers.{server}.default_tools_approval_mode=\"approve\""),
+            ]);
         }
         for img in &self.images {
             a.push(format!("--image={}", img.to_string_lossy()));
@@ -254,12 +308,15 @@ impl AgentSpec {
             }
             // Claude Code gives up on an MCP tool call after its own timeout; the
             // prompt tool waits as long as the person may take, plus a margin.
-            Agent::Claude => match &self.approval {
-                Some(h) if self.permission_mode == ASK_MODE && std::env::var_os("MCP_TOOL_TIMEOUT").is_none() => {
-                    vec![("MCP_TOOL_TIMEOUT", (h.timeout + Duration::from_secs(60)).as_millis().to_string())]
+            Agent::Claude => {
+                let ask = self.approval.as_ref().filter(|_| self.permission_mode == ASK_MODE).map(|h| h.timeout);
+                match ask.max(self.pay.as_ref().map(|p| p.timeout)) {
+                    Some(t) if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() => {
+                        vec![("MCP_TOOL_TIMEOUT", (t + Duration::from_secs(60)).as_millis().to_string())]
+                    }
+                    _ => vec![],
                 }
-                _ => vec![],
-            },
+            }
             Agent::Codex => vec![],
         }
     }

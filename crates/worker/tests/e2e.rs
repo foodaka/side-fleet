@@ -139,6 +139,7 @@ impl Harness {
             // Never run: the fake agent talks to the worker's socket itself.
             approval_exe: Some("/nonexistent/sidefleet".into()),
             approval_timeout: Duration::from_secs(20),
+            payments: None,
         };
         let worker = tokio::spawn(run_worker(cfg));
         let h = Harness { env, http: Client::new(), _repos: repos, worker };
@@ -616,6 +617,7 @@ fn machine(env: &TestEnv, id: &str, root: &std::path::Path, heartbeat: Duration)
         allow_remote_update: false,
         approval_exe: None,
         approval_timeout: Duration::from_secs(20),
+        payments: None,
     }
 }
 

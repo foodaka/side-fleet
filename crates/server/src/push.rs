@@ -286,7 +286,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&msg).unwrap();
         assert_eq!(v["title"], "Fix the login bug…");
         assert_eq!(v["reason"], "failed");
-        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        // Sorted: whether JSON objects keep insertion order depends on serde_json's features.
+        let mut keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        keys.sort();
         assert_eq!(keys, ["id", "label", "reason", "title", "url"]);
         let key = p256::PublicKey::from_sec1_bytes(&decode(&sub.keys.p256dh).unwrap()).unwrap();
         let sealed = web_push_native::encrypt(msg.clone(), &key, web_push_native::Auth::from_slice(&auth)).unwrap();

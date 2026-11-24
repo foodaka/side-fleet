@@ -13,6 +13,8 @@
 	import * as Select from '#lib/components/ui/select';
 	import Switch from '#lib/sf/ui/Switch.svelte';
 	import SnoozePresets from '#lib/sf/ui/SnoozePresets.svelte';
+	import WalletSettings from '#lib/sf/ui/WalletSettings.svelte';
+	import ApprovedServices from '#lib/sf/ui/ApprovedServices.svelte';
 	import { PERMISSIONS, WORKSPACES } from '#lib/sf/format';
 	import { isMac, prefs, type SendKey, type Workspace } from '#lib/sf/prefs.svelte';
 
@@ -119,6 +121,10 @@
 		</div>
 		<p class="text-[12px] text-muted-foreground">Ask me works with Claude Code only; other agents start with Read &amp; edit files instead. A reply keeps the mode its task was using, and a fork keeps its message’s.</p>
 	</div>
+
+	<WalletSettings />
+
+	<ApprovedServices />
 
 	<!-- Sending -->
 	<div class="flex flex-col gap-3">

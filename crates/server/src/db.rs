@@ -46,6 +46,12 @@ fn row_to_run(r: &PgRow) -> Run {
         created_by: r.get("created_by"),
         room_id: r.get("room_id"),
         start_at: r.get("start_at"),
+        budget_micros: r.get("budget_micros"),
+        ask_above_micros: r.get("ask_above_micros"),
+        spent_micros: r.get("spent_micros"),
+        pay_key: r.get("pay_key"),
+        pay_authorization: r.get("pay_authorization"),
+        pay_policy: r.get::<Option<Value>, _>("pay_policy").and_then(|v| serde_json::from_value(v).ok()),
     }
 }
 
@@ -176,7 +182,7 @@ fn row_to_worker(r: &PgRow) -> Worker {
 }
 
 const RUN_COLS: &str =
-    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, files, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pinned_at, pr, created_by, room_id, start_at";
+    "id, task, agent, model, effort, repo, status, worker_id, stop_requested, created_at, started_at, finished_at, result, parent_id, session_id, resume_session_id, pinned_worker_id, permission_mode, isolation, failover, moved_from, resume_from_branch, images, files, kind, restore_to, forked_from, fork_commit, context, archived_at, snoozed_until, pinned_at, pr, created_by, room_id, start_at, budget_micros, ask_above_micros, spent_micros, pay_key, pay_authorization, pay_policy";
 
 /// Append an event inside `tx`. The caller must already hold the run row lock
 /// (`SELECT ... FOR UPDATE`) so seq assignment is serialised per run.
@@ -234,16 +240,21 @@ pub struct NewRun<'a> {
     pub resume_from_branch: Option<&'a str>,
     /// Start later: no machine claims it before then.
     pub start_at: Option<DateTime<Utc>>,
+    /// Agent budgets: the most it may pay, and the payments that need approval.
+    pub budget_micros: Option<i64>,
+    pub ask_above_micros: Option<i64>,
+    /// Which services it may pay without asking (with a budget).
+    pub pay_policy: Option<&'a sidefleet_core::PayPolicy>,
 }
 
 pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Result<(Run, RunEvent)> {
-    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images, files, created_by, room_id, context, resume_from_branch, start_at } = new;
+    let NewRun { task, agent, model, effort, repo, permission_mode, isolation, pinned_worker_id, failover, images, files, created_by, room_id, context, resume_from_branch, start_at, budget_micros, ask_above_micros, pay_policy } = new;
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, permission_mode, isolation, pinned_worker_id, agent, failover, images, org_id, effort,
-                           created_by, room_id, context, resume_from_branch, start_at)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING {RUN_COLS}"
+                           created_by, room_id, context, resume_from_branch, start_at, budget_micros, ask_above_micros, pay_policy)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -262,6 +273,9 @@ pub async fn create_run(pool: &PgPool, org: Uuid, new: NewRun<'_>) -> sqlx::Resu
     .bind(context)
     .bind(resume_from_branch)
     .bind(start_at)
+    .bind(budget_micros)
+    .bind(ask_above_micros)
+    .bind(pay_policy.map(|p| json!(p)))
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);
@@ -453,8 +467,8 @@ pub async fn create_follow_up(
     let mut tx = pool.begin().await?;
     let row = sqlx::query(&format!(
         "INSERT INTO runs (id, task, model, repo, status, parent_id, resume_session_id, pinned_worker_id, permission_mode, isolation, agent, failover, images, org_id, effort,
-                           created_by, room_id, context)
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING {RUN_COLS}"
+                           created_by, room_id, context, budget_micros, ask_above_micros, pay_policy)
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING {RUN_COLS}"
     ))
     .bind(id)
     .bind(task)
@@ -473,6 +487,10 @@ pub async fn create_follow_up(
     .bind(created_by)
     .bind(latest.room_id)
     .bind(context)
+    // Each reply gets a budget of its own, the size the message before it had.
+    .bind(latest.budget_micros)
+    .bind(latest.ask_above_micros)
+    .bind(latest.pay_policy.as_ref().map(|p| json!(p)))
     .fetch_one(&mut *tx)
     .await?;
     let mut run = row_to_run(&row);

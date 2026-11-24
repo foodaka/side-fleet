@@ -13,13 +13,14 @@ use serde_json::json;
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
-use crate::agent::{self, AgentSpec, ApprovalHook};
+use crate::agent::{self, AgentSpec, ApprovalHook, PayHook};
 use crate::approval::{self, Bridge};
 use crate::checkpoint::{self, ChangeTracker};
 use crate::cleanup::{self, ActiveRuns};
 use crate::client::{Backoff, ClientError, ControlClient, Rejected};
 use crate::diff;
 use crate::setup;
+use crate::pay::{self, PaymentsConfig};
 use crate::snapshot;
 use crate::detect::{self, DetectOptions};
 
@@ -124,6 +125,9 @@ pub struct WorkerConfig {
     pub approval_exe: Option<PathBuf>,
     /// How long a tool call waits for someone to approve it before it is denied.
     pub approval_timeout: Duration,
+    /// Agent budgets: where this machine pays (`SIDEFLEET_PAYMENTS=1`). None: a task with a
+    /// budget runs without the pay tool.
+    pub payments: Option<PaymentsConfig>,
 }
 
 pub async fn run(cfg: WorkerConfig) -> Result<()> {
@@ -818,6 +822,27 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         _ => None,
     };
 
+    // A budget: make the run's key, wait for the user to authorize it, then serve the pay tool.
+    let (mut pay_bridge, mut pay_hook) = (None, None);
+    if run.budget_micros.is_some() && run.agent != Agent::Opencode {
+        let skip = match &cfg.payments {
+            None => Some("payments are off on this machine (set SIDEFLEET_PAYMENTS=1 in its worker.env), so the agent runs without its budget".to_string()),
+            Some(pcfg) => match start_payments(client, cfg, pcfg, &run, &stop_tx).await {
+                Ok(Some((b, h))) => {
+                    pay_bridge = Some(b);
+                    pay_hook = Some(h);
+                    None
+                }
+                Ok(None) => Some("the budget wasn't authorized, so the agent runs without it".to_string()),
+                Err(e) => Some(format!("could not set up payments ({e:#}), so the agent runs without its budget")),
+            },
+        };
+        if let Some(msg) = skip {
+            tracing::warn!(run_id = %run_id, "{msg}");
+            let _ = client.post_events(run_id, vec![NewEvent { kind: "budget_skipped".into(), payload: json!({"message": msg}) }]).await;
+        }
+    }
+
     let spec = AgentSpec {
         agent: run.agent,
         bin: bin.clone(),
@@ -836,6 +861,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         images,
         files,
         approval,
+        pay: pay_hook,
     };
 
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);
@@ -926,6 +952,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     // Executor dropped its sender; forwarder drains the channel and exits.
     let _ = forwarder.await;
     drop(bridge);
+    drop(pay_bridge);
     if let Some(dir) = images_dir {
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1145,6 +1172,35 @@ fn start_approvals(client: &ControlClient, cfg: &WorkerConfig, run_id: Uuid, sto
     })
     .context("listening for permission prompts")?;
     Ok(bridge)
+}
+
+/// Make the run's key and wait for its authorization; then listen for the pay tool's requests.
+async fn start_payments(
+    client: &ControlClient,
+    cfg: &WorkerConfig,
+    pcfg: &PaymentsConfig,
+    run: &Run,
+    stop: &watch::Sender<bool>,
+) -> Result<Option<(Bridge, PayHook)>> {
+    let exe = cfg.approval_exe.clone().context("this worker does not know its own executable")?;
+    let Some(key) = pay::authorize(client, pcfg, run, cfg.approval_timeout, stop.subscribe()).await? else {
+        return Ok(None);
+    };
+    let payer = Arc::new(pay::Payer::new(client.clone(), run, pcfg.clone(), key, cfg.approval_timeout, stop.subscribe())?);
+    tracing::info!(run_id = %run.id, key = %payer.key_address(), "budget authorized; the agent can pay");
+    let bridge = Bridge::serve(pay::socket_dir(run.id), move |msg| {
+        let payer = payer.clone();
+        async move {
+            match serde_json::from_value::<pay::PayRequest>(msg) {
+                Ok(req) => payer.pay(req).await,
+                Err(e) => json!({"error": format!("Sidefleet could not read the payment request: {e}")}),
+            }
+        }
+    })
+    .context("listening for payments")?;
+    let hint = pay::agent_hint(run.budget_micros.unwrap_or(0), run.ask_above_micros.unwrap_or(sidefleet_core::DEFAULT_ASK_ABOVE_MICROS));
+    let hook = PayHook { exe, socket: bridge.socket.clone(), hint, timeout: cfg.approval_timeout };
+    Ok(Some((bridge, hook)))
 }
 
 /// A restore run: put the thread's worktree back to `run.restore_to`. The

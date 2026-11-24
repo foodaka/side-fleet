@@ -136,6 +136,9 @@ pub fn summarize_tool_input(tool: &str, input: &Value) -> String {
         }
         "WebFetch" => get("url").unwrap_or_default(),
         "WebSearch" => get("query").unwrap_or_default(),
+        // Agent budgets: a payment over the threshold, and a budget waiting for your wallet.
+        "sidefleet_pay" => format!("pay {} to {}", get("amount").unwrap_or_default(), get("host").unwrap_or_default()),
+        "sidefleet_budget" => format!("authorize a {} budget", get("budget").unwrap_or_default()),
         "Agent" | "Task" => get("description")
             .or_else(|| get("prompt"))
             .unwrap_or_default(),

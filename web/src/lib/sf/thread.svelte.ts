@@ -50,6 +50,38 @@ export type Item =
 			expiresAt: string;
 			at: string;
 	  }
+	| {
+			/** A budget: the key the machine made, waiting for (or given) your authorization. */
+			kind: 'budget';
+			key: string;
+			runId: string;
+			address: string;
+			chainId: number;
+			token: string;
+			budgetMicros: number;
+			askAboveMicros: number | null;
+			expiresAt: string;
+			authorized: boolean;
+			/** Turned down, or nobody answered: the agent runs without payments. */
+			declined: boolean;
+			wallet: string | null;
+			/** The approval it waits under, so the bell and push show it. */
+			approvalId: string | null;
+			at: string;
+	  }
+	| {
+			/** A payment the agent made, or one that was refused or failed. */
+			kind: 'payment';
+			key: string;
+			outcome: 'paid' | 'refused' | 'failed';
+			amountMicros: number;
+			host: string;
+			url: string;
+			reason: string | null;
+			detail: string | null;
+			reference: string | null;
+			at: string;
+	  }
 	| { kind: 'note'; key: string; tone: 'muted' | 'err' | 'ok'; text: string; at: string; href?: string }
 	| { kind: 'stderr'; key: string; text: string; at: string };
 
@@ -456,6 +488,12 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			break;
 		}
 		case 'approval_requested':
+			// A budget waiting for your wallet: its own card shows it.
+			if (p.tool_name === 'sidefleet_budget') {
+				const b = t.items.findLast((x) => x.kind === 'budget');
+				if (b && b.kind === 'budget') b.approvalId = p.id;
+				break;
+			}
 			t.items.push({
 				kind: 'approval', key, id: p.id, runId: run.id, name: p.tool_name, summary: p.summary ?? '',
 				input: p.input ?? {}, status: p.status ?? 'pending', message: null, decidedBy: null, expiresAt: p.expires_at, at: ev.at
@@ -463,6 +501,14 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			t.activity = 'Waiting for you to approve';
 			break;
 		case 'approval_decided': {
+			if (p.tool_name === 'sidefleet_budget') {
+				const b = t.items.findLast((x) => x.kind === 'budget');
+				if (b && b.kind === 'budget' && p.status !== 'approved') {
+					b.declined = true;
+					t.activity = 'Starting';
+				}
+				break;
+			}
 			const a = t.items.find((x) => x.kind === 'approval' && x.id === p.id);
 			if (a && a.kind === 'approval') {
 				a.status = p.status;
@@ -472,6 +518,35 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			if (!t.items.some((x) => x.kind === 'approval' && x.status === 'pending')) t.activity = 'Thinking';
 			break;
 		}
+		case 'budget_key_ready':
+			t.items.push({
+				kind: 'budget', key, runId: run.id, address: p.address, chainId: p.chain_id, token: p.token, budgetMicros: p.budget_micros ?? 0,
+				askAboveMicros: p.ask_above_micros ?? null, expiresAt: p.expires_at, authorized: false, declined: false, wallet: null, approvalId: null, at: ev.at
+			});
+			t.activity = 'Waiting for you to authorize the budget';
+			break;
+		case 'budget_authorized': {
+			const b = t.items.findLast((x) => x.kind === 'budget');
+			if (b && b.kind === 'budget') {
+				b.authorized = true;
+				b.wallet = p.wallet ?? null;
+			}
+			t.activity = 'Starting';
+			break;
+		}
+		case 'budget_skipped':
+			// Turned down on the budget's card, which already says so.
+			if (t.items.some((x) => x.kind === 'budget' && x.declined)) break;
+			t.items.push({ kind: 'note', key, tone: 'err', text: `No budget: ${p.message ?? 'payments are off'}`, at: ev.at });
+			break;
+		case 'payment_made':
+		case 'payment_refused':
+			t.items.push({
+				kind: 'payment', key, outcome: p.outcome ?? (ev.kind === 'payment_made' ? 'paid' : 'refused'), amountMicros: p.amount_micros ?? 0,
+				host: p.host ?? '', url: p.url ?? '', reason: p.reason ?? null, detail: p.detail ?? null, reference: p.receipt?.reference ?? null, at: ev.at
+			});
+			if (typeof p.spent_micros === 'number') run.spent_micros = p.spent_micros;
+			break;
 		case 'result':
 			t.liveText = '';
 			run.session_id = p.session_id ?? run.session_id;

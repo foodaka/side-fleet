@@ -16,6 +16,7 @@ pub mod projects;
 pub mod mcp;
 pub mod notify;
 pub mod oauth;
+pub mod payments;
 pub mod push;
 pub mod request_log;
 pub mod rooms;

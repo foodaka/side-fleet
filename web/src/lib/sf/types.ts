@@ -59,6 +59,12 @@ export interface Run {
 	context?: string | null;
 	/** A task scheduled to start later: no machine picks it up before this time. */
 	start_at?: string | null;
+	/** Agent budgets: the most it may pay for APIs, in millionths of a dollar. */
+	budget_micros?: number | null;
+	/** Payments above this wait for approval. */
+	ask_above_micros?: number | null;
+	/** What it has paid so far. */
+	spent_micros?: number;
 }
 
 export interface PullRequest {

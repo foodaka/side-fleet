@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use sidefleet_core::{
     Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest, WorktreeCleanupResult,
-    NewEvent, PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
+    NewEvent, PayKeyOffer, PayKeyStatus, PaymentRecorded, PaymentReport, PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
@@ -326,6 +326,47 @@ impl ControlClient {
             .send()
             .await
             .context("approval poll failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.json().await?)
+    }
+
+    /// Offer the access key made for a run's payments, for the user to authorize.
+    pub async fn offer_pay_key(&self, run_id: Uuid, offer: &PayKeyOffer) -> Result<()> {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/worker/runs/{run_id}/pay-key?worker_id={}", self.worker_id)))
+            .bearer_auth(&self.token)
+            .json(offer)
+            .send()
+            .await
+            .context("offering the payment key failed")?;
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(())
+    }
+
+    /// The user's authorization of the run's key, once given.
+    pub async fn pay_key_status(&self, run_id: Uuid) -> Result<PayKeyStatus> {
+        let r = self
+            .http
+            .get(self.url(&format!("/v1/worker/runs/{run_id}/pay-key")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("payment key poll failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.json().await?)
+    }
+
+    /// Report a payment (or a refused one); returns what the run has spent.
+    pub async fn record_payment(&self, run_id: Uuid, report: &PaymentReport) -> Result<PaymentRecorded> {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/worker/runs/{run_id}/payments?worker_id={}", self.worker_id)))
+            .bearer_auth(&self.token)
+            .json(report)
+            .send()
+            .await
+            .context("reporting the payment failed")?;
         let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
         Ok(r.json().await?)
     }

@@ -13,6 +13,11 @@ struct SidebarView: View {
 
     private var fleet: FleetStore { stores.fleet }
     private var filtering: Bool { fleet.multi && fleet.userID != nil }
+    private var byProject: Bool { fleet.projects.view == .project }
+    /// The icon picker's sheet, open while `projects.picking` names a repo.
+    private var pickingProject: Binding<PickingProject?> {
+        Binding(get: { fleet.projects.picking.map(PickingProject.init) }, set: { fleet.projects.picking = $0?.id })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,10 +100,13 @@ struct SidebarView: View {
 
     // MARK: The list
 
+    private static let listTop = "sidebar-list-top"
+
     private var list: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: 0).id(Self.listTop)
                     if !fleet.loaded {
                         skeleton
                     } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -109,8 +117,16 @@ struct SidebarView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
+                // A fresh list per view: the lazy stack otherwise reuses rows laid out for the other one
+                // (rows by time kept their place instead of moving in under their project).
+                .id(fleet.projects.view)
             }
             .scrollIndicators(.automatic)
+            .sheet(item: pickingProject) { ProjectIconSheet(repo: $0.id, current: fleet.projects.icons[$0.id]) }
+            .onChange(of: fleet.projects.view) { _, _ in
+                // Switching between By time and By project starts again from the top.
+                proxy.scrollTo(Self.listTop, anchor: .top)
+            }
             .onChange(of: stores.openThreadID) { _, id in
                 // Keep the open task in view, after opening it from somewhere else.
                 if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } }
@@ -135,7 +151,7 @@ struct SidebarView: View {
         let matches = SidebarSections.matches(query: query, runs: fleet.runs, archived: fleet.archived)
         return Group {
             SectionHeading(matches.isEmpty ? "No matches" : "\(matches.count) match\(matches.count == 1 ? "" : "es")")
-            ForEach(matches) { RunRow(run: $0, onPick: { picking = $0 }) }
+            ForEach(matches) { RunRow(run: $0, byProject: byProject, onPick: { picking = $0 }) }
             if matches.isEmpty {
                 Text("Nothing in the latest \(fleet.runs.count) tasks mentions “\(query.trimmingCharacters(in: .whitespaces))”.")
                     .font(SF.font(12))
@@ -148,7 +164,7 @@ struct SidebarView: View {
 
     @ViewBuilder private var sections: some View {
         let s = SidebarSections(runs: fleet.runs, userID: fleet.userID, teamScope: scope == "team", filtering: filtering, now: fleet.now)
-        if filtering { scopeTabs(theirs: s.theirs) }
+        listTabs(theirs: s.theirs)
         if s.isEmpty {
             Text(filtering && scope == "mine" && !fleet.runs.isEmpty
                 ? "You haven't started a task here yet. Switch to Team to see what everyone else is running."
@@ -164,15 +180,19 @@ struct SidebarView: View {
         } else {
             if !s.pinned.isEmpty {
                 SectionHeading("Pinned")
-                ForEach(s.pinned) { RunRow(run: $0, detail: $0.isLive, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
+                ForEach(s.pinned) { RunRow(run: $0, detail: $0.isLive, homeRepo: s.homeRepo, byProject: byProject, onPick: { picking = $0 }) }
             }
-            if !s.active.isEmpty {
-                SectionHeading("Active", count: s.active.count)
-                ForEach(s.active) { RunRow(run: $0, detail: true, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
-            }
-            ForEach(s.groups) { group in
-                SectionHeading(group.label)
-                ForEach(group.runs) { RunRow(run: $0, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
+            if byProject {
+                projectGroups(s)
+            } else {
+                if !s.active.isEmpty {
+                    SectionHeading("Active", count: s.active.count)
+                    ForEach(s.active) { RunRow(run: $0, detail: true, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
+                }
+                ForEach(s.groups) { group in
+                    SectionHeading(group.label)
+                    ForEach(group.runs) { RunRow(run: $0, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
+                }
             }
             if fleet.runs.count >= 100 {
                 Text("Showing the latest \(fleet.runs.count) tasks\(filtering ? " in the team" : "").")
@@ -185,7 +205,7 @@ struct SidebarView: View {
         if !s.snoozed.isEmpty {
             Disclosure(title: "Snoozed", count: s.snoozed.count, open: $showSnoozed)
             if showSnoozed {
-                ForEach(s.snoozed) { RunRow(run: $0, asleep: true, homeRepo: s.homeRepo, onPick: { picking = $0 }) }
+                ForEach(s.snoozed) { RunRow(run: $0, asleep: true, homeRepo: s.homeRepo, byProject: byProject, onPick: { picking = $0 }) }
                 Text("Each comes back at its time, or sooner if it finishes, fails or asks you something.")
                     .font(SF.font(11))
                     .lineSpacing(2)
@@ -207,7 +227,7 @@ struct SidebarView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                 } else {
-                    ForEach(archived) { RunRow(run: $0, onPick: { picking = $0 }) }
+                    ForEach(archived) { RunRow(run: $0, byProject: byProject, onPick: { picking = $0 }) }
                 }
             } else {
                 Text("Loading…").font(SF.font(12)).foregroundStyle(SF.muted).padding(.horizontal, 10).padding(.vertical, 4)
@@ -215,30 +235,67 @@ struct SidebarView: View {
         }
     }
 
-    private func scopeTabs(theirs: Int) -> some View {
-        HStack(spacing: 2) {
-            ForEach([("mine", "Mine"), ("team", "Team")], id: \.0) { id, label in
-                Button {
-                    scope = id
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(label)
-                        if id == "team", theirs > 0 { Text("\(theirs)").monospacedDigit().foregroundStyle(SF.faint) }
-                    }
-                    .font(SF.font(12, scope == id ? .medium : .regular))
-                    .foregroundStyle(scope == id ? SF.ink : SF.muted)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 24)
-                    .background(scope == id ? SF.background : .clear, in: RoundedRectangle(cornerRadius: 5))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+    /// Mine / Team when the org has several members, and By time / By project. Both choices stick.
+    private func listTabs(theirs: Int) -> some View {
+        VStack(spacing: 6) {
+            if filtering {
+                SegmentTabs(segments: [.init(id: "mine", label: "Mine"), .init(id: "team", label: "Team", badge: theirs)], selected: scope) { scope = $0 }
+            }
+            SegmentTabs(segments: [.init(id: "time", label: "By time"), .init(id: "project", label: "By project")], selected: fleet.projects.view.rawValue) { id in
+                fleet.projects.setView(id == "project" ? .project : .time)
             }
         }
-        .padding(2)
-        .background(SF.selected.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
         .padding(.horizontal, 4)
         .padding(.top, 12)
+    }
+
+    /// By project: one group per repo, the ones waiting on you or busy first; hidden ones come back from the foot.
+    @ViewBuilder private func projectGroups(_ s: SidebarSections) -> some View {
+        let projects = fleet.projects
+        let shown = s.projects.filter { !projects.hidden.contains($0.repo) }
+        let hiddenCount = s.projects.count - shown.count
+        if !s.pinned.isEmpty, !shown.isEmpty {
+            SectionHeading("Projects")
+        } else {
+            Color.clear.frame(height: 6)
+        }
+        ForEach(shown) { group in
+            ProjectGroupHeader(group: group)
+            if !projects.folded.contains(group.repo) {
+                let all = projects.showAll.contains(group.repo)
+                let rows = group.visible(showAll: all, openID: stores.openThreadID)
+                ForEach(rows) { RunRow(run: $0, detail: $0.isLive, grouped: true, byProject: true, onPick: { picking = $0 }).inProjectGroup() }
+                if group.runs.count > ProjectGroup.shown {
+                    Button {
+                        projects.toggleShowAll(group.repo)
+                    } label: {
+                        Text(all ? "Show fewer" : "Show \(group.runs.count - rows.count) more")
+                            .font(SF.font(11.5))
+                            .foregroundStyle(SF.faint)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .inProjectGroup()
+                }
+            }
+        }
+        if hiddenCount > 0 {
+            Button {
+                projects.unhideAll()
+            } label: {
+                Text("Show \(hiddenCount) hidden project\(hiddenCount == 1 ? "" : "s")")
+                    .font(SF.font(11.5))
+                    .foregroundStyle(SF.faint)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+        }
     }
 
     // MARK: Nav
@@ -397,6 +454,10 @@ struct RunRow: View {
     var detail = false
     var asleep = false
     var homeRepo = ""
+    /// In a project's group, which already says the repo.
+    var grouped = false
+    /// The list is By project: rows outside a group name their project, not the full repo.
+    var byProject = false
     /// "Pick a date and time…" for this one.
     var onPick: (RunSummary) -> Void
     @Environment(Stores.self) private var stores
@@ -410,7 +471,7 @@ struct RunRow: View {
     private var waiting: InboxItem? { isOpen ? nil : stores.inbox.item(for: run.id) }
     private var unread: Bool { !isOpen && (waiting != nil || stores.seen.isUnread(run)) }
     private var asking: Bool { run.pendingApprovals > 0 && run.isLive }
-    private var otherRepo: Bool { run.run.repo != homeRepo }
+    private var otherRepo: Bool { !grouped && (byProject || run.run.repo != homeRepo) }
     private var filtering: Bool { fleet.multi && fleet.userID != nil }
 
     var body: some View {
@@ -540,14 +601,27 @@ struct RunRow: View {
                     Text("\(run.latestWorkerID ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
                 }
             } else if let start = run.run.startAt, run.run.isScheduled(now: fleet.now) {
-                Text("Scheduled · \(Format.startTime(start, now: fleet.now))" + (otherRepo ? " · \(Format.repoLabel(run.run.repo))" : ""))
+                withRepo("Scheduled · \(Format.startTime(start, now: fleet.now))")
             } else {
-                Text("Waiting for a machine" + (otherRepo ? " · \(Format.repoLabel(run.run.repo))" : ""))
+                withRepo("Waiting for a machine")
             }
         } else if asleep, let until = run.run.snoozedUntil {
-            Text("Back \(Format.wakeLabel(until, now: fleet.now))" + (otherRepo ? " · \(Format.repoLabel(run.run.repo))" : ""))
+            withRepo("Back \(Format.wakeLabel(until, now: fleet.now))")
         } else {
-            Text([otherRepo ? Format.repoLabel(run.run.repo) : nil, fleet.workers.count > 1 ? run.latestWorkerID : nil].compactMap { $0 }.joined(separator: " · "))
+            withRepo(nil, then: fleet.workers.count > 1 ? run.latestWorkerID : nil)
+        }
+    }
+
+    /// `text · [icon] repo · then`, the repo only when it says something.
+    private func withRepo(_ text: String?, then: String? = nil) -> some View {
+        HStack(spacing: 4) {
+            if let text { Text(text) }
+            if otherRepo {
+                if text != nil { Text("·") }
+                ProjectIconView(repo: run.run.repo, icon: fleet.projects.icon(run.run.repo), size: 11)
+                Text(byProject ? ProjectIcon.name(run.run.repo) : Format.repoLabel(run.run.repo))
+            }
+            if let then { Text((otherRepo ? "· " : "") + then) }
         }
     }
 

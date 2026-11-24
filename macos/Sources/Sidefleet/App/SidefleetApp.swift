@@ -440,7 +440,8 @@ struct SidefleetCommands: Commands {
     private func move(_ by: Int) {
         guard let stores else { return }
         let s = SidebarSections(runs: stores.fleet.runs, userID: stores.fleet.userID, teamScope: true, filtering: false, now: Date())
-        let order = s.order
+        let p = stores.fleet.projects
+        let order = p.view == .project ? s.projectOrder(hidden: p.hidden, folded: p.folded, showAll: p.showAll, openID: stores.openThreadID) : s.order
         guard !order.isEmpty else { return }
         let i = order.firstIndex { $0.id == stores.openThreadID } ?? (by > 0 ? -1 : order.count)
         stores.open(order[max(0, min(order.count - 1, i + by))].id)

@@ -4,6 +4,7 @@ import { telemetry } from './telemetry.svelte';
 import { toast } from 'svelte-sonner';
 import { repoKey } from './format';
 import { wakeLabel } from './snooze';
+import { projects } from './projects.svelte';
 
 type Conn = 'connecting' | 'ok' | 'unreachable' | 'unauthorized';
 
@@ -120,6 +121,7 @@ class Fleet {
 			void this.#migrateAdded(workers, repos.added);
 			if (!this.setup) this.setup = await api<Setup>('/v1/setup');
 			void this.#loadMembers();
+			void projects.load();
 			this.conn = 'ok';
 			this.connError = '';
 			this.loaded = true;
@@ -260,6 +262,7 @@ class Fleet {
 		this.pending = [];
 		this.members = [];
 		this.#membersFor = '';
+		projects.reset();
 		this.added = null;
 		this.setup = null;
 		this.#migrated = false;

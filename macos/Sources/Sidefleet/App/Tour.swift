@@ -26,6 +26,8 @@ enum Tour {
                 ("thread-live", .thread("demo-guide")),
                 ("thread-failed", .thread("demo-stripe")),
                 ("thread-scheduled", .thread("demo-audit")),
+                // The sidebar By project, then the icon picker over it.
+                ("sidebar-projects", .overview),
                 ("machines", .machines),
                 ("overview", .overview),
                 ("rooms", .rooms),
@@ -35,8 +37,9 @@ enum Tour {
             ]
             try? await Task.sleep(for: .seconds(2))
             for (name, route) in stops {
+                if name == "sidebar-projects" { stores.fleet.projects.setView(.project) }
                 stores.route = route
-                try? await Task.sleep(for: .seconds(2.5))
+                try? await Task.sleep(for: .seconds(name == "sidebar-projects" ? 3.5 : 2.5))
                 capture(folder.appendingPathComponent("\(name)-\(suffix).png"))
                 if name == "new-task" {
                     // The menu of skills a slash opens.
@@ -45,13 +48,35 @@ enum Tour {
                     capture(folder.appendingPathComponent("new-task-slash-\(suffix).png"))
                     stores.newTask.task = ""
                 }
+                if name == "sidebar-projects" {
+                    stores.fleet.projects.picking = "github.com/acme/storefront"
+                    try? await Task.sleep(for: .seconds(2.5))
+                    captureSheet(folder.appendingPathComponent("project-icon-\(suffix).png"))
+                    stores.fleet.projects.picking = nil
+                    // Back to the default, which the rest of the tour (and the next run) expects.
+                    stores.fleet.projects.setView(.time)
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
             NSApp.terminate(nil)
         }
     }
 
+    private static var mainWindow: NSWindow? {
+        NSApp.windows.first { $0.isVisible && $0.contentView != nil && $0.frame.width > 400 && $0.sheetParent == nil }
+    }
+
+    /// The sheet open on the main window, which the window's own picture leaves out; the window if there is none.
+    private static func captureSheet(_ url: URL) {
+        capture(url, window: mainWindow?.attachedSheet ?? mainWindow)
+    }
+
     private static func capture(_ url: URL) {
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 400 }) else { return }
+        capture(url, window: mainWindow)
+    }
+
+    private static func capture(_ url: URL, window: NSWindow?) {
+        guard let window else { return }
         // The window server's picture, because `cacheDisplay` leaves out the sidebar's glass and the
         // toolbar and sometimes comes back blank. An app's own windows need no screen recording permission.
         guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]) else { return }

@@ -331,7 +331,7 @@ pub async fn token_orgs(pool: &PgPool, token_hash: &str) -> sqlx::Result<Option<
 pub enum Scope {
     /// Look: threads, their events and approvals, machines, repos.
     Read,
-    /// Also start tasks, reply, stop, restore, fork, archive, snooze, pin and open PRs; never with full access.
+    /// Also start tasks, reply, stop, restore, fork, archive, snooze, pin, set project icons and open PRs; never with full access.
     Tasks,
     /// Also approve or deny tool calls and run with full access (`bypassPermissions`).
     Full,

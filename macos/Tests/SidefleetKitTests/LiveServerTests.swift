@@ -369,6 +369,33 @@ final class LiveServerTests: XCTestCase {
         thread.dispose()
     }
 
+    func testProjectIconsRoundTrip() async throws {
+        let repo = "github.com/acme/icons-\(UUID().uuidString.prefix(6))"
+        var list = try await api.setProjectIcon(repo: repo, icon: ProjectIcon(kind: .emoji, value: "🦊"))
+        XCTAssertEqual(list.first { $0.repo == repo }?.icon, ProjectIcon(kind: .emoji, value: "🦊"))
+        XCTAssertNotNil(list.first { $0.repo == repo }?.updatedAt, "the server's timestamp parses")
+        let png = ProjectIcon.image(png: Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))!
+        list = try await api.setProjectIcon(repo: repo, icon: png)
+        XCTAssertEqual(list.first { $0.repo == repo }?.icon, png)
+        list = try await api.projectIcons()
+        XCTAssertEqual(list.first { $0.repo == repo }?.icon?.kind, .image)
+
+        // The store: optimistic, kept by the server, back to the default with nil.
+        let d = UserDefaults(suiteName: "sf-live-\(UUID().uuidString)")!
+        let fleet = FleetStore(api: api, toasts: ToastCenter(), defaults: d)
+        await fleet.refresh()
+        XCTAssertEqual(fleet.projects.icons[repo], png, "they load with the fleet")
+        await fleet.projects.setIcon(repo, ProjectIcon(kind: .letter, value: "#22a06b"))
+        XCTAssertEqual(fleet.projects.icons[repo], ProjectIcon(kind: .letter, value: "#22a06b"))
+        await fleet.projects.setIcon(repo, ProjectIcon(kind: .letter, value: "green"))
+        XCTAssertEqual(fleet.projects.icons[repo], ProjectIcon(kind: .letter, value: "#22a06b"), "a 400 rolls it back")
+        XCTAssertEqual(fleet.toasts.toasts.last?.title, "Could not set the icon")
+        await fleet.projects.setIcon(repo, nil)
+        XCTAssertNil(fleet.projects.icons[repo])
+        list = try await api.projectIcons()
+        XCTAssertFalse(list.contains { $0.repo == repo })
+    }
+
     func testRepoListRoundTrip() async throws {
         let saved = try await api.saveAddedRepos(["github.com/acme/proj"])
         XCTAssertEqual(saved, ["github.com/acme/proj"])

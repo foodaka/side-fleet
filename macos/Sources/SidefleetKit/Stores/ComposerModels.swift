@@ -25,6 +25,8 @@ public final class NewTaskModel {
     public var perm: String
     public var iso: String
     public private(set) var repo = ""
+    /// A repo picked from a project's menu in the sidebar stays offered even when it isn't one of your chosen repos.
+    public private(set) var extraRepo = ""
     /// Off by default and not remembered: it pushes the task's branch to origin.
     public var failover = false
     /// Not remembered: each task picks its own.
@@ -66,7 +68,10 @@ public final class NewTaskModel {
 
     // MARK: Derived
 
-    public var repos: [String] { fleet.composerRepos }
+    public var repos: [String] {
+        let list = fleet.composerRepos
+        return extraRepo.isEmpty || list.contains(extraRepo) ? list : (list + [extraRepo]).sorted()
+    }
     /// Machines only run their owner's tasks, so the composer offers your own.
     public var onlineRepos: Set<String> { Set(fleet.myOnline.flatMap { $0.capabilities.repos.map(\.key) }) }
     public var withRepo: [Worker] { repo.isEmpty ? [] : fleet.myOnline.filter { $0.hasRepo(repo) } }
@@ -158,6 +163,12 @@ public final class NewTaskModel {
     public func pick(repo r: String) {
         repo = r
         defaults.set(r, forKey: "sidefleet_repo")
+    }
+
+    /// "New task in …" from a project's menu: that repo, offered even if it isn't one of the chosen ones.
+    public func compose(in r: String) {
+        extraRepo = r
+        pick(repo: r)
     }
 
     public func pick(agent a: AgentID) {

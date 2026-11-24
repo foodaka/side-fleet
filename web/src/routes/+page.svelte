@@ -1,5 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { tick } from 'svelte';
+	import { projects } from '#lib/sf/projects.svelte';
+	import ProjectIcon from '#lib/sf/ui/ProjectIcon.svelte';
 	import * as Select from '#lib/components/ui/select';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
@@ -64,7 +67,18 @@
 	function load(k: string) { try { return localStorage.getItem(k) ?? ''; } catch { return ''; } }
 	function save(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
 
-	const repos = $derived(fleet.composerRepos);
+	// A repo picked from a project's menu in the sidebar stays offered even when it isn't one of your chosen repos.
+	let extraRepo = $state('');
+	const repos = $derived(extraRepo && !fleet.composerRepos.includes(extraRepo) ? [...fleet.composerRepos, extraRepo].sort((a, b) => a.localeCompare(b)) : fleet.composerRepos);
+	$effect(() => {
+		const r = projects.composeIn;
+		if (!r) return;
+		projects.composeIn = null;
+		extraRepo = r;
+		repo = r;
+		save('sidefleet_repo', r);
+		void tick().then(() => box?.focus());
+	});
 	// Machines only run their owner's tasks, so the composer offers your own.
 	const online = $derived(new Set(fleet.myOnline.flatMap((w) => (w.capabilities.repos ?? []).map(repoKey))));
 	// Keep the selection valid as machines come and go.
@@ -256,11 +270,11 @@
 
 					<Select.Root type="single" value={repo} onValueChange={pickRepo}>
 						<Select.Trigger size="sm" class="h-8 max-w-[15rem] rounded-full border-transparent bg-transparent px-2.5 font-mono text-[12.5px] shadow-none hover:bg-accent dark:bg-transparent dark:hover:bg-accent data-[state=open]:bg-accent [&>svg:last-child]:size-3.5 [&>svg:last-child]:opacity-60" aria-label="Repo">
-							<span class="truncate">{repoLabel(repo) || 'Choose a repo'}</span>
+							{#if repo}<ProjectIcon {repo} size={14} />{/if}<span class="truncate">{repoLabel(repo) || 'Choose a repo'}</span>
 						</Select.Trigger>
 						<Select.Content class="max-h-80">
 							{#each repos as r (r)}
-								<Select.Item value={r} label={repoLabel(r)} disabled={!online.has(r)}><span class="font-mono text-[12.5px]">{repoLabel(r)}</span>{#if !online.has(r)}<span class="ml-2 text-xs text-muted-foreground">offline</span>{/if}</Select.Item>
+								<Select.Item value={r} label={repoLabel(r)} disabled={!online.has(r)}><ProjectIcon repo={r} size={14} /><span class="font-mono text-[12.5px]">{repoLabel(r)}</span>{#if !online.has(r)}<span class="ml-2 text-xs text-muted-foreground">offline</span>{/if}</Select.Item>
 							{/each}
 							{#if repos.length}<Select.Separator />{/if}
 							<Select.Item value={PICK} label="Choose repos">{repos.length ? 'Add or remove repos…' : `Choose from ${online.size} repos…`}</Select.Item>

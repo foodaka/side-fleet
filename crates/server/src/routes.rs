@@ -114,6 +114,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::machines::router())
         .merge(crate::prefs::router())
         .merge(crate::projects::router())
+        .merge(crate::new_repos::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()
@@ -122,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/update-ack", post(update_ack))
         .route("/v1/worker/worktree-cleanup", post(worktree_cleanup_done))
         .route("/v1/worker/claim", post(claim_run))
+        .merge(crate::new_repos::worker_router())
         // Events can carry screenshots (base64), well past axum's 2 MB default.
         .route("/v1/worker/runs/{id}/events", post(post_events).layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES)))
         .route("/v1/worker/runs/{id}/live", post(post_live_text))
@@ -1490,12 +1492,21 @@ async fn heartbeat(
             finished_runs: db::finished_runs(&state.pool, &auth.orgs, &req.id, &req.active_runs).await?,
             accepts_gzip: true,
             list_pull_requests: db::list_prs_due(&state.pool, &auth.orgs, &req.id).await?,
+            new_repos: if req.capabilities.new_repos_root.is_some() {
+                crate::new_repos::take(&state.pool, &auth.orgs, &req.id).await?
+            } else {
+                vec![]
+            },
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
         Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()))
     }
 }
+
+/// A claim `kinds` entry: the worker also takes new projects to make, answered with 202 and
+/// `{"new_repos": [...]}` in place of a run.
+pub const NEW_REPO_KIND: &str = "new_repo";
 
 async fn claim_run(
     State(state): State<AppState>,
@@ -1505,7 +1516,9 @@ async fn claim_run(
     if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
     }
-    if req.repos.is_empty() {
+    // Workers that make new projects take them here too: at once, when they are waiting for work.
+    let takes_new_repos = req.kinds.iter().any(|k| k == NEW_REPO_KIND);
+    if req.repos.is_empty() && !takes_new_repos {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
     // Workers from before multi-agent support only run Claude Code.
@@ -1518,7 +1531,16 @@ async fn claim_run(
     // It serves its owner's tasks in each of their orgs: wake on any of them.
     let mut wakes: Vec<_> = auth.orgs.iter().map(|o| state.claims.subscribe(*o)).collect();
     loop {
+        if takes_new_repos {
+            let jobs = crate::new_repos::take(&state.pool, &auth.orgs, &req.worker_id).await?;
+            if !jobs.is_empty() {
+                return Ok((StatusCode::ACCEPTED, Json(json!({ "new_repos": jobs }))).into_response());
+            }
+        }
         for org in &auth.orgs {
+            if req.repos.is_empty() {
+                break;
+            }
             let max_running = tenancy::org_limits(&state.pool, *org).await?.map(|l| l.parallel_runs);
             let claimed =
                 db::claim_run(&state.pool, *org, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds, max_running)

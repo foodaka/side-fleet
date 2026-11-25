@@ -138,6 +138,7 @@ struct SettingsMenuRow: View {
         MenuItem(title: "Dark", checked: stores.prefs.appearance == .dark) { stores.prefs.set(\.appearance, .dark) }
         Divider().padding(.vertical, 4)
         MenuItem(title: "All settings…") { pick { openSettings() } }
+        MenuItem(title: "New project…") { pick { stores.newProjectOpen = true } }
         MenuItem(title: "Choose repos…") { pick { stores.repoPickerOpen = true } }
         Divider().padding(.vertical, 4)
         if let user = fleet.me?.user {

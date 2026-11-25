@@ -475,6 +475,60 @@ pub struct Capabilities {
     /// GitHub user authored for the Pull requests page.
     #[serde(default)]
     pub can_manage_prs: bool,
+    /// Where this worker creates and clones new projects (its repos folder). Set only
+    /// by builds that take [`NewRepoJob`]s; the page offers "New project" on those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_repos_root: Option<String>,
+}
+
+/// A new project to make on a machine: an empty git repo, or a clone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NewRepoSource {
+    /// `git init`, a README and a first commit.
+    Init,
+    /// `git clone <url>`.
+    Clone { url: String },
+}
+
+/// What the control plane hands a worker to create, by claim or heartbeat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewRepoJob {
+    pub id: Uuid,
+    /// The folder's name under the repos root.
+    pub name: String,
+    #[serde(flatten)]
+    pub source: NewRepoSource,
+}
+
+/// What the worker reports for a [`NewRepoJob`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewRepoDone {
+    pub worker_id: String,
+    /// The repo as a scan reports it; None when it failed.
+    #[serde(default)]
+    pub repo: Option<RepoInfo>,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// It was made, but something short of it went wrong.
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+/// A folder name a new project may take: letters, digits, `-`, `_` and `.`, not
+/// starting with a dot, at most 100 characters.
+pub fn valid_repo_folder(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The folder a clone of `url` goes in: its last path part, without `.git`.
+pub fn clone_folder(url: &str) -> String {
+    let u = url.trim().trim_end_matches('/');
+    let last = u.rsplit(['/', ':']).next().unwrap_or("");
+    last.strip_suffix(".git").unwrap_or(last).to_string()
 }
 
 /// What the Machines page asks of a machine's worktrees.
@@ -701,6 +755,37 @@ pub fn repo_identity(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}/{}", host.to_ascii_lowercase(), path.to_ascii_lowercase()))
+}
+
+#[cfg(test)]
+mod new_repo_tests {
+    use super::*;
+
+    #[test]
+    fn folder_names() {
+        for ok in ["my-app", "app_2", "a.b", "X"] {
+            assert!(valid_repo_folder(ok), "{ok}");
+        }
+        for bad in ["", ".hidden", "a/b", "..", "a b", "~", &"x".repeat(101)] {
+            assert!(!valid_repo_folder(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn clone_folders() {
+        assert_eq!(clone_folder("git@github.com:acme/web-app.git"), "web-app");
+        assert_eq!(clone_folder("https://github.com/acme/web-app/"), "web-app");
+        assert_eq!(clone_folder("https://gitlab.com/acme/tools.git"), "tools");
+    }
+
+    #[test]
+    fn job_wire_form() {
+        let j = NewRepoJob { id: Uuid::nil(), name: "x".into(), source: NewRepoSource::Clone { url: "u".into() } };
+        let v = serde_json::to_value(&j).unwrap();
+        assert_eq!(v["kind"], "clone");
+        assert_eq!(v["url"], "u");
+        assert_eq!(serde_json::from_value::<NewRepoJob>(v).unwrap(), j);
+    }
 }
 
 #[cfg(test)]
@@ -1004,6 +1089,9 @@ pub struct HeartbeatResponse {
     /// user authored and report them (`POST /v1/worker/pull-requests`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub list_pull_requests: bool,
+    /// New projects to make here that no claim has taken (the machine is busy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub new_repos: Vec<NewRepoJob>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -50,6 +50,8 @@ private actor DemoWorld {
     private var workers: [JSONValue]
     private var inbox: [JSONValue] = []
     private var repos: [String]
+    /// New projects asked for, by request id, as `GET /v1/new-repos/{id}` answers.
+    private var newRepos: [String: JSONValue] = [:]
     /// Project icons, by repo: `{repo, kind, value, updated_at}`.
     private var icons: [String: JSONValue]
     private var images: [String: Data] = [:]
@@ -164,6 +166,11 @@ private actor DemoWorld {
                 previews[id] = ["items": .array(left), "at": .string(Timestamp.format(now))]
             }
             return Data()
+        case ("POST", "workers") where seg.last == "new-repos" && seg.count == 4:
+            return try encode(makeNewRepo(worker: seg[2].removingPercentEncoding ?? seg[2], body: body))
+        case ("GET", "new-repos") where seg.count == 3:
+            guard let s = newRepos[seg[2]] else { throw APIError.status(404, "no such request") }
+            return try encode(s)
         case ("POST", "workers"):
             return try encode(.object([:]))
         case ("DELETE", "workers"):
@@ -422,6 +429,35 @@ private actor DemoWorld {
     }
 
     /// Machines wander a little, so the sparklines and the map have something to show.
+    /// As a machine would, at once: a folder in its repos root, which joins its repos (and the
+    /// chosen ones). An empty repo is known by its folder, a clone by its remote.
+    private func makeNewRepo(worker: String, body: JSONValue?) throws -> JSONValue {
+        let url = body?["url"]?.string?.trimmingCharacters(in: .whitespaces) ?? ""
+        let given = body?["name"]?.string ?? ""
+        let name = given.isEmpty ? NewProject.folder(fromURL: url) : NewProject.folder(given)
+        guard !name.isEmpty, name == given || given.isEmpty else { throw APIError.status(400, "a project name is letters, digits, - _ and ., and doesn't start with a dot") }
+        guard let i = workers.firstIndex(where: { $0["id"]?.string == worker }), case .object(var w) = workers[i],
+              case .object(var caps)? = w["capabilities"], let root = caps["new_repos_root"]?.string else {
+            throw APIError.status(409, "this machine's Sidefleet is too old to make projects; update it first")
+        }
+        var list = caps["repos"]?.array ?? []
+        if list.contains(where: { $0["name"]?.string?.lowercased() == name.lowercased() }) {
+            throw APIError.status(409, "\(name) is already being made on this machine")
+        }
+        // The demo's remotes are all on github.com/acme.
+        let key = url.isEmpty ? name : "github.com/acme/" + name.lowercased()
+        let path = NewProject.path(root: root, folder: name)
+        list.append(["name": .string(name), "path": .string(path), "id": .string(key)])
+        caps["repos"] = .array(list)
+        w["capabilities"] = .object(caps)
+        workers[i] = .object(w)
+        if !repos.isEmpty, !repos.contains(key) { repos.append(key) }
+        nextID += 1
+        let id = "nr-\(nextID)"
+        newRepos[id] = ["id": .string(id), "status": "done", "repo": .string(key), "path": .string(path), "error": .null, "warning": .null]
+        return ["id": .string(id), "name": .string(name)]
+    }
+
     private func tickedWorkers(_ now: Date) -> [JSONValue] {
         let beat = Int(now.timeIntervalSince1970 / 5)
         return workers.enumerated().map { i, w in

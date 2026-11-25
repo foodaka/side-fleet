@@ -200,6 +200,7 @@ is the normal case here.
 | Inbox | `POST /v1/inbox/:id/dismiss`, `POST /v1/inbox/dismiss-all` |
 | Machines | `POST /v1/workers/:id/update`, `DELETE /v1/workers/:id`, `POST /v1/enrollments/lookup`, `/approve`, `/deny` |
 | Repos | `PUT /v1/repos {added}` |
+| New project | `POST /v1/workers/:id/new-repos {name, url?}` → `202 {id, name}`: the machine (its owner only, and only when `capabilities.new_repos_root` is set) starts an empty repo with a README and a first commit, or clones `url`, into that folder. Poll `GET /v1/new-repos/:id` → `{status: pending \| running \| done \| failed, repo, path, error, warning}`; when done, start a task in `repo` |
 | Project icons | `GET /v1/project-icons` `[{repo, kind, value, updated_at}]`; `PUT /v1/project-icons {repo, icon: {kind, value} \| null}` answers the same list. `kind` is `emoji`, `letter` (value `#rrggbb`) or `image` (a PNG `data:` URL, cropped square to 64 px, at most 48 KB). Optimistic with rollback |
 | Worker tokens | `GET`/`POST`/`DELETE /v1/orgs/:org/tokens` |
 | Prefs | `GET`/`PUT /v1/me/prefs`, synced keys only: `permission`, `roomPermission`, `workspace`, `sendKey`, `confirmStop`, `snoozePresets` |

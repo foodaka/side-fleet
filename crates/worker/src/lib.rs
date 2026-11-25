@@ -12,6 +12,7 @@ pub mod detect;
 pub mod diff;
 pub mod handoff;
 pub mod integrate;
+pub mod new_repo;
 pub mod pr;
 pub mod pr_text;
 pub mod setup;

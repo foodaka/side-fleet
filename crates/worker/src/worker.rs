@@ -17,7 +17,7 @@ use crate::agent::{self, AgentSpec, ApprovalHook};
 use crate::approval::{self, Bridge};
 use crate::checkpoint::{self, ChangeTracker};
 use crate::cleanup::{self, ActiveRuns};
-use crate::client::{Backoff, ClientError, ControlClient, Rejected};
+use crate::client::{Backoff, Claimed, ClientError, ControlClient, Rejected};
 use crate::diff;
 use crate::handoff;
 use crate::setup;
@@ -243,6 +243,9 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                                 }
                             });
                         }
+                        if !resp.new_repos.is_empty() {
+                            make_new_repos(client.clone(), cfg2.repos_root.clone(), caps.clone(), resp.new_repos);
+                        }
                         if let Some(request) = resp.worktree_cleanup.filter(|_| !cleaning.swap(true, Ordering::SeqCst)) {
                             let (dir, active, cleaned) = (cfg2.worktrees_dir.clone(), active.clone(), cleaned.clone());
                             tokio::spawn(async move {
@@ -338,7 +341,13 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
         let wait = if busy.is_empty() { CLAIM_WAIT } else { cfg.poll_interval };
         let asked = tokio::time::Instant::now();
         match client.claim(&repos, &busy, &agents, &slots, wait).await {
-            Ok(Some(run)) => {
+            Ok(Claimed::NewRepos(jobs)) => {
+                drop(permit);
+                backoff.reset();
+                make_new_repos(client.clone(), cfg.repos_root.clone(), caps.clone(), jobs);
+            }
+            Ok(Claimed::Run(run)) => {
+                let run = *run;
                 backoff.reset();
                 let repo_path = resolve_repo(&caps.lock().await.repos, &run.repo);
                 active.lock().await.insert(run.id, (run.repo.clone(), run.isolation.clone(), run.parent_id.unwrap_or(run.id)));
@@ -357,7 +366,7 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                 });
                 map.insert(id, Running { stop: stop_tx, task: task.abort_handle(), ending: false });
             }
-            Ok(None) => {
+            Ok(Claimed::Nothing) => {
                 drop(permit);
                 backoff.reset();
                 // A control plane that held the claim has waited already; an older one answers
@@ -441,6 +450,37 @@ fn log_caps(caps: &Capabilities) {
         tracing::info!(version = %o.version, models = o.models.len(), "ollama found");
     }
     tracing::info!(count = caps.repos.len(), repos = ?caps.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), "git checkouts");
+}
+
+/// Make the projects the page asked for, each in the background. A made one joins this
+/// machine's repos at once, so the next claim offers it, and the control plane is told.
+fn make_new_repos(client: ControlClient, root: PathBuf, caps: Arc<Mutex<Capabilities>>, jobs: Vec<sidefleet_core::NewRepoJob>) {
+    for job in jobs {
+        let (client, root, caps) = (client.clone(), root.clone(), caps.clone());
+        tokio::spawn(async move {
+            tracing::info!(name = %job.name, "making a new project");
+            let out = crate::new_repo::create(&root, &job).await;
+            if let Some(repo) = &out.repo {
+                let mut c = caps.lock().await;
+                if !c.repos.iter().any(|r| r.path == repo.path) {
+                    c.repos.push(repo.clone());
+                    c.repos.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+            }
+            if let Some(e) = &out.error {
+                tracing::warn!(name = %job.name, error = %e, "could not make the new project");
+            }
+            for attempt in 1..=5u32 {
+                match client.new_repo_done(job.id, out.repo.clone(), out.error.clone(), out.warning.clone()).await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        tracing::warn!(error = %e, attempt, "reporting the new project failed");
+                        tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// A per-task git worktree: `<worktrees_dir>/<repo-slug>/<root run id>` on branch

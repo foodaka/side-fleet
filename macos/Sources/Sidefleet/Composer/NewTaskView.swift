@@ -166,12 +166,15 @@ private struct NewTaskForm: View {
             PickerOption(id: r, title: Format.repoLabel(r), disabledReason: online.contains(r) ? nil : "offline", mono: true,
                          icon: AnyView(ProjectIconView(repo: r, icon: stores.fleet.projects.icon(r), size: 14)))
         }
+        options.append(PickerOption(id: "__new__", title: "New project…"))
         options.append(PickerOption(id: "__pick__", title: model.repos.isEmpty ? "Choose from \(online.count) repos…" : "Add or remove repos…"))
         return PickerPill(
             options: options, selected: model.repo, width: 300, accessibility: "Repo: \(Format.repoLabel(model.repo))",
             onPick: { id in
                 if id == "__pick__" {
                     stores.repoPickerOpen = true
+                } else if id == "__new__" {
+                    stores.newProjectOpen = true
                 } else {
                     model.pick(repo: id)
                 }
@@ -189,12 +192,25 @@ private struct NewTaskForm: View {
         VStack(spacing: 2) {
             if model.repos.isEmpty {
                 HStack(spacing: 4) {
-                    Text("Your machines have \(model.onlineRepos.count) git checkouts.")
-                    Button("Choose the ones you work on") { stores.repoPickerOpen = true }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(SF.ink)
-                        .underline()
-                    Text("to fill the repo menu.")
+                    if model.onlineRepos.isEmpty {
+                        Text("No git checkouts on your machines yet.")
+                        Button("Start a new project") { stores.newProjectOpen = true }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(SF.ink)
+                            .underline()
+                        Text("or clone one.")
+                    } else {
+                        Text("Your machines have \(model.onlineRepos.count) git checkouts.")
+                        Button("Choose the ones you work on") { stores.repoPickerOpen = true }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(SF.ink)
+                            .underline()
+                        Text(", or")
+                        Button("start a new project") { stores.newProjectOpen = true }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(SF.ink)
+                            .underline()
+                    }
                 }
             } else {
                 LiveText(every: 30) { now in

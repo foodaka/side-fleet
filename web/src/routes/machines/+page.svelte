@@ -42,6 +42,7 @@
 			{/if}
 		</div>
 		<div class="flex gap-2">
+			<Button variant="outline" class="h-8 rounded-full text-[13px]" onclick={() => (fleet.newProjectOpen = true)}>New project</Button>
 			<Button variant="outline" class="h-8 rounded-full text-[13px]" onclick={() => (fleet.pickerOpen = true)}>Choose repos</Button>
 			<Button class="h-8 rounded-full text-[13px]" onclick={() => (fleet.addMachineOpen = true)}><Plus class="size-4" />Add machine</Button>
 		</div>

@@ -30,6 +30,8 @@ class Fleet {
 	/** Ticks every second so relative times and durations stay fresh. */
 	now = $state(Date.now());
 	pickerOpen = $state(false);
+	/** The New project dialog. */
+	newProjectOpen = $state(false);
 	addMachineOpen = $state(false);
 	/** Archived threads; null until the sidebar's archived list is first opened. */
 	archived = $state<RunSummary[] | null>(null);

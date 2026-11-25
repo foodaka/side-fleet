@@ -7,6 +7,7 @@
 	import { Kbd } from '#lib/components/ui/kbd';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import Check from '@lucide/svelte/icons/check';
+	import FolderPlus from '@lucide/svelte/icons/folder-plus';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import Cpu from '@lucide/svelte/icons/cpu';
 	import MemoryStick from '@lucide/svelte/icons/memory-stick';
@@ -28,6 +29,7 @@
 	import SlashMenu from '#lib/sf/ui/SlashMenu.svelte';
 
 	const PICK = '__pick__';
+	const NEW = '__new__';
 	let task = $state('');
 	const savedAgent: AgentId = AGENTS.some((a) => a.id === load('sidefleet_agent')) ? (load('sidefleet_agent') as AgentId) : 'claude';
 	let agent = $state<AgentId>(savedAgent);
@@ -114,6 +116,7 @@
 
 	function pickRepo(v: string) {
 		if (v === PICK) { fleet.pickerOpen = true; return; }
+		if (v === NEW) { fleet.newProjectOpen = true; return; }
 		repo = v;
 		save('sidefleet_repo', v);
 	}
@@ -277,6 +280,7 @@
 								<Select.Item value={r} label={repoLabel(r)} disabled={!online.has(r)}><ProjectIcon repo={r} size={14} /><span class="font-mono text-[12.5px]">{repoLabel(r)}</span>{#if !online.has(r)}<span class="ml-2 text-xs text-muted-foreground">offline</span>{/if}</Select.Item>
 							{/each}
 							{#if repos.length}<Select.Separator />{/if}
+							<Select.Item value={NEW} label="New project"><FolderPlus class="size-3.5" />New project…</Select.Item>
 							<Select.Item value={PICK} label="Choose repos">{repos.length ? 'Add or remove repos…' : `Choose from ${online.size} repos…`}</Select.Item>
 						</Select.Content>
 					</Select.Root>
@@ -311,7 +315,7 @@
 			</div>
 			<p class="min-h-5 text-center text-xs text-muted-foreground">
 				{#if !repos.length}
-					Your machines have {online.size} git checkouts. <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.pickerOpen = true)}>Choose the ones you work on</button> to fill the repo menu.
+					{#if online.size}Your machines have {online.size} git checkouts. <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.pickerOpen = true)}>Choose the ones you work on</button>, or <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.newProjectOpen = true)}>start a new project</button>.{:else}No git checkouts on your machines yet. <button type="button" class="text-foreground underline underline-offset-2" onclick={() => (fleet.newProjectOpen = true)}>Start a new project</button> or clone one.{/if}
 				{:else if repo && online.has(repo) && !target}
 					None of the machines with {repoLabel(repo)} has {agentName(agent)}. Install it there, or pick another agent.
 				{:else if target}

@@ -457,6 +457,8 @@ public struct Capabilities: Sendable, Hashable, Decodable {
     /// This worker's build leaves files out of a pull request, has the agent write it, merges it,
     /// and lists pull requests for the Pull requests screen.
     public var canManagePRs: Bool
+    /// Where this worker makes new projects (its repos folder); nil on builds that can't.
+    public var newReposRoot: String?
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
@@ -469,6 +471,7 @@ public struct Capabilities: Sendable, Hashable, Decodable {
         slots = f.opt("slots")
         canCleanWorktrees = f.bool("can_clean_worktrees")
         canManagePRs = f.bool("can_manage_prs")
+        newReposRoot = f.opt("new_repos_root")
     }
 }
 

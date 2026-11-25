@@ -381,17 +381,18 @@ pub const HOME_SCAN_DEPTH: usize = 3;
 /// Git checkouts under `root`, up to `max_depth` levels deep (the root itself
 /// counts when it is a repo). Names are paths relative to `root`. Hidden
 /// folders and well-known noise (see `SKIP_DIRS`) are not entered.
+/// The checkout at `dir`, as a scan of `root` reports it.
+pub fn repo_info(root: &Path, dir: &Path) -> RepoInfo {
+    let name = if dir == root { ".".to_string() } else { dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string() };
+    let id = origin_url(dir).and_then(|u| identity_for(&u)).unwrap_or_else(|| name.clone());
+    RepoInfo { name, path: dir.to_string_lossy().to_string(), id, commands: crate::commands::project_commands(dir) }
+}
+
 pub fn scan_repos(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
     let mut out = Vec::new();
     fn walk(root: &Path, dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<RepoInfo>) {
         if dir.join(".git").exists() {
-            let name = if dir == root {
-                ".".to_string()
-            } else {
-                dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string()
-            };
-            let id = origin_url(dir).and_then(|u| identity_for(&u)).unwrap_or_else(|| name.clone());
-            out.push(RepoInfo { name, path: dir.to_string_lossy().to_string(), id, commands: crate::commands::project_commands(dir) });
+            out.push(repo_info(root, dir));
             return; // do not descend into nested repos / submodules
         }
         if depth >= max_depth {
@@ -466,6 +467,7 @@ pub async fn detect_all(opts: &DetectOptions) -> Capabilities {
         can_clean_worktrees: true,
         can_hand_off_files: true,
         can_manage_prs: true,
+        new_repos_root: Some(opts.repos_root.to_string_lossy().to_string()),
         agents: Agents { claude, codex, opencode, ollama },
         repos: scan_repos(&opts.repos_root, opts.scan_depth),
         hostname: gethostname::gethostname().to_string_lossy().to_string(),

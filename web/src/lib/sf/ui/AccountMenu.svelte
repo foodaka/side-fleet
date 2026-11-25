@@ -55,6 +55,7 @@
 		<DropdownMenu.Item onclick={() => goto('#/chat')}><MessagesSquare class="size-3.5" />Chat apps</DropdownMenu.Item>
 		<DropdownMenu.Item onclick={() => goto('#/settings')}><Settings class="size-3.5" />Settings</DropdownMenu.Item>
 		{#if user}<DropdownMenu.Item onclick={() => (fleet.machinesOpen = true)}>Your machines…</DropdownMenu.Item>{/if}
+		<DropdownMenu.Item onclick={() => (fleet.newProjectOpen = true)}>New project…</DropdownMenu.Item>
 		<DropdownMenu.Item onclick={() => (fleet.pickerOpen = true)}>Choose repos…</DropdownMenu.Item>
 		<DropdownMenu.Separator />
 		<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Appearance</DropdownMenu.Label>

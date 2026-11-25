@@ -3,6 +3,7 @@
 	import { Button } from '#lib/components/ui/button';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import Search from '@lucide/svelte/icons/search';
+	import FolderPlus from '@lucide/svelte/icons/folder-plus';
 	import { fleet } from '../state.svelte';
 	import { repoKey, repoLabel } from '../format';
 	import { toast } from 'svelte-sonner';
@@ -144,11 +145,15 @@
 					<span class="ml-auto shrink-0 text-xs text-faint">{where.length ? where.join(', ') : 'offline'}</span>
 				</div>
 			{:else}
-				<p class="p-6 text-center text-sm text-muted-foreground">{order.length ? `No repo matches “${q}”.` : 'No machine has reported any git checkouts yet.'}</p>
+				<div class="flex flex-col items-center gap-3 p-6 text-center text-sm text-muted-foreground">
+					<p>{order.length ? `No repo matches “${q}”.` : 'No machine has reported any git checkouts yet.'}</p>
+					<Button variant="outline" class="h-8 rounded-full text-[13px]" onclick={() => { fleet.pickerOpen = false; fleet.newProjectOpen = true; }}><FolderPlus class="size-3.5" />New project</Button>
+				</div>
 			{/each}
 		</div>
 		<div class="flex items-center justify-between gap-3 border-t bg-muted/40 px-4 py-3">
-			<span class="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><Kbd>↑</Kbd><Kbd>↓</Kbd> move <Kbd>↵</Kbd> select <Kbd>⌘↵</Kbd> save</span>
+			<Button variant="ghost" class="h-9 rounded-full px-3 text-[13px]" onclick={() => { fleet.pickerOpen = false; fleet.newProjectOpen = true; }}><FolderPlus class="size-3.5" />New project</Button>
+			<span class="hidden items-center gap-1.5 text-xs text-muted-foreground md:flex"><Kbd>↑</Kbd><Kbd>↓</Kbd> move <Kbd>↵</Kbd> select <Kbd>⌘↵</Kbd> save</span>
 			<span class="ml-auto flex gap-2">
 				<Button variant="outline" class="rounded-full" onclick={() => (fleet.pickerOpen = false)}>Cancel</Button>
 				<Button class="rounded-full" onclick={save} disabled={saving}>Save{sel.size ? ` ${sel.size}` : ''}</Button>

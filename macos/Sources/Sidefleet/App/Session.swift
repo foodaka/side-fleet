@@ -40,6 +40,9 @@ final class Stores {
     }
     /// Asks the repo picker or Add machine to open, from wherever.
     var repoPickerOpen = false
+    var newProjectOpen = false
+    /// The New project sheet's form, kept while it's shut so a clone in flight isn't lost.
+    let newProject: NewProjectModel
     var addMachineOpen = false
     /// The same for the sheets the org switcher and the Settings menu open.
     var machinesOpen = false
@@ -64,6 +67,7 @@ final class Stores {
         fleet = FleetStore(api: api, toasts: toasts)
         inbox = InboxStore(api: api)
         newTask = NewTaskModel(fleet: fleet, prefs: prefs)
+        newProject = NewProjectModel(fleet: fleet)
         rooms = RoomsStore(fleet: fleet)
         pullRequests = PullRequestsStore(api: api)
         team = TeamStore(fleet: fleet)

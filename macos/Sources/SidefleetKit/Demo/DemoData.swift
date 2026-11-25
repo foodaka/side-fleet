@@ -207,7 +207,7 @@ enum DemoData {
         // A read-only answer.
         let taxAt = ago(26)
         out.append([SeedRun(
-            json: run("demo-tax", "Where do we compute shipping tax?", status: "succeeded", created: taxAt, started: taxAt, finished: ago(23), worker: "mac-mini", model: "haiku", perm: "plan"),
+            json: run("demo-tax", "Where do we compute shipping tax?", status: "succeeded", created: taxAt, started: taxAt, finished: ago(23), worker: "mac-mini", model: "haiku", perm: "plan", extra: ["forked_from": "demo-checkout"]),
             events: [
                 ("status", ["status": "running", "worker_id": "mac-mini"], taxAt),
                 ("workspace", ["mode": "worktree", "branch": "sidefleet/52d7e8b3", "from": ["ref": "origin/main", "commit": "e03b19d4c1"]], taxAt),

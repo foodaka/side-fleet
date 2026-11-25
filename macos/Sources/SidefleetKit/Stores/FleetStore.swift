@@ -125,6 +125,12 @@ public final class FleetStore {
     public var updatable: [Worker] { workers.filter { $0.online && $0.outdated && !$0.updateRequested && canUpdate($0) } }
     public var updateNotice: Bool { !updatable.isEmpty && updatesCleared != (setup?.build ?? "") }
 
+    /// A machine's name for people: its display name, else its id (gone, or not loaded yet).
+    public func workerName(_ id: String?) -> String {
+        guard let id else { return "" }
+        return workers.first { $0.id == id }?.displayName ?? id
+    }
+
     /// A user's login, if they are in this org.
     public func login(_ id: String?) -> String? { id.flatMap { id in members.first { $0.id == id }?.login } }
 
@@ -486,12 +492,13 @@ public struct SidebarSections: Sendable {
         projects = ProjectGroup.make(rest, now: now)
     }
 
-    /// Search covers title, repo and machine, and archived tasks once their list has been opened.
-    public static func matches(query: String, runs: [RunSummary], archived: [RunSummary]?) -> [RunSummary] {
+    /// Search covers title, repo and machine (its id and its name), and archived tasks once their
+    /// list has been opened. `workerName` turns a machine id into the name people see.
+    public static func matches(query: String, runs: [RunSummary], archived: [RunSummary]?, workerName: (String?) -> String = { _ in "" }) -> [RunSummary] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return [] }
         return (runs + (archived ?? [])).filter { r in
-            [r.run.task, Format.repoLabel(r.run.repo), r.run.workerID ?? ""].contains { $0.lowercased().contains(q) }
+            [r.run.task, Format.repoLabel(r.run.repo), r.run.workerID ?? "", workerName(r.latestWorkerID)].contains { $0.lowercased().contains(q) }
         }
     }
 }

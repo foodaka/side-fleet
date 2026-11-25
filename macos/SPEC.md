@@ -251,12 +251,15 @@ and match the page's rendered sizes unless noted.
 own origin), defaulting to the hosted one, then calls `/v1/auth`. Offers GitHub and/or a developer
 key accordingly. Warns if plain HTTP is going to a public address. Animated logo while connecting.
 
-**Sidebar** (`Sidebar.svelte`, `RunList.svelte`). Logo and name, inbox bell, org switcher, New task,
-search, then the list, then nav.
+**Sidebar** (`Sidebar.svelte`, `RunList.svelte`, `AccountMenu.svelte`). Logo and name, New task,
+search, then nav (Inbox with an amber count, Overview, Pull requests, Rooms, Machines), then "Tasks"
+with a view menu ("Mine · By project") and the list, then the account menu at the foot: org and
+login, and in its menu the org switch, Team, Chat apps, Settings, repos, machines, appearance,
+feedback and sign out.
 - Sections: Pinned (in the order they were pinned), Active (with a count), Today, Yesterday, Previous 7 days, Older, then collapsed Snoozed
   and Archived. Archived loads on first open.
 - Active sorts: waiting on you, running, queued, scheduled soonest first.
-- Row: status dot, title, then a detail line. Active rows show machine and duration, "Waiting on
+- Row: status dot, title, then a detail line, with a fork mark on forked threads and machines by name. Active rows show machine and duration, "Waiting on
   you · 2 tool calls", "Scheduled · Tue 07:00" or "Waiting for a machine". Others show repo (only if
   it isn't the most common one), machine (only if there are several), model and agent icon.
 - Markers: a coloured dot when waiting on you, an ink dot when unread and finished, PR number and
@@ -353,7 +356,7 @@ sortable columns (the page's list isn't sortable).
 the try-it box), Reviewing, Snooze presets, Confirmations, Appearance, Account. Adds notification
 choices and "keep running in the menu bar".
 
-**Others.** Inbox popover from the bell, the same rows and Clear all. Repo picker sheet with search
+**Others.** Inbox popover from the Inbox row, the same rows and Clear all. Repo picker sheet with search
 and space to tick. Add machine with terminal and agent tabs; the connect command masks its token and
 the copy doesn't. New org, rename org.
 

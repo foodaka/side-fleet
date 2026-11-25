@@ -20,16 +20,21 @@ struct SidebarView: View {
     }
 
     var body: some View {
+        // As on the web: places you go often sit above the tasks; the org and everything you set up
+        // rather than visit live in the account menu at the foot.
         VStack(spacing: 0) {
             header
             VStack(spacing: 8) {
-                OrgSwitcher()
                 newTaskButton
                 searchField
             }
             .padding(.horizontal, 12)
-            list
             nav
+            list
+            Divider()
+            AccountMenu()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
         }
         .frame(minWidth: 220)
         .sheet(item: $picking) { SnoozePickSheet(run: $0) }
@@ -42,7 +47,6 @@ struct SidebarView: View {
             LogoMark(size: 20)
             Text("Sidefleet").font(SF.font(15, .semibold)).tracking(-0.2)
             Spacer()
-            InboxBell()
         }
         .padding(.leading, 16)
         .padding(.trailing, 10)
@@ -148,7 +152,7 @@ struct SidebarView: View {
     }
 
     private var searchResults: some View {
-        let matches = SidebarSections.matches(query: query, runs: fleet.runs, archived: fleet.archived)
+        let matches = SidebarSections.matches(query: query, runs: fleet.runs, archived: fleet.archived, workerName: fleet.workerName)
         return Group {
             SectionHeading(matches.isEmpty ? "No matches" : "\(matches.count) match\(matches.count == 1 ? "" : "es")")
             ForEach(matches) { RunRow(run: $0, byProject: byProject, onPick: { picking = $0 }) }
@@ -167,7 +171,7 @@ struct SidebarView: View {
         listTabs(theirs: s.theirs)
         if s.isEmpty {
             Text(filtering && scope == "mine" && !fleet.runs.isEmpty
-                ? "You haven't started a task here yet. Switch to Team to see what everyone else is running."
+                ? "You haven't started a task here yet. Choose Team in the view menu above to see what everyone else is running."
                 : "No tasks yet. Each one you start shows up here, so you can jump between them.")
                 .font(SF.font(12))
                 .lineSpacing(3)
@@ -235,18 +239,54 @@ struct SidebarView: View {
         }
     }
 
-    /// Mine / Team when the org has several members, and By time / By project. Both choices stick.
+    /// "Tasks", and a menu for the view: Mine or Team when the org has several members, and By time
+    /// or By project. Both choices stick. One line, so the list keeps its room.
     private func listTabs(theirs: Int) -> some View {
-        VStack(spacing: 6) {
-            if filtering {
-                SegmentTabs(segments: [.init(id: "mine", label: "Mine"), .init(id: "team", label: "Team", badge: theirs)], selected: scope) { scope = $0 }
+        HStack(spacing: 4) {
+            Text("Tasks").font(SF.font(11, .medium)).foregroundStyle(SF.faint)
+            Spacer(minLength: 4)
+            Menu {
+                if filtering {
+                    Section("Show") {
+                        Picker("Show", selection: Binding(get: { scope }, set: { scope = $0 })) {
+                            Text("Mine").tag("mine")
+                            Text(theirs > 0 ? "Team (\(theirs) more)" : "Team").tag("team")
+                        }
+                        .pickerStyle(.inline)
+                        .labelsHidden()
+                    }
+                }
+                Section("Group by") {
+                    Picker("Group by", selection: Binding(get: { fleet.projects.view }, set: { fleet.projects.setView($0) })) {
+                        Text("Time").tag(ProjectsStore.ListView.time)
+                        Text("Project").tag(ProjectsStore.ListView.project)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "line.3.horizontal.decrease").font(.system(size: 10, weight: .medium))
+                    Text(viewLabel).font(SF.font(11.5, .medium)).lineLimit(1)
+                }
+                .foregroundStyle(SF.muted)
             }
-            SegmentTabs(segments: [.init(id: "time", label: "By time"), .init(id: "project", label: "By project")], selected: fleet.projects.view.rawValue) { id in
-                fleet.projects.setView(id == "project" ? .project : .time)
-            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Change the list view")
+            .accessibilityLabel("Change the list view: \(viewLabel)")
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 12)
+        .padding(.leading, 10)
+        .padding(.trailing, 4)
+        .padding(.top, 10)
+    }
+
+    /// What the view menu says it shows, e.g. "Mine · By project".
+    private var viewLabel: String {
+        [filtering ? (scope == "team" ? "Team" : "Mine") : nil, byProject ? "By project" : "By time"]
+            .compactMap { $0 }
+            .joined(separator: " · ")
     }
 
     /// By project: one group per repo, the ones waiting on you or busy first; hidden ones come back from the foot.
@@ -300,21 +340,17 @@ struct SidebarView: View {
 
     // MARK: Nav
 
+    /// The places you go often, in the web's order. Team, Chat apps and Settings are in the account menu.
     private var nav: some View {
         VStack(spacing: 2) {
-            Divider().padding(.bottom, 8).padding(.horizontal, -12)
+            InboxRow()
             NavRow(title: "Overview", symbol: "square.grid.2x2", active: stores.route == .overview) { stores.route = .overview }
             NavRow(title: "Pull requests", symbol: "arrow.triangle.pull", active: stores.route == .pullRequests) { stores.route = .pullRequests }
-            NavRow(title: "Machines", symbol: "server.rack", active: stores.route == .machines) { stores.route = .machines } trailing: { machineStatus }
             NavRow(title: "Rooms", symbol: "shippingbox", active: inRooms) { stores.route = .rooms }
-            if fleet.me?.user != nil {
-                NavRow(title: "Team", symbol: "person.2", active: stores.route == .team) { stores.route = .team }
-            }
-            NavRow(title: "Chat apps", symbol: "bubble.left.and.bubble.right", active: stores.route == .chatApps) { stores.route = .chatApps }
-            SettingsMenuRow()
+            NavRow(title: "Machines", symbol: "server.rack", active: stores.route == .machines) { stores.route = .machines } trailing: { machineStatus }
         }
         .padding(.horizontal, 12)
-        .padding(.bottom, 10)
+        .padding(.top, 4)
     }
 
     private var inRooms: Bool {
@@ -564,6 +600,11 @@ struct RunRow: View {
 
     private var detailLine: some View {
         HStack(spacing: 6) {
+            if run.run.forkedFrom != nil {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 10)).foregroundStyle(SF.faint)
+                    .help("Forked from another thread")
+                    .accessibilityLabel("Forked")
+            }
             if run.run.isolation == "checkout" {
                 Image(systemName: "folder").font(.system(size: 10)).foregroundStyle(SF.faint)
                     .help("In the repo's own checkout, not a worktree")
@@ -599,7 +640,7 @@ struct RunRow: View {
                 LiveText { now in
                     // Running, but the machine's first word hasn't arrived: there's no start to count from yet.
                     let took = Format.duration(start: run.run.startedAt, now: now)
-                    Text("\(run.latestWorkerID ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
+                    Text("\(run.latestWorkerID.map(fleet.workerName) ?? "Starting") · \(took.isEmpty ? "starting" : took)").monospacedDigit()
                 }
             } else if let start = run.run.startAt, run.run.isScheduled(now: fleet.now) {
                 withRepo("Scheduled · \(Format.startTime(start, now: fleet.now))")
@@ -609,7 +650,7 @@ struct RunRow: View {
         } else if asleep, let until = run.run.snoozedUntil {
             withRepo("Back \(Format.wakeLabel(until, now: fleet.now))")
         } else {
-            withRepo(nil, then: fleet.workers.count > 1 ? run.latestWorkerID : nil)
+            withRepo(nil, then: fleet.workers.count > 1 ? run.latestWorkerID.map(fleet.workerName) : nil)
         }
     }
 
@@ -722,11 +763,12 @@ private struct SnoozePickSheet: View {
     }
 }
 
-// The org switcher and the Settings menu are in SidebarMenus.swift.
+// The account menu at the foot is in SidebarMenus.swift.
 
 // MARK: Inbox
 
-struct InboxBell: View {
+/// The first nav row: what's waiting on you, counted in amber (red means a task failed).
+struct InboxRow: View {
     @Environment(Stores.self) private var stores
     @State private var open = false
 
@@ -736,31 +778,32 @@ struct InboxBell: View {
         Button {
             open.toggle()
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: "bell")
-                    .font(.system(size: 12))
-                    .frame(width: 28, height: 28)
+            HStack(spacing: 10) {
+                Image(systemName: "tray").font(.system(size: 12)).frame(width: 16)
+                Text("Inbox").font(SF.font(13, open ? .medium : .regular))
+                Spacer()
                 if count > 0 {
                     Text(count > 99 ? "99+" : "\(count)")
-                        .font(.system(size: 9.5, weight: .semibold))
+                        .font(SF.font(10.5, .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 3)
-                        .frame(minWidth: 14, minHeight: 14)
-                        .background(stores.inbox.items.isEmpty ? SF.queue : SF.err, in: Capsule())
-                        .offset(x: 2, y: -1)
+                        .foregroundStyle(SF.queueInk)
+                        .padding(.horizontal, 5)
+                        .frame(minWidth: 16, minHeight: 16)
+                        .background(SF.queueSoft, in: Capsule())
                         .transition(.scale.combined(with: .opacity))
                 }
             }
-            .foregroundStyle(open ? SF.ink : SF.muted)
+            .foregroundStyle(open || count > 0 ? SF.ink : SF.muted)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
             .hoverBackground(active: open)
             .animation(.easeOut(duration: 0.15), value: count)
         }
         .buttonStyle(.plain)
         .help("Waiting on you")
         .keyboardShortcut("i", modifiers: [.command, .shift])
-        .accessibilityLabel(count > 0 ? "Waiting on you: \(count)" : "Waiting on you: nothing")
-        .popover(isPresented: $open, arrowEdge: .bottom) {
+        .accessibilityLabel(count > 0 ? "Inbox: \(count) waiting on you" : "Inbox: nothing waiting on you")
+        .popover(isPresented: $open, arrowEdge: .trailing) {
             InboxList { open = false }
         }
     }

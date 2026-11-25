@@ -137,6 +137,13 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(s.groups.flatMap(\.runs).contains { $0.id == "demo-old" }, "archived stays out")
         XCTAssertEqual(SidebarSections.matches(query: "STRIPE", runs: fleet.runs, archived: nil).map(\.id), ["demo-stripe"])
         XCTAssertEqual(SidebarSections.matches(query: " ", runs: fleet.runs, archived: nil).count, 0)
+        // A machine is found by the name people see, not only by its id.
+        let onMini = SidebarSections.matches(query: "mac mini", runs: fleet.runs, archived: nil, workerName: fleet.workerName)
+        XCTAssertFalse(onMini.isEmpty)
+        XCTAssertTrue(onMini.allSatisfy { $0.latestWorkerID == "mac-mini" })
+        XCTAssertEqual(fleet.workerName("mac-mini"), "Mac mini")
+        XCTAssertEqual(fleet.workerName("gone"), "gone")
+        XCTAssertEqual(fleet.workerName(nil), "")
     }
 
     func testAFinishedThreadReplays() async {

@@ -968,7 +968,10 @@ async fn list_workers(State(state): State<AppState>, Extension(caller): Extensio
             }
             c
         });
-        v["outdated"] = json!(!w.capabilities.version.is_empty() && w.capabilities.version != state.config.build);
+        let updated_from = db::updated_from(&state.pool, org, &w.id).await?;
+        v["outdated"] = json!(db::is_outdated(&w.capabilities.version, &state.config.build, updated_from.as_deref()));
+        // Its last update came back on the same build: nothing newer for how it installs.
+        v["nothing_newer"] = json!(!w.capabilities.version.is_empty() && updated_from.as_deref() == Some(w.capabilities.version.as_str()));
         out.push(v);
     }
     Ok(Json(json!(out)))
@@ -1237,8 +1240,12 @@ async fn update_ack(
     if !db::worker_owns_token(&state.pool, w.org, &req.id, &w.token_hash).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
     }
-    // It may have been asked from any of the orgs it serves.
-    sqlx::query("UPDATE workers SET update_requested = false WHERE id = $1 AND token_hash = $2 AND org_id = ANY($3)")
+    // It may have been asked from any of the orgs it serves. Remember the build it updates
+    // from: back on the same one, the update had nothing newer for it.
+    sqlx::query(
+        "UPDATE workers SET update_requested = false, updated_from = NULLIF(capabilities->>'version', '')
+          WHERE id = $1 AND token_hash = $2 AND org_id = ANY($3)",
+    )
         .bind(&req.id)
         .bind(&w.token_hash)
         .bind(&w.orgs)

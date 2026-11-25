@@ -56,7 +56,7 @@ impl TestEnv {
         let mut config = Config {
             dev_key: DEV_KEY.into(),
             worker_tokens: vec![WORKER_TOKEN.into()],
-            build: "test".into(),
+            build: "0.1.0 (2026-11-25 6c37830ab)".into(),
             host_worker: None,
             github: None,
             public_url: None,

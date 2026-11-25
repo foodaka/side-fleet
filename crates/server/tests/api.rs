@@ -856,14 +856,17 @@ async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
             r.json::<Value>().await.unwrap()
         }
     };
-    let h = hb("0.1.0 (old)").await;
+    const SERVER: &str = "0.1.0 (2026-11-25 6c37830ab)";
+    const OLD: &str = "0.1.0 (2026-11-11 ebff2862b)";
+    let h = hb(OLD).await;
     assert_eq!(h["update_requested"], false);
-    assert_eq!(h["server_version"], "test");
+    assert_eq!(h["server_version"], SERVER);
 
     // The page sees the build and that it differs from the control plane's.
     let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
-    assert_eq!(ws[0]["capabilities"]["version"], "0.1.0 (old)");
+    assert_eq!(ws[0]["capabilities"]["version"], OLD);
     assert_eq!(ws[0]["outdated"], true);
+    assert_eq!(ws[0]["nothing_newer"], false);
     assert_eq!(ws[0]["update_requested"], false);
 
     // Request an update: visible on the next heartbeat and in the workers list.
@@ -873,26 +876,34 @@ async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
     let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
     assert_eq!(ws[0]["update_requested"], true);
-    assert_eq!(hb("0.1.0 (old)").await["update_requested"], true);
+    assert_eq!(hb(OLD).await["update_requested"], true);
 
-    // The worker acknowledges before updating; the flag clears. A re-register clears it too.
+    // The worker acknowledges before updating; the flag clears. It came back on the same
+    // build (it installs releases, and main is ahead): the page stops offering an update.
     let r = api.worker(reqwest::Method::POST, "/v1/worker/update-ack").json(&json!({"id": "w"})).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
-    assert_eq!(hb("test").await["update_requested"], false);
+    assert_eq!(hb(OLD).await["update_requested"], false);
     let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
-    assert_eq!(ws[0]["outdated"], false, "same build as the control plane");
+    assert_eq!(ws[0]["outdated"], false, "the update found nothing newer");
+    assert_eq!(ws[0]["nothing_newer"], true);
+
+    // The same commit built on another day is the same build.
+    assert_eq!(hb("0.1.0 (2026-11-26 6c37830ab)").await["update_requested"], false);
+    let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
+    assert_eq!(ws[0]["outdated"], false, "same commit as the control plane");
+    assert_eq!(ws[0]["nothing_newer"], false);
 
     api.dev(reqwest::Method::POST, "/v1/workers/w/update").send().await.unwrap();
     api.register("w", &["r"]).await;
-    assert_eq!(hb("test").await["update_requested"], false);
+    assert_eq!(hb(SERVER).await["update_requested"], false);
 
     // A preview is asked for the same way and the worker's answer ends it; the list stays with the owner's view.
-    assert_eq!(hb("test").await["worktree_cleanup"], Value::Null);
+    assert_eq!(hb(SERVER).await["worktree_cleanup"], Value::Null);
     let post = |body: Value| api.dev(reqwest::Method::POST, "/v1/workers/w/clean-worktrees").json(&body).send();
     assert_eq!(post(json!({"mode": "preview"})).await.unwrap().status(), StatusCode::ACCEPTED);
     let r = api.dev(reqwest::Method::POST, "/v1/workers/ghost/clean-worktrees").json(&json!({"mode": "preview"})).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
-    assert_eq!(hb("test").await["worktree_cleanup"], json!({"mode": "preview"}));
+    assert_eq!(hb(SERVER).await["worktree_cleanup"], json!({"mode": "preview"}));
     let status = || async {
         api.dev(reqwest::Method::GET, "/v1/workers/w/clean-worktrees").send().await.unwrap().json::<Value>().await.unwrap()
     };
@@ -902,20 +913,20 @@ async fn update_can_be_requested_from_the_page_and_is_delivered_on_heartbeat() {
     let item = json!({"root_id": id, "repo": "r", "branch": "sidefleet/11111111", "state": "merged", "bytes": 2048});
     let done = |result: Value| api.worker(reqwest::Method::POST, "/v1/worker/worktree-cleanup").json(&json!({"id": "w", "result": result})).send();
     assert_eq!(done(json!({"preview": {"items": [item]}})).await.unwrap().status(), StatusCode::NO_CONTENT);
-    assert_eq!(hb("test").await["worktree_cleanup"], Value::Null);
+    assert_eq!(hb(SERVER).await["worktree_cleanup"], Value::Null);
     assert_eq!(status().await["preview"]["items"][0]["state"], "merged");
 
     // Removing names the worktrees; nothing else can be asked until the machine reports back.
     assert_eq!(post(json!({"mode": "remove", "ids": []})).await.unwrap().status(), StatusCode::BAD_REQUEST);
     assert_eq!(post(json!({"mode": "remove", "ids": [id]})).await.unwrap().status(), StatusCode::ACCEPTED);
-    assert_eq!(hb("test").await["worktree_cleanup"]["ids"], json!([id]));
+    assert_eq!(hb(SERVER).await["worktree_cleanup"]["ids"], json!([id]));
     assert_eq!(post(json!({"mode": "preview"})).await.unwrap().status(), StatusCode::CONFLICT);
     let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
     assert_eq!(ws[0]["worktree_cleanup_pending"], "remove");
     assert_eq!(ws[0]["worktree_cleanup"], Value::Null);
     let report = json!({"removed": 1, "freed_bytes": 2048, "kept_in_use": 0, "kept_changes": 0, "kept_unmerged": 0, "failed": 0, "items": [item]});
     assert_eq!(done(json!({"removed": report})).await.unwrap().status(), StatusCode::NO_CONTENT);
-    assert_eq!(hb("test").await["worktree_cleanup"], Value::Null);
+    assert_eq!(hb(SERVER).await["worktree_cleanup"], Value::Null);
     let ws: Vec<Value> = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json().await.unwrap();
     assert_eq!(ws[0]["worktree_cleanup_pending"], Value::Null);
     assert_eq!(ws[0]["worktree_cleanup"]["removed"], 1);

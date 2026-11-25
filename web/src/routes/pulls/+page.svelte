@@ -103,12 +103,12 @@
 	);
 	const filters = $derived(Number(failing) + Number(changesRequested) + Number(hideDrafts) + Number(!!repo));
 
-	/** One line on each machine that isn't simply up to date. */
+	/** One line on each machine that isn't simply up to date, keyed by machine: two machines can share a name. */
 	const notes = $derived(
 		(data?.machines ?? []).flatMap((m) => {
-			if (!m.can_list) return [`${m.name} needs an update to list pull requests.`];
-			if (m.error) return [`${m.name} couldn't look: ${m.error}`];
-			if (!m.online && !m.fetched_at) return [`${m.name} is offline.`];
+			if (!m.can_list) return [{ id: m.id, text: `${m.name} needs an update to list pull requests.` }];
+			if (m.error) return [{ id: m.id, text: `${m.name} couldn't look: ${m.error}` }];
+			if (!m.online && !m.fetched_at) return [{ id: m.id, text: `${m.name} is offline.` }];
 			return [];
 		})
 	);
@@ -201,7 +201,7 @@
 	{#if notes.length || looking || lastLooked}
 		<div class="-mt-2 flex flex-col gap-0.5 text-xs text-muted-foreground" aria-live="polite">
 			{#if looking}<p>Your machines are looking on GitHub…</p>{:else if lastLooked}<p>Looked {rel(lastLooked, fleet.now)}.</p>{/if}
-			{#each notes as n (n)}<p class="text-queue-ink">{n}</p>{/each}
+			{#each notes as n (n.id)}<p class="text-queue-ink">{n.text}</p>{/each}
 		</div>
 	{/if}
 

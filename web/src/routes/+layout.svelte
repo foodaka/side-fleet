@@ -31,6 +31,8 @@
 	import UsersRound from '@lucide/svelte/icons/users-round';
 	import Boxes from '@lucide/svelte/icons/boxes';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+	import ClipboardCheck from '@lucide/svelte/icons/clipboard-check';
+	import { review } from '#lib/sf/review/desk.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -78,6 +80,9 @@
 		if (r) untrack(() => seen.mark(r));
 	});
 
+	// The review desk's own record (what you merged, sent back or left for later) is per person and org.
+	$effect(() => { if (fleet.reviewDesk) review.sync(); });
+
 	// The "waiting on you" inbox follows whoever is signed in, in the org the page acts in.
 	const inboxKey = $derived(fleet.loaded && !fleet.needsSignIn ? fleet.orgId || '-' : null);
 	$effect(() => {
@@ -99,6 +104,7 @@
 		try { localStorage.setItem(SIDEBAR, collapsed ? 'collapsed' : 'open'); } catch { /* storage blocked */ }
 	}
 	const rail = $derived([
+		...(fleet.reviewDesk ? [{ href: '#/review', label: 'Review', icon: ClipboardCheck, on: (p: string) => p.startsWith('/review') }] : []),
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
 		{ href: '#/pulls', label: 'Pull requests', icon: GitPullRequest, on: (p: string) => p.startsWith('/pulls') },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },

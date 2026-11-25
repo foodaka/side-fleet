@@ -67,6 +67,8 @@ class Fleet {
 	/** The org the page acts in. */
 	org = $derived(this.me?.orgs.find((o) => o.id === this.orgId) ?? this.me?.orgs[0] ?? null);
 	isOwner = $derived(this.org?.role === 'owner');
+	/** The review desk (`#/review`), while it's tried out: on only for the people the control plane names. */
+	reviewDesk = $derived(!!this.me?.features?.includes('review-desk'));
 	/** A machine is updated by its owner; org owners only step in for one nobody owns. */
 	canUpdate(w: Worker) {
 		return w.mine !== false || (!w.owner && this.isOwner);

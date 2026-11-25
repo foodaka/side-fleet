@@ -141,6 +141,7 @@ Environment:
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | optional; a Telegram message (GitHub login, email, user count) for every new sign-up. Set both or neither |
 | `SIDEFLEET_VAPID_PRIVATE_KEY` | web push ("Notify me"): a P-256 private key, base64url. `sidefleet serve` creates one when unset, but in a container it is lost on redeploy and browsers have to turn push on again; copy the `SIDEFLEET_VAPID_PRIVATE_KEY=` line a local `sidefleet serve` writes to `~/.sidefleet/server.env` into the platform's secrets instead. `SIDEFLEET_VAPID_SUBJECT` (`mailto:` or `https:`) defaults to `SIDEFLEET_PUBLIC_URL` |
 | `SIDEFLEET_PRIVATE_WEBHOOKS` | leave unset when hosted: updates in chat (Hermes, OpenClaw, webhooks) then only go to public addresses, so nobody can point one at the control plane's own network. `1` allows private and local ones (the default when self-hosting) |
+| `SIDEFLEET_FEATURES` | optional; turns on features still being tried out, for the GitHub logins named: `review-desk=alice,bob` (`;` between features, `*` for everyone). Unset: all off |
 | `RUST_LOG` | log filter; logs never contain tokens, cookies or task text beyond ids |
 | `SIDEFLEET_LOG_FORMAT` | `json` for one JSON object per line (set in the Dockerfile, render.yaml and fly.toml); plain text otherwise |
 

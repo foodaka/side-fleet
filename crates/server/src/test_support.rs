@@ -63,6 +63,7 @@ impl TestEnv {
             telegram: None,
             vapid: None,
             private_webhooks: true,
+            features: Default::default(),
         };
         tweak(&mut config);
         let state = AppState::new(pool.clone(), config);

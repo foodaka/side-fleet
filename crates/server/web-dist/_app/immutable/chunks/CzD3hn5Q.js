@@ -1,0 +1,1 @@
+import{n as e,r as t}from"./BiG1lsA6.js";import{n}from"./rk0bIDhr.js";var r=new Set([`$$slots`,`$$events`,`$$legacy`]);function i(i,a){let o=e(a,r),s={name:`link`,size:24,node:[[`path`,{d:`M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71`}],[`path`,{d:`M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71`}]]};n(i,t(()=>o,{get icon(){return s}}))}export{i as t};

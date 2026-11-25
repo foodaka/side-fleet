@@ -654,6 +654,25 @@ async fn a_new_sign_up_sends_one_telegram_message() {
     env.teardown().await;
 }
 
+#[tokio::test]
+async fn features_are_on_only_for_the_people_named() {
+    let gh = sidefleet_server::test_support::FakeGithub::start().await;
+    let env = TestEnv::start_with(|c| {
+        c.github = Some(gh);
+        c.features = sidefleet_server::features::Features::parse("review-desk=alice");
+    })
+    .await;
+
+    let alice = Browser::login(&env, "alice").await;
+    let bob = Browser::login(&env, "bob").await;
+    assert_eq!(alice.me().await["features"], json!(["review-desk"]));
+    assert_eq!(bob.me().await["features"], json!([]));
+    let v: Value = Client::new().get(format!("{}/v1/me", env.base_url)).bearer_auth(DEV_KEY).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["features"], json!([]), "the developer key gets only features on for everyone");
+
+    env.teardown().await;
+}
+
 /// A script or chat agent using a personal API token.
 async fn with_token(env: &TestEnv, token: &str, m: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut r = Client::new().request(m, format!("{}{}", env.base_url, path)).bearer_auth(token);

@@ -369,6 +369,8 @@ export interface Me {
 	/** Null when signed in with the developer key. */
 	user: { id: string; login: string; email: string | null } | null;
 	orgs: Org[];
+	/** Features being tried out, on for this person only (`SIDEFLEET_FEATURES`); older control planes send none. */
+	features?: string[];
 }
 
 export interface WorkerToken {

@@ -3,6 +3,7 @@
 	import { Kbd } from '#lib/components/ui/kbd';
 	import Boxes from '@lucide/svelte/icons/boxes';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+	import ClipboardCheck from '@lucide/svelte/icons/clipboard-check';
 	import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
@@ -11,6 +12,7 @@
 	import AccountMenu from './AccountMenu.svelte';
 	import InboxBell from './InboxBell.svelte';
 	import { fleet } from '../state.svelte';
+	import { review } from '../review/desk.svelte';
 
 	let { path, onClose, drawer = false, closeKeys = '' }: {
 		path: string;
@@ -34,12 +36,13 @@
 			+ (fleet.updatable.length ? `, ${fleet.updatable.length} can update` : '')
 	);
 	// Places you go often sit above the tasks; setup (team, chat apps, settings) lives in the account menu below.
-	const nav = [
+	const nav = $derived([
+		...(fleet.reviewDesk ? [{ href: '#/review', label: 'Review', icon: ClipboardCheck, on: (p: string) => p.startsWith('/review') }] : []),
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
 		{ href: '#/pulls', label: 'Pull requests', icon: GitPullRequest, on: (p: string) => p.startsWith('/pulls') },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
 		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
-	];
+	]);
 
 	function onkeydown(e: KeyboardEvent) {
 		// `/` jumps to search, unless you're typing somewhere or this copy of the sidebar is hidden.
@@ -110,6 +113,9 @@
 			<a href={n.href} aria-current={n.on(path) ? 'page' : undefined} class={item(n.on(path))}>
 				<n.icon size={14} />
 				<span class="flex-1">{n.label}</span>
+				{#if n.href === '#/review' && review.count}
+					<span class="tnum rounded-full bg-queue-soft px-1.5 text-[11px] font-medium text-queue-ink" aria-label="{review.count} to review">{review.count}</span>
+				{/if}
 				{#if n.href === '#/machines'}
 					<span class="tnum flex items-center gap-1.5 text-[11.5px] font-normal text-muted-foreground" title={connLabel}>
 						{#if fleet.conn === 'unreachable'}

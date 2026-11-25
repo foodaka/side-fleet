@@ -1820,7 +1820,9 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Respons
         // A token sees only its own org, and says what it may do.
         Identity::ApiToken(t) => (t.user, vec![t.org], Some(json!({ "id": t.id, "name": t.name, "scope": t.scope }))),
     };
-    let mut v = json!({ "user": user, "orgs": orgs });
+    // Features being tried out by some people only: the web app shows them to these.
+    let features = state.config.features.for_login(user.as_ref().map(|u| u.login.as_str()));
+    let mut v = json!({ "user": user, "orgs": orgs, "features": features });
     if let Some(t) = token {
         v["token"] = t;
     }

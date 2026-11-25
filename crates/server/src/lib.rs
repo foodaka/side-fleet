@@ -8,6 +8,7 @@ pub mod chat_updates;
 pub mod claims;
 pub mod db;
 pub mod events;
+pub mod features;
 pub mod fork;
 pub mod inbox;
 pub mod machines;
@@ -63,6 +64,8 @@ pub struct Config {
     /// control plane on the same network as Hermes). Off when hosted, unless
     /// `SIDEFLEET_PRIVATE_WEBHOOKS=1`.
     pub private_webhooks: bool,
+    /// Features on for some people only (`SIDEFLEET_FEATURES`, see `features`).
+    pub features: features::Features,
 }
 
 /// A GitHub OAuth app. The URLs are configurable so tests can stand in for GitHub.
@@ -150,7 +153,8 @@ impl Config {
             Some(v) => matches!(v, "1" | "true" | "yes"),
             None => github.is_none(),
         };
-        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, telegram, vapid, private_webhooks })
+        let features = features::Features::parse(&env_nonempty("SIDEFLEET_FEATURES").unwrap_or_default());
+        Ok(Self { dev_key, worker_tokens, build, host_worker, github, public_url, telegram, vapid, private_webhooks, features })
     }
 
     /// Hosted (multi-tenant) mode: people sign in and have their own orgs.

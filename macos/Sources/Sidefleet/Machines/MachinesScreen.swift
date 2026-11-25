@@ -84,6 +84,7 @@ struct MachinesScreen: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            Button("New project") { stores.newProjectOpen = true }.buttonStyle(SecondaryButtonStyle())
             Button("Choose repos") { stores.repoPickerOpen = true }.buttonStyle(SecondaryButtonStyle())
             Button {
                 stores.addMachineOpen = true
@@ -898,8 +899,13 @@ struct RepoPickerSheet: View {
                             .accessibilityAddTraits(selected.contains(repo) ? .isSelected : [])
                         }
                         if shown.isEmpty {
-                            Text(order.isEmpty ? "No machine has reported any git checkouts yet." : "No repo matches “\(query)”.")
-                                .font(SF.font(13)).foregroundStyle(SF.muted).frame(maxWidth: .infinity).padding(24)
+                            VStack(spacing: 12) {
+                                Text(order.isEmpty ? "No machine has reported any git checkouts yet." : "No repo matches “\(query)”.")
+                                    .font(SF.font(13)).foregroundStyle(SF.muted)
+                                Button { newProject() } label: { Label("New project", systemImage: "folder.badge.plus") }
+                                    .buttonStyle(SecondaryButtonStyle())
+                            }
+                            .frame(maxWidth: .infinity).padding(24)
                         }
                     }
                     .padding(6)
@@ -911,6 +917,9 @@ struct RepoPickerSheet: View {
             .frame(height: 320)
             .card(cornerRadius: 10)
             HStack(spacing: 6) {
+                Button { newProject() } label: { Label("New project", systemImage: "folder.badge.plus") }
+                    .buttonStyle(QuietButtonStyle())
+                    .foregroundStyle(SF.ink)
                 Kbd(text: "↑"); Kbd(text: "↓"); Text("move")
                 Kbd(text: "↵"); Text("select")
                 Kbd(text: "⌘↵"); Text("save")
@@ -932,6 +941,11 @@ struct RepoPickerSheet: View {
             act = 0
             searching = true
         }
+    }
+
+    private func newProject() {
+        dismiss()
+        stores.newProjectOpen = true
     }
 
     private func save() {

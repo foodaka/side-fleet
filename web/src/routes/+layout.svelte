@@ -19,6 +19,7 @@
 	import MyMachinesDialog from '#lib/sf/ui/MyMachinesDialog.svelte';
 	import RenameOrgDialog from '#lib/sf/ui/RenameOrgDialog.svelte';
 	import RepoPicker from '#lib/sf/ui/RepoPicker.svelte';
+	import NewProject from '#lib/sf/ui/NewProject.svelte';
 	import FeedbackDialog from '#lib/sf/ui/FeedbackDialog.svelte';
 	import InboxBell from '#lib/sf/ui/InboxBell.svelte';
 	import { inbox } from '#lib/sf/inbox.svelte';
@@ -217,6 +218,7 @@
 
 {#if fleet.needsSignIn && !joining}<SignIn />{/if}
 <RepoPicker />
+<NewProject />
 <NewOrgDialog />
 <MyMachinesDialog />
 <RenameOrgDialog />

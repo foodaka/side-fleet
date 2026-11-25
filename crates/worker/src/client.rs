@@ -7,13 +7,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sidefleet_core::{
-    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest, WorktreeCleanupResult,
+    Approval, ApprovalRequest, Capabilities, ClaimRequest, FinishRunRequest, HeartbeatRequest, HeartbeatResponse, LiveTextRequest, WorktreeCleanupResult, NewRepoDone, NewRepoJob, RepoInfo,
     NewEvent, PostEventsRequest, PrReport, PrReports, RegisterWorkerRequest, Run, RunControl, RunStatus, Slots, UsageLimit, Worker,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde_json::Value;
 use uuid::Uuid;
+
+/// What a claim brought back.
+#[derive(Debug)]
+pub enum Claimed {
+    Nothing,
+    Run(Box<Run>),
+    /// New projects to make (the page asked for them), in place of a run.
+    NewRepos(Vec<NewRepoJob>),
+}
 
 #[derive(Clone)]
 pub struct ControlClient {
@@ -240,7 +249,7 @@ impl ControlClient {
         agents: &[String],
         slots: &Slots,
         wait: Duration,
-    ) -> Result<Option<Run>, ClientError> {
+    ) -> Result<Claimed, ClientError> {
         let r = self
             .http
             .post(self.url("/v1/worker/claim"))
@@ -253,7 +262,7 @@ impl ControlClient {
                 busy_repos: busy_repos.to_vec(),
                 agents: agents.to_vec(),
                 slots: Some(slots.clone()),
-                kinds: vec!["agent".into(), "restore".into(), "fork".into(), "pr".into(), "integrate".into(), "handoff".into(), "merge".into()],
+                kinds: vec!["agent".into(), "restore".into(), "fork".into(), "pr".into(), "integrate".into(), "handoff".into(), "merge".into(), "new_repo".into()],
                 wait_secs: (!wait.is_zero()).then_some(wait.as_secs()),
             })
             .send()
@@ -261,9 +270,30 @@ impl ControlClient {
             .context("claim request failed")?;
         let r = Self::check(r).await?;
         if r.status() == StatusCode::NO_CONTENT {
-            return Ok(None);
+            return Ok(Claimed::Nothing);
         }
-        Ok(Some(r.json().await.context("claim response")?))
+        if r.status() == StatusCode::ACCEPTED {
+            #[derive(serde::Deserialize)]
+            struct Jobs {
+                new_repos: Vec<NewRepoJob>,
+            }
+            return Ok(Claimed::NewRepos(r.json::<Jobs>().await.context("claim response")?.new_repos));
+        }
+        Ok(Claimed::Run(Box::new(r.json().await.context("claim response")?)))
+    }
+
+    /// Say how making a new project went.
+    pub async fn new_repo_done(&self, id: Uuid, repo: Option<RepoInfo>, error: Option<String>, warning: Option<String>) -> Result<()> {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/worker/new-repos/{id}")))
+            .bearer_auth(&self.token)
+            .json(&NewRepoDone { worker_id: self.worker_id.clone(), repo, error, warning })
+            .send()
+            .await
+            .context("new-repo report failed")?;
+        Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(())
     }
 
     /// A refused post fails with [`Rejected`] (see `downcast_ref`).

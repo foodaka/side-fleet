@@ -42,6 +42,7 @@ enum DemoData {
                     // The MacBook runs an older build, which can't clean up its worktrees.
                     "can_clean_worktrees": .bool(id != "macbook-pro"),
                     "can_manage_prs": .bool(id != "macbook-pro"),
+                    "new_repos_root": id == "macbook-pro" ? .null : .string("/home/dev/code"),
                 ],
             ]
         }

@@ -170,6 +170,7 @@ private struct MainView: View {
             withAnimation { columns = columns == .detailOnly ? .all : .detailOnly }
         }
         .sheet(isPresented: $stores.repoPickerOpen) { RepoPickerSheet() }
+        .sheet(isPresented: $stores.newProjectOpen) { NewProjectSheet() }
         .sheet(isPresented: $stores.addMachineOpen) { AddMachineSheet() }
         .sheet(isPresented: $stores.machinesOpen) { MyMachinesSheet() }
         .sheet(isPresented: $stores.renameOrgOpen) { RenameOrgSheet() }

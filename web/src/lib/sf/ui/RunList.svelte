@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Plus from '@lucide/svelte/icons/plus';
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { fleet } from '../state.svelte';
@@ -390,6 +391,9 @@
 		{#if byProject}
 			{#if pinned.length && shownGroups.length}{@render heading('Projects')}{:else}<div class="h-1.5"></div>{/if}
 			{#each shownGroups as g (g.repo)}{@render project(g)}{/each}
+			<button type="button" class="mt-1 flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] text-faint hover:text-muted-foreground" onclick={() => (fleet.newProjectOpen = true)}>
+				<Plus class="size-3" />New project
+			</button>
 			{#if hiddenCount}
 				<button type="button" class="mt-2 px-2.5 py-1 text-[11.5px] text-faint hover:text-muted-foreground" onclick={() => projects.unhideAll()}>
 					Show {hiddenCount} hidden project{hiddenCount === 1 ? '' : 's'}

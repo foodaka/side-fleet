@@ -2578,3 +2578,75 @@ async fn a_task_scheduled_for_later_waits_for_its_time_or_start_now() {
 
     env.teardown().await;
 }
+
+#[tokio::test]
+async fn a_machine_makes_a_new_project_and_lists_it_at_once() {
+    let env = TestEnv::start().await;
+    let api = &Api::new(&env.base_url);
+    let register = |root: Option<&str>| {
+        let caps = json!({"repos": [{"name": "old", "path": "/code/old", "id": "github.com/o/old"}], "new_repos_root": root});
+        api.worker(reqwest::Method::POST, "/v1/worker/register").json(&json!({"id": "w", "display_name": "w", "capabilities": caps, "active_runs": []})).send()
+    };
+    let ask = |body: Value| api.dev(reqwest::Method::POST, "/v1/workers/w/new-repos").json(&body).send();
+    let claim = || async {
+        api.worker(reqwest::Method::POST, "/v1/worker/claim")
+            .json(&json!({"worker_id": "w", "repos": [], "agents": ["claude"], "kinds": ["agent", "new_repo"]}))
+            .send().await.unwrap()
+    };
+
+    // A machine too old to make projects is told so.
+    register(None).await.unwrap();
+    assert_eq!(ask(json!({"name": "my-app"})).await.unwrap().status(), StatusCode::CONFLICT);
+    register(Some("/code")).await.unwrap();
+
+    // Names and URLs are checked before any machine sees them.
+    assert_eq!(ask(json!({"name": "../etc"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(ask(json!({"url": "file:///etc"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(ask(json!({"url": "--upload-pack=x"})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    let r = ask(json!({"name": "my-app"})).await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(ask(json!({"name": "My-App"})).await.unwrap().status(), StatusCode::CONFLICT, "the same name twice at once");
+    let status = || async { api.dev(reqwest::Method::GET, &format!("/v1/new-repos/{id}")).send().await.unwrap().json::<Value>().await.unwrap() };
+    assert_eq!(status().await["status"], "pending");
+
+    // A machine with no repos yet still takes it with its claim, once.
+    let c = claim().await;
+    assert_eq!(c.status(), StatusCode::ACCEPTED);
+    let jobs = c.json::<Value>().await.unwrap();
+    assert_eq!(jobs["new_repos"][0]["name"], "my-app");
+    assert_eq!(jobs["new_repos"][0]["kind"], "init");
+    assert_eq!(claim().await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(status().await["status"], "running");
+
+    // A clone named after its URL goes out with the next heartbeat when no claim takes it.
+    let r = ask(json!({"url": "git@github.com:o/tools.git"})).await.unwrap();
+    let clone_id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    let hb = api.worker(reqwest::Method::POST, "/v1/worker/heartbeat")
+        .json(&json!({"id": "w", "capabilities": {"repos": [{"name": "old", "path": "/code/old", "id": "github.com/o/old"}], "new_repos_root": "/code"}}))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(hb["new_repos"][0]["name"], "tools");
+    assert_eq!(hb["new_repos"][0]["url"], "git@github.com:o/tools.git");
+
+    // The org has chosen repos, so a new one joins them.
+    api.dev(reqwest::Method::PUT, "/v1/repos").json(&json!({"added": ["github.com/o/old"]})).send().await.unwrap();
+    let done = api.worker(reqwest::Method::POST, &format!("/v1/worker/new-repos/{id}"))
+        .json(&json!({"worker_id": "w", "repo": {"name": "my-app", "path": "/code/my-app", "id": "my-app"}, "warning": "no first commit"}))
+        .send().await.unwrap();
+    assert_eq!(done.status(), StatusCode::NO_CONTENT);
+    let s = status().await;
+    assert_eq!((s["status"].clone(), s["repo"].clone(), s["path"].clone(), s["warning"].clone()), (json!("done"), json!("my-app"), json!("/code/my-app"), json!("no first commit")));
+    let workers = api.dev(reqwest::Method::GET, "/v1/workers").send().await.unwrap().json::<Value>().await.unwrap();
+    let repos: Vec<&str> = workers[0]["capabilities"]["repos"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(repos, ["old", "my-app"]);
+    let added = api.dev(reqwest::Method::GET, "/v1/repos").send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(added["added"], json!(["github.com/o/old", "my-app"]));
+
+    // A failed clone says why.
+    api.worker(reqwest::Method::POST, &format!("/v1/worker/new-repos/{clone_id}"))
+        .json(&json!({"worker_id": "w", "error": "Permission denied (publickey)."}))
+        .send().await.unwrap();
+    let s = api.dev(reqwest::Method::GET, &format!("/v1/new-repos/{clone_id}")).send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!((s["status"].clone(), s["error"].clone()), (json!("failed"), json!("Permission denied (publickey).")));
+}

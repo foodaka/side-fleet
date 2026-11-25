@@ -14,6 +14,7 @@ pub mod machines;
 pub mod prefs;
 pub mod projects;
 pub mod mcp;
+pub mod new_repos;
 pub mod notify;
 pub mod oauth;
 pub mod push;

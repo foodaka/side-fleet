@@ -60,6 +60,15 @@ enum Tour {
                     try? await Task.sleep(for: .seconds(2.5))
                     capture(folder.appendingPathComponent("new-task-slash-\(suffix).png"))
                     stores.newTask.task = ""
+                    // New project, from the repo menu, with a name typed.
+                    stores.newProjectOpen = true
+                    try? await Task.sleep(for: .seconds(1.5))
+                    stores.newProject.machineID = "mac-mini"
+                    stores.newProject.name = "Recipe Box"
+                    try? await Task.sleep(for: .seconds(1))
+                    captureSheet(folder.appendingPathComponent("new-project-\(suffix).png"))
+                    stores.newProjectOpen = false
+                    try? await Task.sleep(for: .seconds(1))
                 }
                 if name == "sidebar-projects" {
                     stores.fleet.projects.picking = "github.com/acme/storefront"

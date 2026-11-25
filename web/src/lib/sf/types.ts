@@ -163,6 +163,8 @@ export interface Capabilities {
 	can_hand_off_files?: boolean;
 	/** This worker's build leaves files out of a pull request, has the agent write it, opens drafts and merges. */
 	can_manage_prs?: boolean;
+	/** Where this worker makes new projects (its repos folder); set by builds that can. */
+	new_repos_root?: string;
 	agents: {
 		claude?: { version: string; signed_in: boolean; sign_in_error?: string; models?: Record<string, string> };
 		codex?: { version: string; signed_in?: boolean; models?: string[] };

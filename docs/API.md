@@ -179,6 +179,8 @@ go into a path.
 | `PUT` | `/v1/project-icons` `{repo, icon: {kind, value} \| null}` | set a repo's icon for everyone in the org, or `null` to go back to the default; `200` with every icon, as `GET` answers. `400` for a malformed icon |
 | `GET` | `/v1/workers` | machines with capabilities, `online` (heartbeat < 45 s) and `limited_until` (`{agent: time}` for agents whose usage limit the machine hit) |
 | `DELETE` | `/v1/workers/:id` | forget a machine (frees a plan slot); `409` while it runs a task |
+| `POST` | `/v1/workers/:id/new-repos` `{name, url?}` | `202 {id, name}`: ask one of your machines to start a project in its repos folder: an empty git repo with a README and a first commit, or a clone of `url` (`https://`, `ssh://`, `git://` or `git@host:path`; `name` defaults to the URL's last part). Only the machine's owner may; `409` when it's offline, already making that name, or too old (no `capabilities.new_repos_root`); `400` for a bad name or URL |
+| `GET` | `/v1/new-repos/:id` | `{id, worker_id, kind, name, status, repo, path, error, warning}`. `status` goes `pending` → `running` → `done` or `failed`. When done, `repo` is the new repo's key, already in the machine's repos and in the org's chosen repos (if it has chosen any); `warning` says what fell short, such as no first commit when git has no name or email there. A request the machine never takes fails after 10 minutes, one it never finishes after 15 |
 | `GET` | `/v1/setup` | control URL and, in the default org, the first static worker token, for the page's connect command |
 | `POST` | `/v1/orgs` `{name}` | create a team org (signed-in users) |
 | `GET` `POST` | `/v1/orgs/:org/tokens` `{name}` | per-org worker tokens; the value is only in the `201` response; owners only |
@@ -252,7 +254,7 @@ default org, or a per-org token, acting in its org:
 `POST /v1/worker/register`, `POST /v1/worker/heartbeat`, `POST /v1/worker/claim` (sends the
 agents installed on the machine, and `slots: {parallel, active}`; workers that send no agents
 only get `claude` runs, workers that send no slots are not load balanced, and workers that send
-no `kinds` (`agent`, `restore`, `fork`) only get plain agent runs),
+no `kinds` (`agent`, `restore`, `fork`) only get plain agent runs; a worker that sends `new_repo` in `kinds` may get `202 {new_repos: [{id, name, kind: init | clone, url?}]}` in place of a run, and the heartbeat hands the same out as `new_repos` to a worker that reports `capabilities.new_repos_root`; it answers each with `POST /v1/worker/new-repos/:id` `{worker_id, repo?, error?, warning?}`),
 `POST /v1/worker/runs/:id/events`, `GET /v1/worker/runs/:id/control`,
 `POST /v1/worker/runs/:id/approvals` and `GET /v1/worker/runs/:id/approvals/:approval` (a tool
 approval, above; asking is only allowed while the run is running on that worker, `409` otherwise), `GET /v1/worker/images/:id`

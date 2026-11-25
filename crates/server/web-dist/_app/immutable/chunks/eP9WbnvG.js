@@ -1,0 +1,1 @@
+import{n as e,r as t}from"./BiG1lsA6.js";import{n}from"./rk0bIDhr.js";var r=new Set([`$$slots`,`$$events`,`$$legacy`]);function i(i,a){let o=e(a,r),s={name:`git-branch`,size:24,node:[[`path`,{d:`M15 6a9 9 0 0 0-9 9V3`}],[`circle`,{cx:`18`,cy:`6`,r:`3`}],[`circle`,{cx:`6`,cy:`18`,r:`3`}]]};n(i,t(()=>o,{get icon(){return s}}))}export{i as t};

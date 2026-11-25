@@ -324,6 +324,7 @@ public struct Turn: Sendable, Hashable, Identifiable {
                 switch run.kind {
                 case .restore: activity = "Restoring the files"
                 case .pr: activity = "Pushing the branch and opening a pull request"
+                case .merge: activity = "Merging the pull request"
                 case .integrate: activity = "Adding the changes to the room"
                 case .agent: activity = "Starting \(Format.agentName(run.agent))"
                 }
@@ -439,9 +440,30 @@ public struct Turn: Sendable, Hashable, Identifiable {
         case "pull_request":
             let number = p["number"]?.int ?? 0
             let url = p["url"]?.string
-            items.append(.note(Note(key: key, tone: .ok, text: "\(p["opened"]?.bool == true ? "Opened" : "Pushed to") pull request #\(number)", href: url, at: ev.at)))
+            let strings = { (k: String) in p[k]?.array?.compactMap(\.string) ?? [] }
+            let keptOut = strings("kept_out"), already = strings("already_pushed")
+            var extra: [String] = []
+            if p["written"]?.bool == true { extra.append("the agent wrote its title and description") }
+            if !keptOut.isEmpty { extra.append("left out \(Self.listFiles(keptOut))") }
+            if !already.isEmpty {
+                let one = already.count == 1
+                extra.append("\(Self.listFiles(already)) \(one ? "was" : "were") already on the branch, so \(one ? "it's" : "they're") in it")
+            }
+            let what = p["opened"]?.bool == true ? "Opened \(p["draft"]?.bool == true ? "draft " : "")pull request #\(number)" : "Pushed to pull request #\(number)"
+            items.append(.note(Note(key: key, tone: .ok, text: extra.isEmpty ? what : "\(what): \(extra.joined(separator: "; "))", href: url, at: ev.at)))
             activity = nil
-            if let url { effects.append(.pullRequest(PullRequest(url: url, number: number, state: p["state"]?.string ?? "open"))) }
+            if let url { effects.append(.pullRequest(PullRequest(url: url, number: number, state: p["state"]?.string ?? "open", draft: p["draft"]?.bool ?? false))) }
+        case "merged":
+            let number = p["number"]?.int ?? 0
+            let url = p["url"]?.string
+            let how = switch p["method"]?.string { case "squash": "Squashed and merged"; case "rebase": "Rebased and merged"; default: "Merged" }
+            let left = p["left_behind"]?.int ?? 0
+            let leftText = left == 0 ? "" : left == 1 ? ". 1 changed file wasn't in it and stays on the branch" : ". \(left) changed files weren't in it and stay on the branch"
+            items.append(.note(Note(key: key, tone: .ok, text: "\(how) pull request #\(number)\(leftText)", href: url, at: ev.at)))
+            activity = nil
+            if let url { effects.append(.pullRequest(PullRequest(url: url, number: number, state: p["state"]?.string ?? "merged"))) }
+        case "activity":
+            if let text = p["text"]?.string { activity = text }
         case "diff":
             if let turnSet = p["turn"]?.decode(DiffSet.self) {
                 turnDiff = turnSet
@@ -500,5 +522,13 @@ public struct Turn: Sendable, Hashable, Identifiable {
         h.combine(run.id)
         h.combine(items.count)
         h.combine(liveText)
+    }
+}
+
+extension Turn {
+    /// A few file names, then how many more.
+    static func listFiles(_ paths: [String]) -> String {
+        let names = paths.prefix(3).joined(separator: ", ")
+        return paths.count > 3 ? "\(names) and \(paths.count - 3) more" : names
     }
 }

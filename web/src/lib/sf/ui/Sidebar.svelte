@@ -2,6 +2,7 @@
 	import * as Tooltip from '#lib/components/ui/tooltip';
 	import { Kbd } from '#lib/components/ui/kbd';
 	import Boxes from '@lucide/svelte/icons/boxes';
+	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
@@ -35,6 +36,7 @@
 	// Places you go often sit above the tasks; setup (team, chat apps, settings) lives in the account menu below.
 	const nav = [
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
+		{ href: '#/pulls', label: 'Pull requests', icon: GitPullRequest, on: (p: string) => p.startsWith('/pulls') },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
 		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
 	];

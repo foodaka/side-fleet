@@ -8,19 +8,20 @@
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import GitBranch from '@lucide/svelte/icons/git-branch';
 	import GitFork from '@lucide/svelte/icons/git-fork';
-	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import Square from '@lucide/svelte/icons/square';
 	import CircleStop from '@lucide/svelte/icons/circle-stop';
 	import Paperclip from '@lucide/svelte/icons/paperclip';
 	import { fleet } from '#lib/sf/state.svelte';
 	import { api } from '#lib/sf/api';
-	import type { AgentId, Run } from '#lib/sf/types';
+	import type { AgentId, MergeMethod, PrOptions, Run } from '#lib/sf/types';
 	import { agentName, defaultModel, duration, hasAgent, machineModels, modelValid, repoLabel, scheduled, startTime } from '#lib/sf/format';
 	import { Thread } from '#lib/sf/thread.svelte';
 	import StatusPill from '#lib/sf/ui/StatusPill.svelte';
 	import StatusDot from '#lib/sf/ui/StatusDot.svelte';
 	import CopyButton from '#lib/sf/ui/CopyButton.svelte';
 	import PrIcon from '#lib/sf/ui/PrIcon.svelte';
+	import PrSection from '#lib/sf/thread/PrSection.svelte';
+	import PrDialog from '#lib/sf/thread/PrDialog.svelte';
 	import AttachedImages from '#lib/sf/ui/AttachedImages.svelte';
 	import AgentModelPicker from '#lib/sf/ui/AgentModelPicker.svelte';
 	import ComposerOptions from '#lib/sf/ui/ComposerOptions.svelte';
@@ -195,15 +196,60 @@
 		}
 	}
 	let opening = $state(false);
-	async function openPr() {
+	// A pull request run is pushing the branch right now.
+	const pushing = $derived(live && latest?.kind === 'pr');
+	const merging = $derived(live && latest?.kind === 'merge');
+	let prDialog = $state(false);
+	/** The thread's machine runs a Sidefleet that leaves files out, writes the pull request and merges. */
+	const canManagePrs = $derived(!!fleet.workers.find((w) => w.id === thread?.machine)?.capabilities.can_manage_prs);
+	/** A message since the last push (or opening) changed files: push before merging. */
+	const unpushed = $derived.by(() => {
+		// `runs` gets status updates as they stream in; `turns` lines up with it.
+		const runs = thread?.runs ?? [];
+		const turns = thread?.turns ?? [];
+		const last = runs.findLastIndex((r) => r.kind === 'pr' && r.status === 'succeeded');
+		return turns.slice(last + 1).some((t) => (t.run.kind === 'agent' || t.run.kind === 'restore') && !!t.diff?.turn?.file_count);
+	});
+	async function openPr(opts?: PrOptions) {
 		opening = true;
 		try {
-			await thread?.openPr();
+			await thread?.openPr(opts);
 			void fleet.refresh();
 		} catch (err) {
-			toast.error('Could not open a pull request', { description: (err as Error).message });
+			toast.error(pr?.state === 'open' ? 'Could not push the changes' : 'Could not open a pull request', { description: (err as Error).message });
+			opening = false;
+			throw err;
 		}
 		opening = false;
+	}
+	async function mergePr(method: MergeMethod) {
+		try {
+			await thread?.mergePr(method);
+			void fleet.refresh();
+		} catch (err) {
+			toast.error('Could not merge', { description: (err as Error).message });
+		}
+	}
+	async function checkPr() {
+		try {
+			await thread?.checkPr();
+			toast('Checking the pull request again', { description: `${thread?.machine ?? 'Its machine'} looks at it on GitHub; what it finds shows here within a minute.` });
+		} catch (err) {
+			toast.error('Could not check it', { description: (err as Error).message });
+		}
+	}
+	// Opening your thread looks at its open pull request again (at most every half minute), so checks are fresh.
+	let checkedFor = '';
+	$effect(() => {
+		const rid = root?.id;
+		if (!loaded || !rid || theirs || pr?.state !== 'open' || checkedFor === rid) return;
+		checkedFor = rid;
+		void thread?.checkPr().catch(() => {});
+	});
+	// "Ask to fix": a request to the agent, left in the reply box to send or edit.
+	function askAgent(text: string) {
+		reply = text;
+		box?.focus();
 	}
 	// Stopping asks first, unless you said not to.
 	let stopAsk = $state(false);
@@ -283,7 +329,7 @@
 					{/if}
 					{#if pr}
 						<a href={pr.url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 hover:text-foreground" title="Open pull request #{pr.number} on GitHub">
-							<PrIcon state={pr.state} /><span class="tnum text-foreground/80">#{pr.number}</span>{prLabel[pr.state]}
+							<PrIcon state={pr.state} draft={pr.draft} /><span class="tnum text-foreground/80">#{pr.number}</span>{pr.state === 'open' && pr.draft ? 'Draft' : prLabel[pr.state]}
 						</a>
 					{/if}
 					{#if messages > 1}<span class="tnum max-md:hidden">{messages} messages</span>{/if}
@@ -315,6 +361,20 @@
 	</header>
 
 	<StopDialog bind:open={stopAsk} agent={agentName(threadAgent ?? agent)} {queued} onstop={stop} />
+	{#if thread?.branch && !theirs}
+		<PrDialog
+			bind:open={prDialog}
+			mode={pr?.state === 'open' ? 'push' : 'open'}
+			number={pr?.number}
+			files={thread.changes?.files ?? []}
+			fileCount={thread.changes?.file_count ?? 0}
+			branch={thread.branch}
+			machine={thread.machine ?? 'its machine'}
+			agent={agentName(threadAgent ?? agent)}
+			canManage={canManagePrs}
+			onsubmit={openPr}
+		/>
+	{/if}
 	{#if forkTurn}<ForkDialog bind:open={forkOpen} run={forkTurn.run} hasFiles={!!forkTurn.snapshot} />{/if}
 
 	<Conversation class="min-h-0 flex-1">
@@ -339,31 +399,26 @@
 					{#each thread.outbox as m (m.key)}
 						<PendingMessage msg={m} onretry={() => thread!.retry(m.key)} ondiscard={() => discard(m.key, m.text)} />
 					{/each}
-					{#if !live && !thread.outbox.length && thread.turns.length && thread.branch && (thread.changes?.file_count || pr)}
-						{@const branch = thread.branch}
-						<div class="flex items-center gap-3 rounded-lg border border-dashed px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground max-sm:flex-col max-sm:items-stretch">
-							<p class="flex-1">
-								{#if pr?.state === 'merged'}
-									Merged in <a href={pr.url} target="_blank" rel="noopener noreferrer" class="text-foreground/80 underline underline-offset-2">pull request #{pr.number}</a>. The branch <span class="font-mono text-foreground/80">{branch}</span> is still on {thread.machine}.
-								{:else if pr?.state === 'open'}
-									<a href={pr.url} target="_blank" rel="noopener noreferrer" class="text-foreground/80 underline underline-offset-2">Pull request #{pr.number}</a> is open for <span class="font-mono text-foreground/80">{branch}</span>. Keep working here, then push the new changes to it.
-								{:else}
-									The changes are on branch <span class="font-mono text-foreground/80">{branch}</span> in {repoLabel(root?.repo)} on {thread.machine}.{#if pr?.state === 'closed'} <a href={pr.url} target="_blank" rel="noopener noreferrer" class="underline underline-offset-2">Pull request #{pr.number}</a> was closed.{/if} Open a pull request, or review, merge or push it from there.
-								{/if}
-							</p>
-							{#if pr?.state !== 'merged' && !theirs}
-								<Button
-									size="sm"
-									variant={pr?.state === 'open' ? 'outline' : 'default'}
-									class="h-8 shrink-0 rounded-full text-xs"
-									onclick={openPr}
-									disabled={opening || !machineOnline}
-									title={machineOnline ? `Commits what's left, pushes ${branch} to origin and opens a pull request with the GitHub CLI on ${thread.machine}` : `${thread.machine} is offline`}
-								>
-									<GitPullRequest class="size-3.5" />{opening ? 'Starting…' : pr?.state === 'open' ? 'Push changes' : 'Open pull request'}
-								</Button>
-							{/if}
-						</div>
+					{#if thread.turns.length && thread.branch && (thread.changes?.file_count || pr) && (!live || pr || pushing)}
+						<PrSection
+							{pr}
+							branch={thread.branch}
+							repo={repoLabel(root?.repo)}
+							machine={thread.machine ?? 'its machine'}
+							{machineOnline}
+							{theirs}
+							busy={(live && !pushing && !merging) || !!thread.outbox.length}
+							pushing={pushing || opening}
+							{merging}
+							{unpushed}
+							canMerge={canManagePrs}
+							changes={thread.changes}
+							onpush={() => (prDialog = true)}
+							oncheck={checkPr}
+							onreview={() => openDiff(null, null)}
+							onask={askAgent}
+							onmerge={mergePr}
+						/>
 					{/if}
 				{/if}
 			</ConversationContent>

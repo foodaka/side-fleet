@@ -234,6 +234,15 @@ pub async fn run(cfg: WorkerConfig) -> Result<()> {
                         if !resp.check_prs.is_empty() {
                             tokio::spawn(check_prs(client.clone(), cfg2.repos_root.clone(), resp.check_prs));
                         }
+                        if resp.list_pull_requests {
+                            let (client, repos) = (client.clone(), snapshot.repos.clone());
+                            tokio::spawn(async move {
+                                let (prs, error) = crate::pr::authored(&repos).await;
+                                if let Err(e) = client.report_authored_prs(prs, error).await {
+                                    tracing::warn!(error = %e, "reporting the pull requests list failed");
+                                }
+                            });
+                        }
                         if let Some(request) = resp.worktree_cleanup.filter(|_| !cleaning.swap(true, Ordering::SeqCst)) {
                             let (dir, active, cleaned) = (cfg2.worktrees_dir.clone(), active.clone(), cleaned.clone());
                             tokio::spawn(async move {
@@ -763,8 +772,21 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         return;
     }
 
+    if run.kind == "merge" {
+        let (status, result) = match run_merge(client, &run, root_id, &cwd, branch.as_deref()).await {
+            Ok(pr) => (RunStatus::Succeeded, json!({"pr": pr})),
+            Err(e) => {
+                let msg = sidefleet_core::redact::redact(&format!("{e:#}"));
+                let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
+                (RunStatus::Failed, json!({"error": msg}))
+            }
+        };
+        report_finish(client, run_id, status, result, None).await;
+        return;
+    }
+
     if run.kind == "pr" {
-        let (status, result) = match run_pr(client, &run, root_id, &cwd, branch.as_deref()).await {
+        let (status, result) = match run_pr(client, cfg, &run, root_id, &cwd, branch.as_deref()).await {
             Ok(pr) => (RunStatus::Succeeded, json!({"pr": pr})),
             Err(e) => {
                 let msg = sidefleet_core::redact::redact(&format!("{e:#}"));
@@ -1223,14 +1245,34 @@ async fn run_handoff(client: &ControlClient, run: &Run, repo: &Path) -> Result<S
     Ok(branch)
 }
 
-/// A pull request run: commit and push the thread's branch, open a pull request
-/// for it (or find the open one), and tell the control plane about it.
-async fn run_pr(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Path, branch: Option<&str>) -> Result<sidefleet_core::PullRequest> {
+/// A pull request run: commit and push the thread's branch (but files left out),
+/// open a pull request for it (or find the open one), and tell the control plane about it.
+async fn run_pr(client: &ControlClient, cfg: &WorkerConfig, run: &Run, root_id: Uuid, cwd: &Path, branch: Option<&str>) -> Result<sidefleet_core::PullRequest> {
     let branch = branch.context("this task has no branch of its own to open a pull request from")?;
-    let (pr, opened) = crate::pr::open(cwd, branch, run.context.as_deref().unwrap_or("")).await?;
-    client.report_prs(vec![PrReport { thread: root_id, pr: pr.clone() }]).await?;
-    client.post_events(run.id, vec![NewEvent { kind: "pull_request".into(), payload: json!({"url": pr.url, "number": pr.number, "state": pr.state, "opened": opened, "branch": branch})}]).await?;
-    Ok(pr)
+    let req = sidefleet_core::PrRequest::parse(run.context.as_deref().unwrap_or(""));
+    if req.write {
+        let _ = client.post_events(run.id, vec![NewEvent { kind: "activity".into(), payload: json!({"text": "Writing the title and description"}) }]).await;
+    }
+    let writer = crate::pr_text::Writer { agent: run.agent, claude_bin: &cfg.claude_bin, codex_bin: &cfg.codex_bin };
+    let o = crate::pr::open(cwd, branch, &req, Some(&writer)).await?;
+    client.report_prs(vec![PrReport { thread: root_id, pr: o.pr.clone() }]).await?;
+    let payload = json!({
+        "url": o.pr.url, "number": o.pr.number, "state": o.pr.state, "opened": o.opened, "branch": branch,
+        "written": o.written, "draft": o.pr.draft || (o.opened && req.draft), "kept_out": o.kept_out, "already_pushed": o.already_pushed,
+    });
+    client.post_events(run.id, vec![NewEvent { kind: "pull_request".into(), payload }]).await?;
+    Ok(o.pr)
+}
+
+/// A merge run: merge the thread's pull request on GitHub and tell the control plane.
+async fn run_merge(client: &ControlClient, run: &Run, root_id: Uuid, cwd: &Path, branch: Option<&str>) -> Result<sidefleet_core::PullRequest> {
+    let branch = branch.context("this task has no branch of its own")?;
+    let req: sidefleet_core::MergeRequest = serde_json::from_str(run.context.as_deref().unwrap_or("")).context("merge run without a pull request to merge")?;
+    let m = crate::pr::merge(cwd, branch, &req).await?;
+    client.report_prs(vec![PrReport { thread: root_id, pr: m.pr.clone() }]).await?;
+    let payload = json!({"url": m.pr.url, "number": m.pr.number, "state": m.pr.state, "method": req.method, "left_behind": m.left_behind});
+    client.post_events(run.id, vec![NewEvent { kind: "merged".into(), payload }]).await?;
+    Ok(m.pr)
 }
 
 /// An integrate run (rooms): merge the thread's branch into the room branch named

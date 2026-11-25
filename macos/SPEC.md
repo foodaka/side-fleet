@@ -190,7 +190,10 @@ is the normal case here.
 | Stop all | `POST /v1/runs/:id/stop` for every non-terminal run, newest first, so nothing queued starts |
 | Send now | Stop only the running one |
 | Start now, cancel scheduled | `POST /start-now`, `POST /stop` |
-| Restore, fork, open PR | `POST /restore`, `POST /fork`, `POST /:root/pr` |
+| Restore, fork, open PR | `POST /restore`, `POST /fork`, `POST /:root/pr` with an optional body `{title?, body?, write?, draft?, exclude?: [path]}`: no title has the agent write it; `exclude` leaves files out of the commit. A 409 says to update the machine when it can't (`capabilities.can_manage_prs`) |
+| Merge PR | `POST /:root/pr/merge {method: squash \| merge \| rebase}` queues a `merge` run on the thread's machine; it ends with a `merged` event `{url, number, method, left_behind}` |
+| Pull requests screen | `GET /v1/pull-requests` → `{machines: [{id, name, online, can_list, fetched_at, error, looking}], prs: [{url, number, repo, title, state, draft, additions, deletions, head, base, created_at, updated_at, review, checks, machine, thread: {id, task} \| null}]}`. `POST /v1/pull-requests/refresh` asks your machines to look again (on open, every two minutes while it's open, and Refresh) |
+| Check a PR now | `POST /:root/pr/check`: the machine looks at the open PR on its next heartbeat (409 with none open). The thread asks once when it opens. A run's `pr` carries `title`, `base`, `draft`, `review` (`approved`, `changes_requested`, `review_required`), `conflicts` and `checks {passed, failed, pending, failing: [{name, url?}]}` when the machine reports them |
 | Approve, deny | `POST /approvals/:id/approve`, `/deny` |
 | Archive, snooze | `POST /archive {archived}`, `POST /snooze {until}`, optimistic with rollback and Undo |
 | Pin | `POST /pin {pinned}`, optimistic with rollback; the list puts pinned threads first |

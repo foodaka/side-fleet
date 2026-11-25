@@ -1,7 +1,7 @@
 //! Postgres access. Plain `sqlx::query` (no compile-time macros) so the
 //! workspace builds without a database.
 
-use sidefleet_core::{Agent, Capabilities, FileRef, FileUpload, ImageRef, ImageUpload, PrCheck, PrReport, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
+use sidefleet_core::{Agent, AuthoredPr, Capabilities, FileRef, FileUpload, ImageRef, ImageUpload, MergeRequest, PrCheck, PrReport, PrRequest, Run, RunEvent, RunStatus, RunSummary, Slots, UsageLimit, Worker, WorktreeCleanupRequest, WorktreeCleanupResult};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -583,18 +583,69 @@ pub enum PrOutcome {
     InPlace,
     /// No machine has run it yet.
     NoMachine,
+    /// What was asked needs a newer Sidefleet on this machine.
+    TooOld(String),
+    /// The thread has no open pull request (to merge).
+    NoOpenPr,
+}
+
+/// What the page can ask of a new `pr` run, beyond pushing everything.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PrOptions {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// Have the agent write the title and description; by default, when no title is given.
+    pub write: Option<bool>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Queue a `pr` run on the machine with the thread's worktree: it commits what is
-/// left, pushes the branch and opens (or updates) the thread's pull request.
-pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>) -> sqlx::Result<PrOutcome> {
-    thread_branch_run(pool, org, run_id, "pr", created_by, |root| {
+/// left (but files `opts` leaves out), pushes the branch and opens (or updates) the
+/// thread's pull request. Machines too old for the options get the legacy context,
+/// unless the options can't be done without them.
+pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, opts: &PrOptions) -> sqlx::Result<PrOutcome> {
+    thread_branch_run(pool, org, run_id, "pr", created_by, |root, thread, caps| {
         let task = if root.pr.as_ref().is_some_and(|p| p.state == "open") { "Update the pull request" } else { "Open a pull request" };
         let first_line = root.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("Changes from Sidefleet").trim();
         let title: String = first_line.chars().take(72).collect();
         let title = if first_line.chars().count() > 72 { format!("{}…", title.trim_end()) } else { title };
         let body: String = root.task.chars().take(4000).collect();
-        (task.to_string(), format!("{title}\n\n{body}\n\nOpened from Sidefleet."))
+        let given = |s: &Option<String>| s.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+        let req = PrRequest {
+            title: given(&opts.title),
+            body: given(&opts.body),
+            write: opts.write.unwrap_or(given(&opts.title).is_none()),
+            draft: opts.draft,
+            exclude: opts.exclude.clone(),
+            fallback_title: title,
+            fallback_body: format!("{body}\n\nOpened from Sidefleet."),
+            messages: thread.iter().filter(|r| r.kind == "agent").map(|r| r.task.chars().take(4000).collect()).collect(),
+        };
+        if caps.is_some_and(|c| c.can_manage_prs) {
+            return Ok((task.to_string(), serde_json::to_string(&req).unwrap_or_default()));
+        }
+        if req.draft || !req.exclude.is_empty() {
+            return Err("leave files out or open a draft");
+        }
+        Ok((task.to_string(), req.legacy_context()))
+    })
+    .await
+}
+
+/// Queue a `merge` run on the machine with the thread's worktree: it merges the
+/// thread's open pull request on GitHub with `method` (`squash`, `merge` or `rebase`).
+pub async fn create_merge_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, method: &str) -> sqlx::Result<PrOutcome> {
+    thread_branch_run(pool, org, run_id, "merge", created_by, |root, _, caps| {
+        let Some(pr) = root.pr.as_ref().filter(|p| p.state == "open") else { return Err("") };
+        if !caps.is_some_and(|c| c.can_manage_prs) {
+            return Err("merge pull requests");
+        }
+        let how = match method { "squash" => "Squash and merge", "rebase" => "Rebase and merge", _ => "Merge" };
+        let req = MergeRequest { method: method.to_string(), url: pr.url.clone() };
+        Ok((format!("{how} pull request #{}", pr.number), serde_json::to_string(&req).unwrap_or_default()))
     })
     .await
 }
@@ -603,22 +654,24 @@ pub async fn create_pr_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: O
 /// the thread's branch into `room_branch` and pushes that.
 pub async fn create_integrate_run(pool: &PgPool, org: Uuid, run_id: Uuid, created_by: Option<Uuid>, room_branch: &str) -> sqlx::Result<PrOutcome> {
     // The task text names the merge commit on the room branch ("Room: <first line>").
-    thread_branch_run(pool, org, run_id, "integrate", created_by, |root| {
+    thread_branch_run(pool, org, run_id, "integrate", created_by, |root, _, _| {
         let first: String = root.task.lines().find(|l| !l.trim().is_empty()).unwrap_or("a task").trim().chars().take(72).collect();
-        (format!("Add to the room: {first}"), room_branch.to_string())
+        Ok((format!("Add to the room: {first}"), room_branch.to_string()))
     })
     .await
 }
 
 /// A run that works on a finished thread's branch on the machine that has it
-/// (`pr`, `integrate`). `make` gives its task text and context from the root.
+/// (`pr`, `merge`, `integrate`). `make` gives its task text and context from the root,
+/// the thread and the machine's capabilities, or says what the machine is too old to
+/// do (empty: the thread has no open pull request).
 async fn thread_branch_run(
     pool: &PgPool,
     org: Uuid,
     run_id: Uuid,
     kind: &str,
     created_by: Option<Uuid>,
-    make: impl FnOnce(&Run) -> (String, String),
+    make: impl FnOnce(&Run, &[Run], Option<&Capabilities>) -> Result<(String, String), &'static str>,
 ) -> sqlx::Result<PrOutcome> {
     let Some(target) = get_run(pool, org, run_id).await? else {
         return Ok(PrOutcome::NotFound);
@@ -644,7 +697,12 @@ async fn thread_branch_run(
         },
         None => return Ok(PrOutcome::NoMachine),
     };
-    let (task, context) = make(&root);
+    let caps = worker_caps(pool, org, &worker).await?.map(|(_, c)| c);
+    let (task, context) = match make(&root, &thread, caps.as_ref()) {
+        Ok(made) => made,
+        Err("") => return Ok(PrOutcome::NoOpenPr),
+        Err(what) => return Ok(PrOutcome::TooOld(format!("update Sidefleet on {worker} to {what} from here"))),
+    };
     let session = session_for(&thread, latest.agent, None);
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
@@ -710,13 +768,134 @@ pub async fn record_prs(pool: &PgPool, org: Uuid, worker_id: &str, prs: &[PrRepo
     Ok(())
 }
 
-/// Open pull requests this worker opened and hasn't checked in a while; marks
+/// Whether the Pull requests page asked `worker` to look since it last handed that out;
+/// marks it handed out.
+pub async fn list_prs_due(pool: &PgPool, orgs: &[Uuid], worker: &str) -> sqlx::Result<bool> {
+    let rows = sqlx::query(
+        "UPDATE workers SET prs_asked_at = now() WHERE id = $1 AND org_id = ANY($2)
+           AND prs_wanted_at IS NOT NULL AND (prs_asked_at IS NULL OR prs_asked_at < prs_wanted_at) RETURNING 1",
+    )
+    .bind(worker)
+    .bind(orgs)
+    .fetch_all(pool)
+    .await?;
+    Ok(!rows.is_empty())
+}
+
+/// Keep what `worker` found for the Pull requests page.
+pub async fn record_authored_prs(pool: &PgPool, orgs: &[Uuid], worker: &str, prs: &[AuthoredPr], error: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE workers SET prs = $3, prs_error = $4, prs_fetched_at = now() WHERE id = $1 AND org_id = ANY($2)")
+        .bind(worker)
+        .bind(orgs)
+        .bind(json!(prs))
+        .bind(error)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Ask `owner`'s machines (every machine, for the developer key) to look at their pull
+/// requests again; at most twice a minute.
+pub async fn want_prs(pool: &PgPool, org: Uuid, owner: Option<Uuid>) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE workers SET prs_wanted_at = now() WHERE org_id = $1 AND ($2::uuid IS NULL OR owner_id = $2)
+           AND (prs_wanted_at IS NULL OR prs_wanted_at < now() - interval '20 seconds')",
+    )
+    .bind(org)
+    .bind(owner)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The Pull requests page: `owner`'s machines (every machine, for the developer key), how
+/// recently each looked, and the pull requests they found, newest first, one per link,
+/// each with the thread that opened it if one did.
+pub async fn pull_requests(pool: &PgPool, org: Uuid, owner: Option<Uuid>) -> sqlx::Result<Value> {
+    let rows = sqlx::query(
+        "SELECT id, display_name, prs, prs_fetched_at, prs_error, prs_wanted_at, capabilities,
+                (last_heartbeat_at > now() - interval '45 seconds') AS online
+           FROM workers WHERE org_id = $1 AND ($2::uuid IS NULL OR owner_id = $2) ORDER BY display_name",
+    )
+    .bind(org)
+    .bind(owner)
+    .fetch_all(pool)
+    .await?;
+    let mut machines = Vec::new();
+    let mut by_url: std::collections::HashMap<String, (AuthoredPr, String)> = std::collections::HashMap::new();
+    for r in &rows {
+        let id: String = r.get("id");
+        let fetched: Option<DateTime<Utc>> = r.get("prs_fetched_at");
+        let wanted: Option<DateTime<Utc>> = r.get("prs_wanted_at");
+        let caps: Option<Capabilities> = serde_json::from_value(r.get::<Value, _>("capabilities")).ok();
+        let online: bool = r.get("online");
+        let can = caps.is_some_and(|c| c.can_manage_prs);
+        machines.push(json!({
+            "id": id, "name": r.get::<String, _>("display_name"), "online": online, "can_list": can,
+            "fetched_at": fetched, "error": r.get::<Option<String>, _>("prs_error"),
+            "looking": online && can && wanted.is_some_and(|w| fetched.is_none_or(|f| f < w)),
+        }));
+        let prs: Vec<AuthoredPr> = r.get::<Option<Value>, _>("prs").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        for p in prs {
+            let newer = by_url.get(&p.url).is_none_or(|(have, _)| p.updated_at > have.updated_at);
+            if newer {
+                by_url.insert(p.url.clone(), (p, id.clone()));
+            }
+        }
+    }
+    let urls: Vec<String> = by_url.keys().cloned().collect();
+    let threads = sqlx::query("SELECT id, task, pr->>'url' AS url FROM runs WHERE org_id = $1 AND parent_id IS NULL AND pr->>'url' = ANY($2)")
+        .bind(org)
+        .bind(&urls)
+        .fetch_all(pool)
+        .await?;
+    let thread_of: std::collections::HashMap<String, Value> = threads
+        .iter()
+        .map(|t| (t.get::<String, _>("url"), json!({"id": t.get::<Uuid, _>("id"), "task": t.get::<String, _>("task").chars().take(200).collect::<String>()})))
+        .collect();
+    let mut prs: Vec<(AuthoredPr, String)> = by_url.into_values().collect();
+    prs.sort_by_key(|p| std::cmp::Reverse(p.0.updated_at));
+    let prs: Vec<Value> = prs
+        .into_iter()
+        .map(|(p, machine)| {
+            let mut v = json!(p);
+            v["machine"] = json!(machine);
+            v["thread"] = thread_of.get(&p.url).cloned().unwrap_or(Value::Null);
+            v
+        })
+        .collect();
+    Ok(json!({"machines": machines, "prs": prs}))
+}
+
+/// Have the thread's open pull request checked on its machine's next heartbeat. False
+/// when the thread has no open pull request.
+pub async fn check_pr_soon(pool: &PgPool, org: Uuid, root: Uuid) -> sqlx::Result<bool> {
+    let open: Option<bool> = sqlx::query_scalar("SELECT pr->>'state' = 'open' FROM runs WHERE id = $1 AND org_id = $2 AND parent_id IS NULL")
+        .bind(root)
+        .bind(org)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+    if open != Some(true) {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE runs SET pr_checked_at = NULL WHERE id = $1 AND org_id = $2 AND pr_checked_at < now() - interval '30 seconds'")
+        .bind(root)
+        .bind(org)
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
+/// Open pull requests this worker opened and hasn't checked in a while (sooner while
+/// checks are running); marks
 /// them checked now so a failing check isn't handed out on every heartbeat.
 pub async fn prs_to_check(pool: &PgPool, org: Uuid, worker_id: &str) -> sqlx::Result<Vec<PrCheck>> {
     let rows = sqlx::query(
         "UPDATE runs SET pr_checked_at = now() WHERE id IN (
              SELECT id FROM runs WHERE org_id = $1 AND pr_worker = $2 AND pr->>'state' = 'open'
-               AND (pr_checked_at IS NULL OR pr_checked_at < now() - interval '3 minutes')
+               AND (pr_checked_at IS NULL OR pr_checked_at < now() - interval '3 minutes'
+                    OR (COALESCE((pr->'checks'->>'pending')::int, 0) > 0 AND pr_checked_at < now() - interval '1 minute'))
              ORDER BY pr_checked_at NULLS FIRST LIMIT 20)
          RETURNING id, pr->>'url' AS url",
     )
@@ -890,6 +1069,11 @@ pub const HANDOFF_WAIT_SECS: i64 = 600;
 
 /// Whether `worker` is online and can push a thread's files for a fork.
 async fn can_hand_off(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<bool> {
+    Ok(worker_caps(pool, org, worker).await?.is_some_and(|(online, c)| online && c.can_hand_off_files))
+}
+
+/// Whether `worker` is online, and what it said it can do.
+async fn worker_caps(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<Option<(bool, Capabilities)>> {
     let row = sqlx::query(
         "SELECT (last_heartbeat_at > now() - interval '45 seconds') AS online, capabilities FROM workers WHERE id = $1 AND org_id = $2",
     )
@@ -897,9 +1081,9 @@ async fn can_hand_off(pool: &PgPool, org: Uuid, worker: &str) -> sqlx::Result<bo
     .bind(org)
     .fetch_optional(pool)
     .await?;
-    Ok(row.is_some_and(|r| {
-        let caps: Option<Capabilities> = serde_json::from_value(r.get::<Value, _>("capabilities")).ok();
-        r.get::<bool, _>("online") && caps.is_some_and(|c| c.can_hand_off_files)
+    Ok(row.and_then(|r| {
+        let caps: Capabilities = serde_json::from_value(r.get::<Value, _>("capabilities")).ok()?;
+        Some((r.get::<bool, _>("online"), caps))
     }))
 }
 

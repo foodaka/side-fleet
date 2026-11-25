@@ -41,6 +41,7 @@ enum DemoData {
                     "slots": ["parallel": .number(Double(parallel)), "active": 0],
                     // The MacBook runs an older build, which can't clean up its worktrees.
                     "can_clean_worktrees": .bool(id != "macbook-pro"),
+                    "can_manage_prs": .bool(id != "macbook-pro"),
                 ],
             ]
         }
@@ -303,7 +304,18 @@ enum DemoData {
         }
         out.append(simple("demo-images", "Compress hero images in the marketing pages", hours: 51, machine: "hetzner-vps", extra: ["pinned_at": iso(now.addingTimeInterval(-40 * 3600))]))
         // Two more in the storefront, so its group By project folds the rest under "Show 2 more".
-        out.append(simple("demo-coupons", "Let coupon codes stack with gift cards", hours: 98, machine: "hetzner-vps"))
+        // An open pull request with a failed check, a review asking for changes and a conflict.
+        var coupons = simple("demo-coupons", "Let coupon codes stack with gift cards", hours: 98, machine: "hetzner-vps")
+        coupons[0].json["pr"] = [
+            "url": "https://github.com/acme/storefront/pull/131", "number": 131, "state": "open", "title": "Let coupon codes stack with gift cards", "base": "main",
+            "review": "changes_requested", "conflicts": true,
+            "checks": ["passed": 3, "failed": 1, "pending": 1, "failing": [["name": "test", "url": "https://github.com/acme/storefront/actions/runs/1"]]],
+        ]
+        let couponsAt = now.addingTimeInterval(-98 * 3600)
+        let couponsDiff: JSONValue = ["files": [diffFile("src/lib/cart/discounts.ts", add: 2, del: 1, patch: "@@ -12,3 +12,4 @@ export function applyDiscounts(cart: Cart) {\n-  if (cart.giftCard) return cart.total;\n+  const coupons = cart.coupons.filter((c) => c.stacks);\n+  return coupons.reduce((t, c) => c.apply(t), cart.total);\n }\n")], "file_count": 1, "additions": 2, "deletions": 1]
+        coupons[0].events.insert(("workspace", ["mode": "worktree", "branch": "sidefleet/5d2a90c4", "from": ["ref": "origin/main", "commit": "9a41c07e2b"]], couponsAt), at: 1)
+        coupons[0].events.insert(("diff", ["turn": couponsDiff], couponsAt.addingTimeInterval(230)), at: coupons[0].events.count - 2)
+        out.append(coupons)
         out.append(simple("demo-contrast", "Fix the colour contrast on the product cards", hours: 122, machine: "mac-mini"))
         out.append(simple("demo-sitemap", "Generate the sitemap from the route table", hours: 76, machine: "mac-mini", repo: "github.com/acme/docs"))
         out.append(simple("demo-review", "Summarise what changed on main this week", hours: 30, machine: "mac-mini", extra: ["snoozed_until": iso(now.addingTimeInterval(3 * 3600))]))
@@ -364,5 +376,37 @@ enum DemoData {
             DemoStep(0.3, "result", ["subtype": "success", "is_error": false, "result": "", "duration_ms": 540_000, "num_turns": 11, "total_cost_usd": 0.92, "session_id": "demo-session-rate", "context": ["used": 164_000, "limit": 200_000]]),
             DemoStep(0.1, "status", ["status": "succeeded"]),
         ]
+    }
+
+    /// The Pull requests screen: what the demo machines "found" on GitHub.
+    static func pullRequests(now: Date) -> JSONValue {
+        func ago(_ minutes: Double) -> JSONValue { .string(Timestamp.format(now.addingTimeInterval(-minutes * 60))) }
+        let ok: JSONValue = ["passed": 3, "failed": 0, "pending": 0]
+        func pr(_ repo: String, _ n: Int, _ title: String, _ state: String, head: String, add: Int, del: Int, updated: Double, created: Double,
+                checks: JSONValue = .null, review: JSONValue = .null, draft: Bool = false, thread: JSONValue = .null, machine: String = "mac-mini") -> JSONValue {
+            ["url": .string("https://github.com/\(repo)/pull/\(n)"), "number": .number(Double(n)), "repo": .string(repo), "title": .string(title), "state": .string(state),
+             "draft": .bool(draft), "additions": .number(Double(add)), "deletions": .number(Double(del)), "head": .string(head), "base": "main",
+             "created_at": ago(created), "updated_at": ago(updated), "checks": checks, "review": review, "machine": .string(machine), "thread": thread]
+        }
+        let prs: [JSONValue] = [
+            pr("acme/storefront", 131, "Let coupon codes stack with gift cards", "open", head: "sidefleet/5d2a90c4", add: 26, del: 9, updated: 40, created: 60 * 98,
+               checks: ["passed": 3, "failed": 1, "pending": 1, "failing": [["name": "test"]]], review: "changes_requested",
+               thread: ["id": "demo-coupons", "task": "Let coupon codes stack with gift cards"], machine: "hetzner-vps"),
+            pr("acme/storefront", 134, "Show prices with the shopper's currency symbol", "open", head: "sidefleet/8c21f0aa", add: 58, del: 12, updated: 90, created: 300,
+               checks: ["passed": 2, "failed": 0, "pending": 1], review: "review_required"),
+            pr("acme/docs", 52, "Write a migration guide for the v3 API", "open", head: "sidefleet/77ab02e1", add: 412, del: 6, updated: 60 * 5, created: 60 * 7, checks: ok, review: "approved"),
+            pr("acme/storefront", 120, "Spike: move the cart to a server action", "open", head: "cart-server-action", add: 310, del: 145, updated: 60 * 48, created: 60 * 96, draft: true),
+            pr("acme/cli", 88, "Add a `--json` flag to the `export` command", "merged", head: "sidefleet/88e0ff21", add: 64, del: 3, updated: 60 * 25, created: 60 * 26,
+               checks: ok, review: "approved", thread: ["id": "demo-json", "task": "Add a `--json` flag to the `export` command"]),
+            pr("acme/storefront", 128, "Fix the colour contrast on the product cards", "merged", head: "sidefleet/0b7e5d13", add: 12, del: 12, updated: 60 * 72, created: 60 * 96, checks: ok, review: "approved"),
+            pr("acme/storefront", 117, "Rename the price helpers", "closed", head: "rename-price", add: 18, del: 18, updated: 60 * 24 * 9, created: 60 * 24 * 10, checks: ok),
+        ]
+        let looked = ago(1)
+        let machines: [JSONValue] = [
+            ["id": "mac-mini", "name": "mac-mini", "online": true, "can_list": true, "fetched_at": looked, "error": .null, "looking": false],
+            ["id": "hetzner-vps", "name": "hetzner-vps", "online": true, "can_list": true, "fetched_at": looked, "error": .null, "looking": false],
+            ["id": "macbook-pro", "name": "macbook-pro", "online": false, "can_list": false, "fetched_at": .null, "error": .null, "looking": false],
+        ]
+        return ["machines": .array(machines), "prs": .array(prs)]
     }
 }

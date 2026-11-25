@@ -27,6 +27,86 @@ final class StoreTests: XCTestCase {
         XCTFail("never happened: \(what)")
     }
 
+    /// What the machine saw on GitHub reaches the list, and an open one can be checked again.
+    func testPullRequestDetails() async throws {
+        let (api, fleet, _, _) = world()
+        await fleet.refresh()
+        let pr = try XCTUnwrap(fleet.runs.first { $0.id == "demo-coupons" }?.run.pr)
+        XCTAssertEqual(pr.stateLabel, "Open")
+        XCTAssertEqual(pr.base, "main")
+        XCTAssertEqual(pr.review, "changes_requested")
+        XCTAssertTrue(pr.conflicts)
+        XCTAssertEqual(pr.checks?.summary, "1 of 5 checks failed: test · 1 still running")
+        XCTAssertEqual(pr.checks?.failing.first?.url, "https://github.com/acme/storefront/actions/runs/1")
+        try await api.checkPR(root: "demo-coupons")
+        do {
+            try await api.checkPR(root: "demo-json")
+            XCTFail("a merged pull request isn't checked")
+        } catch {}
+
+        // Older machines report only the link, number and state.
+        XCTAssertEqual(PRChecks(passed: 4, failed: 0, pending: 0).summary, "All 4 checks passed")
+        XCTAssertEqual(PRChecks(passed: 0, failed: 0, pending: 1).summary, "1 of 1 check still running")
+        XCTAssertEqual(PullRequest(url: "u", number: 1, state: "open", draft: true).stateLabel, "Draft")
+    }
+
+    /// The Pull requests screen: groups, search, filters and what each machine says.
+    func testPullRequestsScreen() async throws {
+        let api = API(backend: DemoBackend(speed: 50))
+        let store = PullRequestsStore(api: api)
+        try await store.refresh()
+        XCTAssertEqual(store.groups.map(\.title), ["Open", "Merged and closed"])
+        XCTAssertEqual(store.groups[0].prs.map(\.number), [131, 134, 52, 120], "recently updated first")
+        XCTAssertEqual(store.notes, ["macbook-pro needs an update to list pull requests."])
+        let coupons = try XCTUnwrap(store.page?.prs.first { $0.number == 131 })
+        XCTAssertEqual(coupons.threadID, "demo-coupons")
+
+        store.query = "#88"
+        XCTAssertEqual(store.filtered.map(\.number), [88])
+        store.query = "cart-server"
+        XCTAssertEqual(store.filtered.map(\.number), [120])
+        store.query = ""
+        store.failing = true
+        XCTAssertEqual(store.filtered.map(\.number), [131])
+        XCTAssertEqual(store.filterCount, 1)
+        store.clearFilters()
+        store.hideDrafts = true
+        store.show = .open
+        XCTAssertEqual(store.groups.map(\.title), ["Open"])
+        XCTAssertFalse(store.filtered.contains { $0.draft })
+        store.clearFilters()
+        store.show = .all
+        store.sort = .size
+        XCTAssertEqual(store.filtered.first?.number, 120)
+        store.repo = "acme/docs"
+        XCTAssertEqual(store.filtered.map(\.number), [52])
+    }
+
+    /// Options go with a pull request; merging the open one marks it merged.
+    func testOpeningWithOptionsAndMerging() async throws {
+        let api = API(backend: DemoBackend(speed: 50))
+        let thread = ThreadStore(api: api, liveInterval: .milliseconds(1), retryAfter: .milliseconds(50))
+        await thread.load("demo-checkout")
+        try await thread.openPR(PROptions(title: "Fix the flaky checkout test", draft: true, exclude: ["tests/e2e/checkout.spec.ts"]))
+        await eventually("the pull request opens") { thread.root?.pr?.isOpen == true }
+        let note = thread.turns.last?.items.compactMap { if case .note(let n) = $0 { n.text } else { nil } }.last
+        XCTAssertEqual(note, "Opened draft pull request #\(thread.root?.pr?.number ?? 0): left out tests/e2e/checkout.spec.ts")
+        // Pushed once the run that pushed it has finished.
+        await eventually("the push finishes") { thread.latest?.status == .succeeded }
+        XCTAssertFalse(thread.unpushed)
+
+        let coupons = ThreadStore(api: api, liveInterval: .milliseconds(1), retryAfter: .milliseconds(50))
+        await coupons.load("demo-coupons")
+        try await coupons.mergePR(.rebase)
+        XCTAssertEqual(coupons.latest?.kind, .merge)
+        XCTAssertEqual(coupons.latest?.task, "Rebase and merge pull request #131")
+        await eventually("it merges") { coupons.root?.pr?.state == "merged" }
+        do {
+            try await coupons.mergePR(.squash)
+            XCTFail("nothing open to merge")
+        } catch {}
+    }
+
     func testFleetLoadsAndDerives() async {
         let (_, fleet, _, _) = world()
         await fleet.refresh()

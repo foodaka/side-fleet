@@ -65,7 +65,16 @@ public struct API: Sendable {
     public func sendMessage(root: String, body: JSONValue) async throws -> String { (try await post("/v1/runs/\(root)/messages", body) as CreatedRun).id }
     public func fork(run: String, body: JSONValue) async throws -> String { (try await post("/v1/runs/\(run)/fork", body) as CreatedRun).id }
     public func restore(run: String) async throws -> String { (try await post("/v1/runs/\(run)/restore") as CreatedRun).id }
-    public func openPR(root: String) async throws -> String { (try await post("/v1/runs/\(root)/pr") as CreatedRun).id }
+    public func openPR(root: String, options: PROptions = PROptions()) async throws -> String { (try await post("/v1/runs/\(root)/pr", options.json) as CreatedRun).id }
+    public func mergePR(root: String, method: MergeMethod) async throws -> String {
+        (try await post("/v1/runs/\(root)/pr/merge", ["method": .string(method.rawValue)]) as CreatedRun).id
+    }
+    /// The Pull requests screen: what your machines found on GitHub.
+    public func pullRequests() async throws -> PullRequestsPage { try await get("/v1/pull-requests") }
+    /// Ask your machines to look on GitHub again.
+    public func refreshPullRequests() async throws { try await call("POST", "/v1/pull-requests/refresh") }
+    /// Have the machine look at the thread's open pull request again on its next heartbeat.
+    public func checkPR(root: String) async throws { try await call("POST", "/v1/runs/\(root)/pr/check") }
     public func stop(run: String) async throws { try await call("POST", "/v1/runs/\(run)/stop") }
     public func startNow(run: String) async throws -> Run { try await post("/v1/runs/\(run)/start-now") }
 

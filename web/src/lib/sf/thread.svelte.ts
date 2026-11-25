@@ -1,7 +1,7 @@
 import { api } from './api';
 import { followRun } from './sse';
 import { fleet } from './state.svelte';
-import type { AgentId, ApprovalStatus, Run, RunEvent } from './types';
+import type { AgentId, ApprovalStatus, MergeMethod, PrOptions, Run, RunEvent } from './types';
 import { agentName } from './format';
 import type { DiffSet } from './diff/parse';
 import type { AttachedPayload } from './attach.svelte';
@@ -255,12 +255,22 @@ export class Thread {
 	}
 
 	/** Push the branch and open a pull request for it (or update the open one). */
-	async openPr() {
-		await this.#action(`/v1/runs/${this.root!.id}/pr`);
+	async openPr(opts?: PrOptions) {
+		await this.#action(`/v1/runs/${this.root!.id}/pr`, opts);
 	}
 
-	async #action(path: string) {
-		const r = await api<{ id: string }>(path, { method: 'POST' });
+	/** Merge the open pull request on GitHub, from the thread's machine. */
+	async mergePr(method: MergeMethod) {
+		await this.#action(`/v1/runs/${this.root!.id}/pr/merge`, { method });
+	}
+
+	/** Have the machine look at the pull request again now rather than in a few minutes. */
+	async checkPr() {
+		await api(`/v1/runs/${this.root!.id}/pr/check`, { method: 'POST' });
+	}
+
+	async #action(path: string, body?: object) {
+		const r = await api<{ id: string }>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined });
 		const run = await api<Run>(`/v1/runs/${r.id}`);
 		this.runs.push(run);
 		this.turns.push(newTurn(run));
@@ -375,7 +385,7 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 				run.started_at ??= ev.at;
 				run.worker_id = p.worker_id ?? run.worker_id;
 				t.machine = run.worker_id;
-				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : run.kind === 'integrate' ? 'Adding the changes to the room' : run.kind === 'handoff' ? 'Checking the files for secrets and sending them to the fork' : 'Starting ' + agentName(run.agent);
+				t.activity = run.kind === 'restore' ? 'Restoring the files' : run.kind === 'pr' ? 'Pushing the branch and opening a pull request' : run.kind === 'merge' ? 'Merging the pull request' : run.kind === 'integrate' ? 'Adding the changes to the room' : run.kind === 'handoff' ? 'Checking the files for secrets and sending them to the fork' : 'Starting ' + agentName(run.agent);
 			} else {
 				run.finished_at ??= ev.at;
 				t.activity = null;
@@ -494,9 +504,26 @@ function apply(t: Turn, run: Run, ev: RunEvent) {
 			t.items.push({ kind: 'note', key, tone: 'ok', text: 'Restored the files', at: ev.at });
 			t.activity = null;
 			break;
-		case 'pull_request':
-			t.items.push({ kind: 'note', key, tone: 'ok', text: `${p.opened ? 'Opened' : 'Pushed to'} pull request #${p.number}`, href: p.url, at: ev.at });
+		case 'pull_request': {
+			const extra = [
+				p.written ? 'the agent wrote its title and description' : '',
+				p.kept_out?.length ? `left out ${listFiles(p.kept_out)}` : '',
+				p.already_pushed?.length ? `${listFiles(p.already_pushed)} ${p.already_pushed.length === 1 ? 'was' : 'were'} already on the branch, so ${p.already_pushed.length === 1 ? "it's" : "they're"} in it` : ''
+			].filter(Boolean).join('; ');
+			const what = p.opened ? `Opened ${p.draft ? 'draft ' : ''}pull request #${p.number}` : `Pushed to pull request #${p.number}`;
+			t.items.push({ kind: 'note', key, tone: 'ok', text: extra ? `${what}: ${extra}` : what, href: p.url, at: ev.at });
 			t.activity = null;
+			break;
+		}
+		case 'merged': {
+			const how = p.method === 'squash' ? 'Squashed and merged' : p.method === 'rebase' ? 'Rebased and merged' : 'Merged';
+			const left = p.left_behind ? `. ${p.left_behind === 1 ? "1 changed file wasn't in it and stays" : `${p.left_behind} changed files weren't in it and stay`} on the branch` : '';
+			t.items.push({ kind: 'note', key, tone: 'ok', text: `${how} pull request #${p.number}${left}`, href: p.url, at: ev.at });
+			t.activity = null;
+			break;
+		}
+		case 'activity':
+			if (typeof p.text === 'string') t.activity = p.text;
 			break;
 		case 'diff':
 			if (p.turn) t.diff = { turn: p.turn, total: p.total ?? null };
@@ -552,4 +579,10 @@ function tokenCount(u: Record<string, any> | null | undefined): number | null {
 	if (!u) return null;
 	const n = (Number(u.input) || 0) + (Number(u.output) || 0);
 	return n || null;
+}
+
+/** A few file names, then how many more. */
+function listFiles(paths: string[]): string {
+	const names = paths.slice(0, 3).join(', ');
+	return paths.length > 3 ? `${names} and ${paths.length - 3} more` : names;
 }

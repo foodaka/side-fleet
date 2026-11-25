@@ -52,7 +52,8 @@
 	} = $props();
 	const run = $derived(turn.run);
 	const isRestore = $derived(run.kind === 'restore');
-	const isPr = $derived(run.kind === 'pr');
+	/** Opening, pushing to or merging the thread's pull request. */
+	const isPr = $derived(run.kind === 'pr' || run.kind === 'merge');
 	/** Sending this thread's files to a fork on another machine (`context` is the fork). */
 	const isHandoff = $derived(run.kind === 'handoff');
 	/** The fork's first message, from the handoff's task text ("Send the files to a fork: …"). */
@@ -154,7 +155,7 @@
 			{#if run.context}<a href="#/runs/{run.context}" class="max-w-[18rem] truncate text-foreground/80 underline decoration-dotted underline-offset-2 hover:text-foreground">{handoffFork}</a>{/if}
 		</p>
 	{:else if isRestore || isPr}
-		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">{#if isPr}<GitPullRequest class="size-3" />{:else}<RotateCcw class="size-3" />{/if}{run.task}</p>
+		<p class="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">{#if run.kind === 'merge'}<GitMerge class="size-3" />{:else if isPr}<GitPullRequest class="size-3" />{:else}<RotateCcw class="size-3" />{/if}{run.task}</p>
 	{:else if !first}
 		<Message from="user">
 			<MessageContent class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap text-primary-foreground group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground">{run.task}</MessageContent>

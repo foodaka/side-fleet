@@ -304,6 +304,7 @@ struct SidebarView: View {
         VStack(spacing: 2) {
             Divider().padding(.bottom, 8).padding(.horizontal, -12)
             NavRow(title: "Overview", symbol: "square.grid.2x2", active: stores.route == .overview) { stores.route = .overview }
+            NavRow(title: "Pull requests", symbol: "arrow.triangle.pull", active: stores.route == .pullRequests) { stores.route = .pullRequests }
             NavRow(title: "Machines", symbol: "server.rack", active: stores.route == .machines) { stores.route = .machines } trailing: { machineStatus }
             NavRow(title: "Rooms", symbol: "shippingbox", active: inRooms) { stores.route = .rooms }
             if fleet.me?.user != nil {

@@ -15,10 +15,10 @@ for mode in --light --dark; do
   kill "$watchdog" 2>/dev/null || true
 done
 ls "$out"
-# Fifteen stops in two appearances. Without this, a tour that saves nothing still passes.
+# Eighteen stops in two appearances. Without this, a tour that saves nothing still passes.
 count="$(find "$out" -name '*.png' | wc -l | tr -d ' ')"
-if [ "$count" -ne 30 ]; then
-  echo "expected 30 screenshots, got $count" >&2
+if [ "$count" -ne 36 ]; then
+  echo "expected 36 screenshots, got $count" >&2
   exit 1
 fi
 # A locked or sleeping screen captures as the same blank image every time.

@@ -72,6 +72,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}/restore", post(restore_run))
         .route("/v1/runs/{id}/fork", post(fork_run))
         .route("/v1/runs/{id}/pr", post(open_pr))
+        .route("/v1/runs/{id}/pr/check", post(check_pr))
+        .route("/v1/runs/{id}/pr/merge", post(merge_pr))
+        .route("/v1/pull-requests", get(pull_requests))
+        .route("/v1/pull-requests/refresh", post(refresh_pull_requests))
         .route("/v1/runs/{id}/archive", post(archive_run))
         .route("/v1/runs/{id}/snooze", post(snooze_run))
         .route("/v1/runs/{id}/pin", post(pin_run))
@@ -128,6 +132,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/files/{id}", get(worker_get_file))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
         .route("/v1/worker/prs", post(report_prs))
+        .route("/v1/worker/pull-requests", post(report_authored_prs))
         // Workers gzip what they post (see HeartbeatResponse::accepts_gzip): smaller, and a
         // firewall in front of the server can't mistake agent output for an attack. Inside the
         // token check, and the body limits above count the decompressed bytes.
@@ -611,25 +616,98 @@ async fn restore_run(
 }
 
 /// Push the thread's branch and open a pull request for it (or update the open one).
+/// The body, all optional: `{title, body, write, draft, exclude}`.
 async fn open_pr(
     State(state): State<AppState>,
     Extension(caller): Extension<Caller>,
     Path(id): Path<Uuid>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    let opts: db::PrOptions = if body.iter().all(u8::is_ascii_whitespace) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("bad pull request options: {e}")))?
+    };
+    let too_long = |s: &Option<String>, n: usize| s.as_ref().is_some_and(|s| s.chars().count() > n);
+    if too_long(&opts.title, 300) || too_long(&opts.body, 20_000) || opts.exclude.len() > 1000 || opts.exclude.iter().any(|p| p.is_empty() || p.len() > 1024 || p.contains('\0')) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad pull request options: the title, description or file list is too long".into()));
+    }
     own_thread(&state, &caller, id).await?;
     check_run_limit(&state, &caller).await?;
-    match db::create_pr_run(&state.pool, caller.org_id(), id, caller.user_id()).await? {
+    match db::create_pr_run(&state.pool, caller.org_id(), id, caller.user_id(), &opts).await? {
         PrOutcome::Created(run, ev) => {
             tag_run(&state, &caller, run.id).await?;
             state.events.publish(ev);
             tracing::info!(run_id = %run.id, thread = %id, "pull request queued");
             Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
         }
-        PrOutcome::NotFound => Err(not_found()),
-        PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into())),
-        PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch of its own to open a pull request from".into())),
-        PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
+        other => Err(branch_run_error(other, "open a pull request from")),
     }
+}
+
+/// Merge the thread's open pull request on GitHub, from its machine. `{method}`: `squash`, `merge` or `rebase`.
+async fn merge_pr(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<MergeBody>,
+) -> Result<(StatusCode, Json<CreateRunResponse>), ApiError> {
+    if !matches!(req.method.as_str(), "squash" | "merge" | "rebase") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "method is squash, merge or rebase".into()));
+    }
+    own_thread(&state, &caller, id).await?;
+    check_run_limit(&state, &caller).await?;
+    match db::create_merge_run(&state.pool, caller.org_id(), id, caller.user_id(), &req.method).await? {
+        PrOutcome::Created(run, ev) => {
+            tag_run(&state, &caller, run.id).await?;
+            state.events.publish(ev);
+            tracing::info!(run_id = %run.id, thread = %id, method = %req.method, "merge queued");
+            Ok((StatusCode::ACCEPTED, Json(CreateRunResponse { id: run.id, status: run.status })))
+        }
+        other => Err(branch_run_error(other, "merge")),
+    }
+}
+
+#[derive(Deserialize)]
+struct MergeBody {
+    method: String,
+}
+
+/// Why a run on a thread's branch wasn't queued. `what` finishes "no branch of its own to …".
+fn branch_run_error(outcome: PrOutcome, what: &str) -> ApiError {
+    match outcome {
+        PrOutcome::Created(..) | PrOutcome::NotFound => not_found(),
+        PrOutcome::Busy(_) => ApiError(StatusCode::CONFLICT, "the thread is still running; wait for it to finish or stop it".into()),
+        PrOutcome::InPlace => ApiError(StatusCode::CONFLICT, format!("this task ran in the checkout itself, so it has no branch of its own to {what}")),
+        PrOutcome::NoMachine => ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into()),
+        PrOutcome::TooOld(why) => ApiError(StatusCode::CONFLICT, why),
+        PrOutcome::NoOpenPr => ApiError(StatusCode::CONFLICT, "this thread has no open pull request".into()),
+    }
+}
+
+/// The Pull requests page: what your machines found on GitHub, and how recently.
+async fn pull_requests(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(db::pull_requests(&state.pool, caller.org_id(), caller.user_id()).await?))
+}
+
+/// Ask your machines to look on GitHub again; they do on their next heartbeat.
+async fn refresh_pull_requests(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> Result<StatusCode, ApiError> {
+    db::want_prs(&state.pool, caller.org_id(), caller.user_id()).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Ask the machine that opened the thread's pull request to look at it again on its next
+/// heartbeat, rather than when it's next due. Asking again within half a minute does nothing.
+async fn check_pr(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let root = own_thread(&state, &caller, id).await?;
+    if !db::check_pr_soon(&state.pool, caller.org_id(), root.id).await? {
+        return Err(ApiError(StatusCode::CONFLICT, "this thread has no open pull request to check".into()));
+    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Merge a room task's branch into the room's branch, on the machine with its worktree.
@@ -657,6 +735,7 @@ async fn integrate_run(
         PrOutcome::Busy(_) => Err(ApiError(StatusCode::CONFLICT, "the task is still running; wait for it to finish or stop it".into())),
         PrOutcome::InPlace => Err(ApiError(StatusCode::CONFLICT, "this task ran in the checkout itself, so it has no branch to merge".into())),
         PrOutcome::NoMachine => Err(ApiError(StatusCode::CONFLICT, "no machine has run this task yet".into())),
+        other => Err(branch_run_error(other, "merge")),
     }
 }
 
@@ -1403,6 +1482,7 @@ async fn heartbeat(
             },
             finished_runs: db::finished_runs(&state.pool, &auth.orgs, &req.id, &req.active_runs).await?,
             accepts_gzip: true,
+            list_pull_requests: db::list_prs_due(&state.pool, &auth.orgs, &req.id).await?,
         }))
     } else {
         // Unknown worker (e.g. control plane restarted with a fresh DB): tell it to re-register.
@@ -1473,9 +1553,43 @@ async fn report_prs(
     if req.prs.len() > 100 || req.prs.iter().any(|r| !matches!(r.pr.state.as_str(), "open" | "merged" | "closed") || !r.pr.url.starts_with("https://")) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad pull request report".into()));
     }
+    let prs: Vec<_> = req.prs.into_iter().map(|r| sidefleet_core::PrReport { thread: r.thread, pr: r.pr.cleaned() }).collect();
     for org in &auth.orgs {
-        db::record_prs(&state.pool, *org, &req.worker_id, &req.prs).await?;
+        db::record_prs(&state.pool, *org, &req.worker_id, &prs).await?;
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// What a machine found for the Pull requests page. Links that aren't `https` and
+/// overlong text are cut; a few hundred pull requests is plenty.
+async fn report_authored_prs(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Json(req): Json<sidefleet_core::AuthoredPrsReport>,
+) -> Result<StatusCode, ApiError> {
+    if !db::worker_owns_token(&state.pool, auth.org, &req.worker_id, &auth.token_hash).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "worker not registered".into()));
+    }
+    let cut = |s: String, n: usize| s.chars().take(n).collect::<String>();
+    let prs: Vec<_> = req
+        .prs
+        .into_iter()
+        .filter(|p| p.url.starts_with("https://") && matches!(p.state.as_str(), "open" | "merged" | "closed"))
+        .take(1200)
+        .map(|mut p| {
+            p.title = cut(p.title, 300);
+            p.repo = cut(p.repo, 200);
+            p.head = cut(p.head, 255);
+            p.base = cut(p.base, 255);
+            p.author = cut(p.author, 100);
+            let cleaned = sidefleet_core::PullRequest { url: String::new(), number: 0, state: String::new(), review: p.review.take(), checks: p.checks.take(), ..Default::default() }.cleaned();
+            p.review = cleaned.review;
+            p.checks = cleaned.checks;
+            p
+        })
+        .collect();
+    let error = req.error.map(|e| cut(sidefleet_core::redact::redact(&e), 500));
+    db::record_authored_prs(&state.pool, &auth.orgs, &req.worker_id, &prs, error.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

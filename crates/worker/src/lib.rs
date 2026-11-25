@@ -13,6 +13,7 @@ pub mod diff;
 pub mod handoff;
 pub mod integrate;
 pub mod pr;
+pub mod pr_text;
 pub mod setup;
 pub mod snapshot;
 pub mod updater;

@@ -145,6 +145,8 @@ private struct MainView: View {
                     OverviewScreen()
                 case .machines:
                     MachinesScreen()
+                case .pullRequests:
+                    PullRequestsScreen()
                 case .rooms:
                     RoomsScreen()
                 case .room(let id):
@@ -180,6 +182,7 @@ private struct MainView: View {
         case .newTask: "New task"
         case .overview: "Overview"
         case .machines: "Machines"
+        case .pullRequests: "Pull requests"
         case .rooms, .room: "Rooms"
         case .team: "Team"
         case .chatApps: "Chat apps"

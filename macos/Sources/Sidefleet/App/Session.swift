@@ -8,6 +8,7 @@ enum Route: Hashable {
     case newTask
     case overview
     case machines
+    case pullRequests
     case rooms
     case room(String)
     case team
@@ -49,6 +50,8 @@ final class Stores {
     @ObservationIgnored var onSignOut: (@MainActor () -> Void)?
     /// A thread whose screen should open its fork sheet (asked from the sidebar).
     var forkThread: String?
+    /// A thread whose screen should open its pull request sheet (the screenshot tour asks).
+    var prSheetThread: String?
     /// The app is in front, so what's on screen counts as seen.
     private(set) var appActive = true
 
@@ -62,6 +65,7 @@ final class Stores {
         inbox = InboxStore(api: api)
         newTask = NewTaskModel(fleet: fleet, prefs: prefs)
         rooms = RoomsStore(fleet: fleet)
+        pullRequests = PullRequestsStore(api: api)
         team = TeamStore(fleet: fleet)
         chatApps = ChatAppsStore(fleet: fleet)
         self.controlURL = controlURL
@@ -146,6 +150,7 @@ final class Stores {
     func switchOrg(_ id: String, to next: Route = .newTask) {
         route = next
         rooms.reset()
+        pullRequests.reset()
         team.reset()
         chatApps.reset()
         fleet.switchOrg(id)
@@ -156,6 +161,7 @@ final class Stores {
 
     /// The list of rooms outlives the screen, so coming back to it shows what was there.
     let rooms: RoomsStore
+    let pullRequests: PullRequestsStore
     let team: TeamStore
     let chatApps: ChatAppsStore
 }

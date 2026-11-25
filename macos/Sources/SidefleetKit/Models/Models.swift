@@ -60,12 +60,31 @@ public struct ImageRef: Sendable, Hashable, Decodable, Identifiable {
 public struct PullRequest: Sendable, Hashable, Decodable {
     public var url: String
     public var number: Int
+    /// `open`, `merged` or `closed`.
     public var state: String
+    // What its machine saw when it last looked; older machines report none of these.
+    public var title: String?
+    /// The branch it merges into.
+    public var base: String?
+    public var draft: Bool
+    /// `approved`, `changes_requested` or `review_required`; nil when the repo asks for no review.
+    public var review: String?
+    /// GitHub can't merge it cleanly into `base`.
+    public var conflicts: Bool
+    /// The checks on its last commit; nil when it has none.
+    public var checks: PRChecks?
 
-    public init(url: String, number: Int, state: String) {
+    public init(url: String, number: Int, state: String, title: String? = nil, base: String? = nil, draft: Bool = false,
+                review: String? = nil, conflicts: Bool = false, checks: PRChecks? = nil) {
         self.url = url
         self.number = number
         self.state = state
+        self.title = title
+        self.base = base
+        self.draft = draft
+        self.review = review
+        self.conflicts = conflicts
+        self.checks = checks
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,11 +92,121 @@ public struct PullRequest: Sendable, Hashable, Decodable {
         url = f.str("url")
         number = f.int("number")
         state = f.opt("state") ?? "open"
+        title = f.opt("title")
+        base = f.opt("base")
+        draft = f.bool("draft")
+        review = f.opt("review")
+        conflicts = f.bool("conflicts")
+        checks = f.opt("checks")
+    }
+
+    public var isOpen: Bool { state == "open" }
+
+    /// The state as a word: Open, Draft, Merged or Closed.
+    public var stateLabel: String {
+        switch state {
+        case "merged": "Merged"
+        case "closed": "Closed"
+        default: draft ? "Draft" : "Open"
+        }
+    }
+}
+
+/// A pull request's checks, counted, with the first few that failed by name.
+public struct PRChecks: Sendable, Hashable, Decodable {
+    public struct Failed: Sendable, Hashable, Decodable {
+        public var name: String
+        public var url: String?
+        public init(name: String, url: String? = nil) {
+            self.name = name
+            self.url = url
+        }
+    }
+
+    public var passed: Int
+    public var failed: Int
+    public var pending: Int
+    public var failing: [Failed]
+
+    public init(passed: Int, failed: Int, pending: Int, failing: [Failed] = []) {
+        self.passed = passed
+        self.failed = failed
+        self.pending = pending
+        self.failing = failing
+    }
+
+    public init(from decoder: Decoder) throws {
+        let f = try Fields(decoder)
+        passed = f.int("passed")
+        failed = f.int("failed")
+        pending = f.int("pending")
+        failing = f.opt("failing") ?? []
+    }
+
+    public var total: Int { passed + failed + pending }
+
+    /// One line on how they went, as the thread says it.
+    public var summary: String {
+        let s = total == 1 ? "" : "s"
+        if failed > 0 {
+            let names = failing.map(\.name).joined(separator: ", ")
+            return "\(failed) of \(total) check\(s) failed" + (names.isEmpty ? "" : ": \(names)") + (pending > 0 ? " · \(pending) still running" : "")
+        }
+        if pending > 0 { return "\(pending) of \(total) check\(s) still running" }
+        return total == 1 ? "The check passed" : "All \(total) checks passed"
     }
 }
 
 public enum RunKind: String, Sendable, Hashable {
-    case agent, restore, pr, integrate
+    case agent, restore, pr, merge, integrate
+}
+
+/// How a pull request is merged: `POST /v1/runs/:root/pr/merge {method}`.
+public enum MergeMethod: String, Sendable, Hashable, CaseIterable {
+    case squash, merge, rebase
+
+    /// As the menu says it.
+    public var title: String {
+        switch self {
+        case .squash: "Squash and merge"
+        case .merge: "Create a merge commit"
+        case .rebase: "Rebase and merge"
+        }
+    }
+
+    /// As the confirmation says it: "Confirm squash and merge".
+    public var verb: String {
+        switch self {
+        case .squash: "squash and merge"
+        case .merge: "merge"
+        case .rebase: "rebase and merge"
+        }
+    }
+}
+
+/// What `POST /v1/runs/:root/pr` can ask for; everything optional.
+public struct PROptions: Sendable, Hashable {
+    public var title: String?
+    public var body: String?
+    public var draft = false
+    /// Changed files to leave out of the commit; they stay in the worktree.
+    public var exclude: [String] = []
+
+    public init(title: String? = nil, body: String? = nil, draft: Bool = false, exclude: [String] = []) {
+        self.title = title
+        self.body = body
+        self.draft = draft
+        self.exclude = exclude
+    }
+
+    var json: JSONValue? {
+        var o: [String: JSONValue] = [:]
+        if let t = title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { o["title"] = .string(t) }
+        if let b = body?.trimmingCharacters(in: .whitespacesAndNewlines), !b.isEmpty { o["body"] = .string(b) }
+        if draft { o["draft"] = .bool(true) }
+        if !exclude.isEmpty { o["exclude"] = .array(exclude.map { .string($0) }) }
+        return o.isEmpty ? nil : .object(o)
+    }
 }
 
 public struct Run: Sendable, Hashable, Decodable, Identifiable {
@@ -325,6 +454,9 @@ public struct Capabilities: Sendable, Hashable, Decodable {
     public var slots: Slots?
     /// This worker's build answers Clean up.
     public var canCleanWorktrees: Bool
+    /// This worker's build leaves files out of a pull request, has the agent write it, merges it,
+    /// and lists pull requests for the Pull requests screen.
+    public var canManagePRs: Bool
 
     public init(from decoder: Decoder) throws {
         let f = try Fields(decoder)
@@ -336,6 +468,7 @@ public struct Capabilities: Sendable, Hashable, Decodable {
         system = f.opt("system")
         slots = f.opt("slots")
         canCleanWorktrees = f.bool("can_clean_worktrees")
+        canManagePRs = f.bool("can_manage_prs")
     }
 }
 

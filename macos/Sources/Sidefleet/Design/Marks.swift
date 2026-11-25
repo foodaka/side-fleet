@@ -101,13 +101,14 @@ private struct AgentShape: Shape {
 /// A pull request's state as GitHub draws it: open, merged or closed.
 struct PRIcon: View {
     var state: String
+    var draft = false
     var size: CGFloat = 11
 
     var body: some View {
-        Image(systemName: state == "merged" ? "arrow.triangle.merge" : state == "closed" ? "xmark.circle" : "arrow.triangle.pull")
+        Image(systemName: state == "merged" ? "arrow.triangle.merge" : state == "closed" ? "xmark.circle" : draft ? "circle.dashed" : "arrow.triangle.pull")
             .font(.system(size: size, weight: .medium))
-            .foregroundStyle(state == "merged" ? SF.merged : state == "closed" ? SF.errInk : SF.okInk)
-            .accessibilityLabel("Pull request \(state)")
+            .foregroundStyle(state == "merged" ? SF.merged : state == "closed" ? SF.errInk : draft ? SF.muted : SF.okInk)
+            .accessibilityLabel("Pull request \(draft && state == "open" ? "draft" : state)")
     }
 }
 

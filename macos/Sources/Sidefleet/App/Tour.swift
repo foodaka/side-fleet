@@ -26,6 +26,11 @@ enum Tour {
                 ("thread-live", .thread("demo-guide")),
                 ("thread-failed", .thread("demo-stripe")),
                 ("thread-scheduled", .thread("demo-audit")),
+                // An open pull request: a failed check, changes requested, a conflict.
+                ("thread-pr", .thread("demo-coupons")),
+                // The sheet that picks the files and the title before a pull request opens.
+                ("pr-sheet", .thread("demo-checkout")),
+                ("pull-requests", .pullRequests),
                 // The sidebar By project, then the icon picker over it.
                 ("sidebar-projects", .overview),
                 ("machines", .machines),
@@ -38,8 +43,16 @@ enum Tour {
             try? await Task.sleep(for: .seconds(2))
             for (name, route) in stops {
                 if name == "sidebar-projects" { stores.fleet.projects.setView(.project) }
+                if name == "pr-sheet" { stores.prSheetThread = "demo-checkout" }
                 stores.route = route
                 try? await Task.sleep(for: .seconds(name == "sidebar-projects" ? 3.5 : 2.5))
+                if name == "pr-sheet" {
+                    captureSheet(folder.appendingPathComponent("\(name)-\(suffix).png"))
+                    // Close it: the next stop is another screen.
+                    if let w = mainWindow, let sheet = w.attachedSheet { w.endSheet(sheet) }
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
                 capture(folder.appendingPathComponent("\(name)-\(suffix).png"))
                 if name == "new-task" {
                     // The menu of skills a slash opens.

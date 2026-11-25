@@ -22,6 +22,11 @@ struct TurnList: View {
     var onOpenDiff: (String?, String?) -> Void
     var onFork: (Turn) -> Void
     var onOpenPR: () -> Void
+    var onCheckPR: () -> Void
+    var onAsk: (String) -> Void
+    var onMergePR: (MergeMethod) -> Void = { _ in }
+    /// The thread's machine runs a Sidefleet that can merge from here.
+    var canManagePRs = false
     var onSendNow: () -> Void
     @Environment(Stores.self) private var stores
     @State private var pinned = true
@@ -113,53 +118,18 @@ struct TurnList: View {
         .onDisappear { pinned = false }
     }
 
-    /// The dashed note at the end, saying where the work is and what to do with it.
+    /// The pull request section at the end: where the work is, what GitHub says about it and what to do next.
     @ViewBuilder private var closingNote: some View {
-        if !thread.live, !thread.turns.isEmpty, let branch = thread.branch, (thread.changes?.fileCount ?? 0) > 0 || pr != nil {
-            HStack(spacing: 12) {
-                closingText(branch: branch)
-                    .font(SF.font(12))
-                    .lineSpacing(3)
-                    .foregroundStyle(SF.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                if pr?.state != "merged", !theirs {
-                    let pushing = pr?.state == "open"
-                    Group {
-                        if pushing {
-                            prButton(label: opening ? "Starting…" : "Push changes", branch: branch).buttonStyle(SecondaryButtonStyle())
-                        } else {
-                            prButton(label: opening ? "Starting…" : "Open pull request", branch: branch).buttonStyle(PrimaryButtonStyle())
-                        }
-                    }
-                    .disabled(opening || !machineOnline)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(SF.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-            .padding(.top, 28)
-        }
-    }
-
-    private func prButton(label: String, branch: String) -> some View {
-        Button(action: onOpenPR) {
-            Label(label, systemImage: "arrow.triangle.pull")
-        }
-        .help(machineOnline ? "Commits what's left, pushes \(branch) to origin and opens a pull request with the GitHub CLI on \(thread.machine ?? "that machine")" : "\(thread.machine ?? "That machine") is offline")
-    }
-
-    private func closingText(branch: String) -> Text {
-        let mono = Text(branch).font(SF.mono(12)).foregroundColor(SF.ink.opacity(0.8))
-        let machine = thread.machine ?? "that machine"
-        switch pr?.state {
-        case "merged":
-            return Text("Merged in pull request #\(pr?.number ?? 0). The branch ") + mono + Text(" is still on \(machine).")
-        case "open":
-            return Text("Pull request #\(pr?.number ?? 0) is open for ") + mono + Text(". Keep working here, then push the new changes to it.")
-        default:
-            let closed = pr?.state == "closed" ? " Pull request #\(pr?.number ?? 0) was closed." : ""
-            return Text("The changes are on branch ") + mono + Text(" in \(Format.repoLabel(thread.root?.repo)) on \(machine).\(closed) Open a pull request, or review, merge or push it from there.")
+        let pushing = thread.live && thread.current?.kind == .pr
+        let merging = thread.live && thread.current?.kind == .merge
+        if !thread.turns.isEmpty, let branch = thread.branch, (thread.changes?.fileCount ?? 0) > 0 || pr != nil, !thread.live || pr != nil || pushing {
+            PRSection(
+                pr: pr, branch: branch, repo: Format.repoLabel(thread.root?.repo), machine: thread.machine ?? "its machine",
+                machineOnline: machineOnline, theirs: theirs, busy: thread.live && !pushing && !merging, pushing: pushing || opening,
+                merging: merging, unpushed: thread.unpushed, canMerge: canManagePRs,
+                changes: thread.changes, onPush: onOpenPR, onCheck: onCheckPR, onReview: { onOpenDiff(nil, nil) }, onAsk: onAsk,
+                onMerge: onMergePR
+            )
         }
     }
 }
@@ -240,9 +210,9 @@ private struct TurnRows: View {
             .padding(.bottom, 8)
         } else if run.kind == .integrate {
             IntegrateLine(run: run).padding(.bottom, 8)
-        } else if run.kind == .restore || run.kind == .pr {
+        } else if run.kind == .restore || run.kind == .pr || run.kind == .merge {
             HStack(spacing: 6) {
-                Image(systemName: run.kind == .pr ? "arrow.triangle.pull" : "arrow.counterclockwise").font(.system(size: 10))
+                Image(systemName: run.kind == .merge ? "arrow.triangle.merge" : run.kind == .pr ? "arrow.triangle.pull" : "arrow.counterclockwise").font(.system(size: 10))
                 Text(run.task)
             }
             .font(SF.font(12))
@@ -343,7 +313,7 @@ private struct TurnRows: View {
     }
 
     @ViewBuilder private var footerActions: some View {
-        if finished, !live, run.kind != .pr, run.kind != .integrate {
+        if finished, !live, run.kind != .pr, run.kind != .merge, run.kind != .integrate {
             HStack(spacing: 4) {
                 Spacer()
                 if !thread.live, !theirs, run.isolation == "worktree", turn.hasSnapshot {

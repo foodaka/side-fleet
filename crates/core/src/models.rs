@@ -154,13 +154,77 @@ pub struct Run {
     pub start_at: Option<DateTime<Utc>>,
 }
 
-/// A GitHub pull request for a thread's branch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A GitHub pull request for a thread's branch. Everything after `state` is what the
+/// machine saw when it last looked; older machines report only the first three.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PullRequest {
     pub url: String,
     pub number: i64,
     /// `open`, `merged` or `closed`.
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The branch it merges into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
+    /// `approved`, `changes_requested` or `review_required`; none when the repo asks for no review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    /// GitHub says it can't merge cleanly into `base`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflicts: bool,
+    /// The checks on its last commit; none when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PrChecks>,
+}
+
+/// A pull request's checks, counted, with the ones that failed by name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrChecks {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+    /// The first few that failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<FailedCheck>,
+}
+
+/// A check that failed on a pull request, and where to read why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FailedCheck {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl PullRequest {
+    /// What the control plane keeps of a machine's report: links that aren't `https`
+    /// are dropped and text is cut short, since the page shows all of it.
+    pub fn cleaned(mut self) -> Self {
+        fn cut(s: &mut String, n: usize) {
+            if let Some((i, _)) = s.char_indices().nth(n) {
+                s.truncate(i);
+            }
+        }
+        for s in [&mut self.title, &mut self.base].into_iter().flatten() {
+            cut(s, 300);
+        }
+        if !matches!(self.review.as_deref(), None | Some("approved" | "changes_requested" | "review_required")) {
+            self.review = None;
+        }
+        if let Some(c) = &mut self.checks {
+            c.failing.truncate(5);
+            for f in &mut c.failing {
+                cut(&mut f.name, 200);
+                if !f.url.as_deref().is_some_and(|u| u.starts_with("https://")) {
+                    f.url = None;
+                }
+            }
+        }
+        self
+    }
 }
 
 /// A thread whose open pull request a worker should look at again.
@@ -181,6 +245,102 @@ pub struct PrReports {
 pub struct PrReport {
     pub thread: Uuid,
     pub pr: PullRequest,
+}
+
+/// What a `pr` run is asked to do. Machines that can manage pull requests get it
+/// as JSON in the run's `context`; older ones get the legacy `title\n\nbody` text.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrRequest {
+    /// The title and description to use; none to write them (or fall back).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Have the thread's agent write the title and description when opening one.
+    #[serde(default)]
+    pub write: bool,
+    /// Open it as a draft.
+    #[serde(default)]
+    pub draft: bool,
+    /// Changed files to leave out of the commit; they stay in the worktree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// From the task, for when nothing better is given or written.
+    #[serde(default)]
+    pub fallback_title: String,
+    #[serde(default)]
+    pub fallback_body: String,
+    /// The thread's messages, oldest first, for whoever writes the description.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
+}
+
+impl PrRequest {
+    /// A `pr` run's context, in either form.
+    pub fn parse(context: &str) -> Self {
+        if context.trim_start().starts_with('{') {
+            if let Ok(r) = serde_json::from_str(context) {
+                return r;
+            }
+        }
+        let (title, body) = context.split_once("\n\n").unwrap_or((context, ""));
+        PrRequest { fallback_title: title.trim().to_string(), fallback_body: body.to_string(), ..Default::default() }
+    }
+
+    /// The legacy context older machines read: the title, a blank line, the body.
+    pub fn legacy_context(&self) -> String {
+        format!("{}\n\n{}", self.title.as_deref().unwrap_or(&self.fallback_title), self.body.as_deref().unwrap_or(&self.fallback_body))
+    }
+}
+
+/// A pull request someone authored, as their machine saw it on GitHub (the Pull requests page).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuthoredPr {
+    pub url: String,
+    pub number: i64,
+    /// `owner/name`.
+    pub repo: String,
+    pub title: String,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub additions: i64,
+    #[serde(default)]
+    pub deletions: i64,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PrChecks>,
+}
+
+/// `POST /v1/worker/pull-requests`: what a machine found when asked to list pull requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthoredPrsReport {
+    pub worker_id: String,
+    pub prs: Vec<AuthoredPr>,
+    /// Why it couldn't look (no `gh`, signed out), when it couldn't at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// How a `merge` run merges the thread's pull request: its `context`, as JSON.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergeRequest {
+    /// `squash`, `merge` or `rebase`.
+    pub method: String,
+    pub url: String,
 }
 
 pub fn default_kind() -> String {
@@ -310,6 +470,11 @@ pub struct Capabilities {
     /// fork that runs on another machine.
     #[serde(default)]
     pub can_hand_off_files: bool,
+    /// This worker's build reads a `pr` run's options (files to leave out, a title
+    /// the agent writes, drafts), runs `merge` runs and lists the pull requests its
+    /// GitHub user authored for the Pull requests page.
+    #[serde(default)]
+    pub can_manage_prs: bool,
 }
 
 /// What the Machines page asks of a machine's worktrees.
@@ -835,6 +1000,10 @@ pub struct HeartbeatResponse {
     /// Worker routes take gzip-compressed bodies (`Content-Encoding: gzip`).
     #[serde(default)]
     pub accepts_gzip: bool,
+    /// The Pull requests page is open: list the pull requests this machine's GitHub
+    /// user authored and report them (`POST /v1/worker/pull-requests`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub list_pull_requests: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

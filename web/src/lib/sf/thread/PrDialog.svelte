@@ -93,9 +93,11 @@
 				Commits the ticked files on <span class="font-mono text-[12px]">{branch}</span> and pushes it with the GitHub CLI on {machine}. Files you untick stay in the worktree, uncommitted.
 			</Dialog.Description>
 		</Dialog.Header>
-		<form class="flex flex-col gap-3" onsubmit={submit}>
+		<form class="flex min-w-0 flex-col gap-3" onsubmit={submit}>
 			{#if files.length}
-				<fieldset class="overflow-hidden rounded-xl border" disabled={!canManage}>
+				<!-- min-w-0: a fieldset is otherwise as wide as its longest unwrapped path, which
+				     widens the dialog's grid column and pushes everything past its edge. -->
+				<fieldset class="min-w-0 overflow-hidden rounded-xl border" disabled={!canManage}>
 					<legend class="sr-only">Files to commit</legend>
 					<div class="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
 						<span class="tnum flex-1">{picked.size} of {files.length} file{files.length === 1 ? '' : 's'}</span>

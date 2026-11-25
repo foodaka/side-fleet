@@ -9,8 +9,10 @@
 
 FROM rust:1-bookworm AS build
 WORKDIR /src
+# Render passes its environment as build args: RENDER_GIT_COMMIT stands in for the commit.
 ARG SIDEFLEET_GIT_SHA=""
-ENV SIDEFLEET_GIT_SHA=${SIDEFLEET_GIT_SHA}
+ARG RENDER_GIT_COMMIT=""
+ENV SIDEFLEET_GIT_SHA=${SIDEFLEET_GIT_SHA:-${RENDER_GIT_COMMIT}}
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

@@ -24,7 +24,26 @@ const BUILD: &str = env!("SIDEFLEET_BUILD");
 
 fn version_string() -> &'static str {
     // e.g. "0.1.0 (2026-10-20 8ec33ec)"
-    Box::leak(format!("{} ({BUILD})", env!("CARGO_PKG_VERSION")).into_boxed_str())
+    Box::leak(format!("{} ({})", env!("CARGO_PKG_VERSION"), build_stamp(BUILD, runtime_commit().as_deref())).into_boxed_str())
+}
+
+/// The commit given to the running process, for builds that couldn't see git: Render
+/// builds the container without .git or our build arg, but sets RENDER_GIT_COMMIT when
+/// it runs it. Without a commit no machine could ever match the control plane's build.
+fn runtime_commit() -> Option<String> {
+    ["SIDEFLEET_GIT_SHA", "RENDER_GIT_COMMIT"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|s| s.trim().chars().take(9).collect::<String>())
+        .find(|s| !s.is_empty())
+}
+
+/// `build` ("<date> <sha>") with an `unknown` commit filled in from `commit`.
+fn build_stamp(build: &str, commit: Option<&str>) -> String {
+    match (build.strip_suffix(" unknown"), commit) {
+        (Some(date), Some(c)) => format!("{date} {c}"),
+        _ => build.to_string(),
+    }
 }
 
 #[derive(Parser)]
@@ -932,4 +951,16 @@ fn disconnect() -> Result<()> {
     println!("{}", uninstall_service()?);
     println!("Settings kept at {}; delete that file to forget the token.", worker_env_path().display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_stamp;
+
+    #[test]
+    fn an_unknown_commit_is_filled_in() {
+        assert_eq!(build_stamp("2026-11-25 unknown", Some("6c37830ab")), "2026-11-25 6c37830ab");
+        assert_eq!(build_stamp("2026-11-25 unknown", None), "2026-11-25 unknown");
+        assert_eq!(build_stamp("2026-11-25 6c37830ab", Some("123456789")), "2026-11-25 6c37830ab");
+    }
 }

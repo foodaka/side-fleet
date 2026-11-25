@@ -237,6 +237,8 @@
 			<span class="flex shrink-0 items-center gap-1.5 text-run-ink"><RefreshCw class="size-3.5 animate-spin [animation-duration:2.5s]" />Updating when idle</span>
 		{:else if w.outdated && w.online}
 			<Button size="sm" variant="outline" class="h-7 shrink-0 rounded-full border-queue/50 text-queue-ink" onclick={update} disabled={requesting}>Update to latest</Button>
+		{:else if w.online && c.version && w.nothing_newer}
+			<button type="button" class="shrink-0 text-muted-foreground hover:text-foreground" onclick={update} disabled={requesting} title="Its last update found nothing newer: it installs releases, and this control plane runs a newer build of main. Click to look again.">Newest release</button>
 		{:else if w.online && c.version}
 			<button type="button" class="shrink-0 text-muted-foreground hover:text-foreground" onclick={update} disabled={requesting}>Up to date</button>
 		{/if}

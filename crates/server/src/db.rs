@@ -69,6 +69,33 @@ pub async fn set_update_requested(pool: &PgPool, org: Uuid, id: &str, value: boo
     Ok(res.rows_affected() == 1)
 }
 
+/// The build machine `id` ran when it last started an update, if it ever did.
+pub async fn updated_from(pool: &PgPool, org: Uuid, id: &str) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar("SELECT updated_from FROM workers WHERE id = $1 AND org_id = $2").bind(id).bind(org).fetch_optional(pool).await.map(Option::flatten)
+}
+
+/// The commit in a build string such as `0.1.0 (2026-11-25 6c37830ab)`, without the `+`
+/// that marks local changes; None when the build doesn't name one.
+fn build_commit(build: &str) -> Option<&str> {
+    let inner = build.rsplit_once('(')?.1.strip_suffix(')')?;
+    let sha = inner.rsplit(' ').next()?.trim_end_matches('+');
+    (sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit())).then_some(sha)
+}
+
+/// Whether a machine on build `worker` is behind the control plane on build `server`.
+/// Builds are compared by commit: the date only says when it was compiled. When either
+/// commit is unknown there is no telling, so it isn't. `updated_from` is the build it ran
+/// when it last updated: still on it, that update found nothing newer to install.
+pub fn is_outdated(worker: &str, server: &str, updated_from: Option<&str>) -> bool {
+    if worker.is_empty() || updated_from == Some(worker) {
+        return false;
+    }
+    match (build_commit(worker), build_commit(server)) {
+        (Some(w), Some(s)) => !(w.starts_with(s) || s.starts_with(w)),
+        _ => false,
+    }
+}
+
 /// Whether someone asked machine `id` to update, from any of the orgs it serves.
 pub async fn update_requested(pool: &PgPool, orgs: &[Uuid], id: &str) -> sqlx::Result<bool> {
     let row = sqlx::query("SELECT bool_or(update_requested) AS u FROM workers WHERE id = $1 AND org_id = ANY($2)").bind(id).bind(orgs).fetch_one(pool).await?;
@@ -2282,4 +2309,34 @@ pub async fn set_added_repos(pool: &PgPool, org: Uuid, names: &[String]) -> sqlx
         .execute(&mut *tx)
         .await?;
     tx.commit().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_outdated;
+
+    const SERVER: &str = "0.1.0 (2026-11-25 6c37830ab)";
+
+    #[test]
+    fn builds_compare_by_commit_not_date() {
+        assert!(!is_outdated("0.1.0 (2026-11-26 6c37830ab)", SERVER, None), "same commit, built another day");
+        assert!(!is_outdated("0.1.0 (2026-11-26 6c37830ab+)", SERVER, None), "same commit with local changes");
+        assert!(is_outdated("0.1.0 (2026-11-11 ebff2862b)", SERVER, None));
+        assert!(!is_outdated("0.1.0 (2026-11-11 6c37830)", SERVER, None), "shorter hash of the same commit");
+    }
+
+    #[test]
+    fn an_unknown_commit_is_not_outdated() {
+        assert!(!is_outdated("0.1.0 (2026-11-11 ebff2862b)", "0.1.0 (2026-11-25 unknown)", None));
+        assert!(!is_outdated("0.1.0 (2026-11-11 unknown)", SERVER, None));
+        assert!(!is_outdated("", SERVER, None));
+        assert!(!is_outdated("0.1.0 (2026-11-11 ebff2862b)", "dev", None));
+    }
+
+    #[test]
+    fn an_update_that_found_nothing_newer_is_not_offered_again() {
+        let release = "0.1.0 (2026-11-11 ebff2862b)";
+        assert!(!is_outdated(release, SERVER, Some(release)));
+        assert!(is_outdated(release, SERVER, Some("0.1.0 (2026-11-06 1234567ab)")), "it moved on, and is still behind");
+    }
 }

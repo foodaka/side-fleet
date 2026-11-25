@@ -221,7 +221,10 @@ export interface Worker {
 	last_heartbeat_at: string;
 	online: boolean;
 	update_requested: boolean;
+	/** Runs another commit than the control plane, and updating could change that. */
 	outdated: boolean;
+	/** Its last update came back on the same build: nothing newer for how it installs (releases, while main is ahead). */
+	nothing_newer?: boolean;
 	/** What it's been asked to do with its worktrees and hasn't reported back on. */
 	worktree_cleanup_pending?: 'preview' | 'remove' | null;
 	/** What the last cleanup did. */

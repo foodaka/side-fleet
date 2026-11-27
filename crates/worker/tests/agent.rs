@@ -35,6 +35,7 @@ fn spec(task: &str) -> AgentSpec {
         images: vec![],
         files: vec![],
         approval: None,
+        policy_hook: None,
     }
 }
 
@@ -344,6 +345,25 @@ async fn opencode_session_error_is_failed() {
     let r = events.iter().find(|e| e.kind == "result").expect("synthesised result");
     assert_eq!(r.payload["is_error"], true);
     assert_eq!(r.payload["result"], "simulated provider error");
+}
+
+#[test]
+fn every_claude_code_tool_call_goes_through_the_policy_hook() {
+    let hook = sidefleet_worker::agent::ApprovalHook {
+        exe: "/opt/sidefleet".into(),
+        socket: "/tmp/sf-ask-1/a.sock".into(),
+        timeout: Duration::from_secs(600),
+    };
+    for mode in ["acceptEdits", "bypassPermissions", "plan", "ask"] {
+        let s = AgentSpec { permission_mode: mode.into(), policy_hook: Some(hook.clone()), ..spec("t") };
+        let args = s.args();
+        let i = args.iter().position(|a| a == "--settings").unwrap_or_else(|| panic!("--settings in {args:?}"));
+        let settings: serde_json::Value = serde_json::from_str(&args[i + 1]).unwrap();
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "'/opt/sidefleet' policy-hook --socket '/tmp/sf-ask-1/a.sock'", "{mode}");
+    }
+    // Codex has no hook to give it.
+    let s = AgentSpec { policy_hook: Some(hook), ..agent_spec(Agent::Codex, "t") };
+    assert!(!s.args().iter().any(|a| a == "--settings"));
 }
 
 #[test]

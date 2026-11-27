@@ -170,6 +170,14 @@ enum Cmd {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Internal: the `PreToolUse` hook Claude Code runs before each tool call, which checks it
+    /// against the org's policies through the worker.
+    #[command(hide = true)]
+    PolicyHook {
+        /// The worker's socket for this run.
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Show the saved worker settings and whether the background service is running.
     Status,
     /// Stop and remove the background service installed by `connect`. Settings are kept.
@@ -314,6 +322,10 @@ async fn main() -> Result<()> {
     if let Cmd::ApprovalMcp { socket } = &cli.cmd {
         return Ok(sidefleet_worker::approval::serve_mcp_stdio(socket)?);
     }
+    // Claude Code reads its answer from stdout and stderr: no logging.
+    if let Cmd::PolicyHook { socket } = &cli.cmd {
+        std::process::exit(sidefleet_worker::approval::serve_hook_stdio(socket));
+    }
     init_logging();
 
     match cli.cmd {
@@ -380,7 +392,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::ApprovalMcp { .. } => unreachable!("handled before logging starts"),
+        Cmd::ApprovalMcp { .. } | Cmd::PolicyHook { .. } => unreachable!("handled before logging starts"),
         Cmd::Status => status(),
         Cmd::Disconnect => disconnect(),
         Cmd::Detect { repos, claude_bin, codex_bin, opencode_bin, skip_sign_in_check, scan_depth } => {

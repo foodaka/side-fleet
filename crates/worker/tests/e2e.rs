@@ -968,6 +968,50 @@ async fn ask_me_waits_for_approval_on_the_page() {
     h.teardown().await;
 }
 
+/// The org's policies at the tool-call boundary: the worker asks the control plane about
+/// each call its hook passes on. An allowed call runs, a denied one never does, and one a
+/// policy holds waits until someone approves it on the Approvals page.
+#[tokio::test]
+async fn policies_decide_each_tool_call_before_it_runs() {
+    let h = Harness::start(1).await;
+    let id = h.create("policy check", "demo").await;
+    let mut held = None;
+    for _ in 0..100 {
+        let v: serde_json::Value = h.dev_get("/v1/approvals?status=pending").await;
+        if let Some(a) = v["approvals"].as_array().and_then(|l| l.first()).cloned() {
+            held = Some(a);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let held = held.expect("the psql call was held for approval");
+    assert_eq!(held["kind"], "policy");
+    assert_eq!(held["policy"]["name"], "Production data access");
+    assert_eq!(held["runtime"], "Claude Code on Test Worker");
+    // Nothing runs while it waits.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(h.dev_get::<Run>(&format!("/v1/runs/{id}")).await.status, RunStatus::Running);
+    let r = h.http.post(format!("{}/v1/approvals/{}/approve", h.env.base_url, held["id"].as_str().unwrap())).bearer_auth(DEV_KEY).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    h.wait_status(id, RunStatus::Succeeded, Duration::from_secs(15)).await;
+
+    let events = h.sse_collect(id, Duration::from_secs(5)).await;
+    let result = |tu: &str| events.iter().find(|(e, _)| e.kind == "tool_result" && e.payload["tool_use_id"] == tu).unwrap_or_else(|| panic!("{tu}")).0.payload.clone();
+    assert_eq!(result("tu_p1")["content"], "ran (defer)", "allowed: Claude Code's own mode decides");
+    assert_eq!(result("tu_p2")["is_error"], true);
+    assert!(result("tu_p2")["content"].as_str().unwrap().contains("Push to protected branches"));
+    assert_eq!(result("tu_p3")["content"], "ran (allow)", "approved for exactly this call");
+    let started = events.iter().find(|(e, _)| e.kind == "started").unwrap();
+    assert!(started.0.payload["command"].as_str().unwrap().contains("policy-hook --socket"), "{}", started.0.payload);
+
+    let act: serde_json::Value = h.dev_get("/v1/activity").await;
+    let outcomes: Vec<&str> = act["events"].as_array().unwrap().iter().map(|e| e["outcome"].as_str().unwrap()).collect();
+    for want in ["started", "allowed", "denied", "approval_required", "approved", "succeeded"] {
+        assert!(outcomes.contains(&want), "{want} in {outcomes:?}");
+    }
+    h.teardown().await;
+}
+
 #[tokio::test]
 async fn an_idle_worker_starts_a_new_task_at_once() {
     let env = TestEnv::start().await;

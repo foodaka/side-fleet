@@ -11,6 +11,13 @@
 //! question goes over a Unix socket to the worker that started the agent ([`Bridge`]),
 //! which asks the control plane ([`ask_page`]) and waits for someone to decide or
 //! for the time to run out (then it denies).
+//!
+//! The same socket carries the org's policies: every Claude Code run gets a `PreToolUse`
+//! hook (`sidefleet policy-hook --socket <path>`, see [`hook_settings`]) that asks the
+//! worker about each tool call before it runs. The worker checks it with the control
+//! plane ([`check_policy`]): denied calls never run, calls a policy holds wait for an
+//! approval, and allowed calls go on to Claude Code's own permission mode. When the
+//! control plane can't be asked, only reads and the agent's own bookkeeping go ahead.
 
 use std::future::Future;
 use std::io::{BufRead, Write};
@@ -20,7 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sidefleet_core::{redact_tool_input, ApprovalRequest, ApprovalStatus};
+use sidefleet_core::policy::{action_digest, classify, unprotected, Decision as Verdict};
+use sidefleet_core::{redact_tool_input, Approval, ApprovalRequest, ApprovalStatus};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -35,20 +43,28 @@ pub const PROMPT_TOOL: &str = "mcp__sidefleet__approve";
 const MAX_INPUT_STRING_BYTES: usize = 4096;
 
 /// What Claude Code asks: may this tool call go ahead?
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ask {
     pub tool_name: String,
     #[serde(default)]
     pub input: Value,
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// `policy` from the `PreToolUse` hook; absent for "Ask me" permission prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
+
+/// The `kind` the policy hook sends.
+pub const POLICY_KIND: &str = "policy";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Allow,
     /// Denied; the message is what the agent is told.
     Deny(String),
+    /// The policy check has no objection: Claude Code's own permission mode decides.
+    Defer,
 }
 
 impl Decision {
@@ -58,6 +74,7 @@ impl Decision {
         match self {
             Decision::Allow => json!({"behavior": "allow", "updatedInput": ask.input}),
             Decision::Deny(m) => json!({"behavior": "deny", "message": m}),
+            Decision::Defer => json!({"behavior": "defer"}),
         }
     }
 }
@@ -114,11 +131,7 @@ impl Bridge {
                     }
                     let reply = match serde_json::from_str::<Ask>(&line) {
                         Ok(ask) => decide(ask.clone()).await.reply(&ask),
-                        Err(e) => Decision::Deny(format!("Sidefleet could not read the permission request: {e}")).reply(&Ask {
-                            tool_name: String::new(),
-                            input: Value::Null,
-                            tool_use_id: None,
-                        }),
+                        Err(e) => Decision::Deny(format!("Sidefleet could not read the permission request: {e}")).reply(&Ask::default()),
                     };
                     let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
                 });
@@ -158,6 +171,15 @@ pub async fn ask_page(client: &ControlClient, run_id: Uuid, ask: &Ask, timeout: 
         }
     };
     tracing::info!(%run_id, approval = %approval.id, tool = %ask.tool_name, "waiting for approval on the page");
+    match wait_for(client, run_id, approval.id, timeout, &mut stop).await {
+        Ok(_) => Decision::Allow,
+        Err(d) => d,
+    }
+}
+
+/// Poll an approval until it is decided, its deadline passes or the run stops. Ok is the
+/// approved approval; Err the denial to give the agent.
+async fn wait_for(client: &ControlClient, run_id: Uuid, id: Uuid, timeout: Duration, stop: &mut watch::Receiver<bool>) -> Result<Approval, Decision> {
     // The control plane decides when it expires; the grace covers a slow last poll.
     let deadline = tokio::time::Instant::now() + timeout + Duration::from_secs(5);
     loop {
@@ -165,20 +187,169 @@ pub async fn ask_page(client: &ControlClient, run_id: Uuid, ask: &Ask, timeout: 
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
-                    return Decision::Deny("The run was stopped.".into());
+                    return Err(Decision::Deny("The run was stopped.".into()));
                 }
             }
         }
-        match client.approval(run_id, approval.id).await {
+        match client.approval(run_id, id).await {
             Ok(a) => match a.status {
                 ApprovalStatus::Pending => {}
-                ApprovalStatus::Approved => return Decision::Allow,
-                _ => return Decision::Deny(a.message.unwrap_or_else(|| format!("The tool call was {}.", a.status.as_str()))),
+                ApprovalStatus::Approved => return Ok(a),
+                _ => return Err(Decision::Deny(a.message.unwrap_or_else(|| format!("The tool call was {}.", a.status.as_str())))),
             },
             Err(e) => tracing::debug!(error = %format!("{e:#}"), "approval poll failed"),
         }
         if tokio::time::Instant::now() >= deadline {
-            return Decision::Deny(format!("Nobody approved this tool call within {} minutes, so it was denied.", timeout.as_secs().div_ceil(60)));
+            return Err(Decision::Deny(format!("Nobody approved this tool call within {} minutes, so it was denied.", timeout.as_secs().div_ceil(60))));
+        }
+    }
+}
+
+/// The control plane's answer to a policy check.
+#[derive(Debug, Deserialize)]
+struct PolicyAnswer {
+    decision: Verdict,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    approval: Option<Approval>,
+}
+
+/// What a tool call gets when its policy can't be checked: reads and the agent's own
+/// bookkeeping go ahead (to Claude Code's permission mode), anything else is denied.
+pub fn fail_closed(ask: &Ask, workdir: Option<&str>, why: &str) -> Decision {
+    if unprotected(&classify(&ask.tool_name, &ask.input, workdir)) {
+        Decision::Defer
+    } else {
+        Decision::Deny(format!("Sidefleet could not check this tool call against the org's policies ({why}), so it was denied."))
+    }
+}
+
+/// The execution gateway for one tool call of `run_id`: ask the control plane, and wait
+/// for an approval when a policy holds the call. Fails closed.
+pub async fn check_policy(client: &ControlClient, run_id: Uuid, ask: &Ask, workdir: Option<&str>, timeout: Duration, mut stop: watch::Receiver<bool>) -> Decision {
+    let input = redact_tool_input(&ask.input, MAX_INPUT_STRING_BYTES);
+    let digest = action_digest(&ask.tool_name, &input);
+    let req = json!({
+        "tool_name": ask.tool_name, "input": input, "tool_use_id": ask.tool_use_id,
+        "workdir": workdir, "timeout_secs": timeout.as_secs().max(1),
+    });
+    let mut answer = None;
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        match client.check_policy(run_id, &req).await {
+            Ok(v) => {
+                answer = Some(v);
+                break;
+            }
+            Err(e) => {
+                last_error = format!("{e:#}");
+                tracing::warn!(error = %last_error, %run_id, attempt, "policy check failed");
+                tokio::time::sleep(Duration::from_millis(300 * (attempt + 1))).await;
+            }
+        }
+    }
+    let Some(v) = answer else { return fail_closed(ask, workdir, &last_error) };
+    let a: PolicyAnswer = match serde_json::from_value(v) {
+        Ok(a) => a,
+        Err(e) => return fail_closed(ask, workdir, &format!("unreadable answer: {e}")),
+    };
+    match a.decision {
+        Verdict::Allow => Decision::Defer,
+        Verdict::Deny => Decision::Deny(if a.reason.is_empty() { "A Sidefleet policy denied this tool call.".into() } else { a.reason }),
+        Verdict::RequireApproval => {
+            let Some(held) = a.approval else { return Decision::Deny("A Sidefleet policy needs approval for this call, but no approval was opened.".into()) };
+            tracing::info!(%run_id, approval = %held.id, tool = %ask.tool_name, "a policy holds this tool call for approval");
+            match wait_for(client, run_id, held.id, timeout, &mut stop).await {
+                // Approved for exactly this call, or not at all.
+                Ok(ok) if ok.digest.as_deref() == Some(digest.as_str()) => Decision::Allow,
+                Ok(_) => Decision::Deny("The approval was for a different action, so this call was denied.".into()),
+                Err(d) => d,
+            }
+        }
+    }
+}
+
+// ---- the PreToolUse hook Claude Code runs ----
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The `--settings` that make Claude Code run `<exe> policy-hook --socket <socket>` before
+/// every tool call. `wait` is the longest a call may be held for approval.
+pub fn hook_settings(exe: &Path, socket: &Path, wait: Duration) -> String {
+    let command = format!("{} policy-hook --socket {}", shell_quote(&exe.to_string_lossy()), shell_quote(&socket.to_string_lossy()));
+    json!({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
+        "type": "command", "command": command, "timeout": (wait + Duration::from_secs(60)).as_secs(),
+    }]}]}})
+    .to_string()
+}
+
+/// What the hook tells Claude Code.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookReply {
+    /// Approved on Sidefleet: run it without asking again.
+    Allow(String),
+    /// Blocked; the reason goes to the agent.
+    Deny(String),
+    /// No objection: Claude Code's permission mode decides.
+    Defer,
+}
+
+/// Answer one `PreToolUse` call (its JSON on `input`) by asking the worker on `socket`.
+pub fn run_hook(input: &str, socket: &Path) -> HookReply {
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => return HookReply::Deny(format!("Sidefleet could not read the tool call ({e}), so it was denied.")),
+    };
+    let ask = Ask {
+        tool_name: v.get("tool_name").and_then(Value::as_str).unwrap_or_default().to_string(),
+        input: v.get("tool_input").cloned().unwrap_or(json!({})),
+        tool_use_id: v.get("tool_use_id").and_then(Value::as_str).map(str::to_string),
+        kind: Some(POLICY_KIND.into()),
+    };
+    let cwd = v.get("cwd").and_then(Value::as_str);
+    let asked = (|| -> std::io::Result<Value> {
+        let mut s = std::os::unix::net::UnixStream::connect(socket)?;
+        writeln!(s, "{}", serde_json::to_string(&ask)?)?;
+        let mut line = String::new();
+        std::io::BufReader::new(s).read_line(&mut line)?;
+        Ok(serde_json::from_str(&line)?)
+    })();
+    let reply = match asked {
+        Ok(r) => r,
+        Err(e) => {
+            return match fail_closed(&ask, cwd, &format!("its worker could not be reached: {e}")) {
+                Decision::Deny(m) => HookReply::Deny(m),
+                _ => HookReply::Defer,
+            };
+        }
+    };
+    match reply.get("behavior").and_then(Value::as_str) {
+        Some("allow") => HookReply::Allow("Approved on Sidefleet".into()),
+        Some("defer") => HookReply::Defer,
+        _ => HookReply::Deny(reply.get("message").and_then(Value::as_str).unwrap_or("Sidefleet denied this tool call.").to_string()),
+    }
+}
+
+/// `sidefleet policy-hook --socket <path>`: read the call on stdin, answer as Claude Code's
+/// hooks expect. A block exits 2 with the reason on stderr, which every version honours.
+pub fn serve_hook_stdio(socket: &Path) -> i32 {
+    let mut input = String::new();
+    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        eprintln!("Sidefleet could not read the tool call ({e}), so it was denied.");
+        return 2;
+    }
+    match run_hook(&input, socket) {
+        HookReply::Allow(reason) => {
+            println!("{}", json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": reason}}));
+            0
+        }
+        HookReply::Defer => 0,
+        HookReply::Deny(reason) => {
+            eprintln!("{reason}");
+            2
         }
     }
 }
@@ -275,7 +446,7 @@ mod tests {
 
     #[test]
     fn replies_carry_the_original_input() {
-        let ask = Ask { tool_name: "Bash".into(), input: json!({"command": "echo $SECRET_TOKEN"}), tool_use_id: None };
+        let ask = Ask { tool_name: "Bash".into(), input: json!({"command": "echo $SECRET_TOKEN"}), ..Default::default() };
         assert_eq!(Decision::Allow.reply(&ask), json!({"behavior": "allow", "updatedInput": {"command": "echo $SECRET_TOKEN"}}));
         assert_eq!(Decision::Deny("no".into()).reply(&ask), json!({"behavior": "deny", "message": "no"}));
     }
@@ -339,6 +510,48 @@ mod tests {
 
         drop(bridge);
         assert!(!dir.exists(), "the socket folder is removed with the bridge");
+    }
+
+    #[test]
+    fn the_hook_fails_closed_without_its_worker() {
+        let socket = Path::new("/nonexistent/sf-ask/a.sock");
+        let call = |tool: &str, input: Value| run_hook(&json!({"tool_name": tool, "tool_input": input, "cwd": "/w"}).to_string(), socket);
+        assert_eq!(call("Read", json!({"file_path": "/w/a.rs"})), HookReply::Defer);
+        assert!(matches!(call("Bash", json!({"command": "ls"})), HookReply::Deny(_)));
+        assert!(matches!(call("Write", json!({"file_path": "/w/a.rs"})), HookReply::Deny(_)));
+        assert!(matches!(run_hook("not json", socket), HookReply::Deny(_)));
+    }
+
+    /// The hook's side, over the real socket bridge: each answer maps to what Claude Code expects.
+    #[tokio::test]
+    async fn the_hook_relays_policy_decisions() {
+        let dir = socket_dir(Uuid::new_v4());
+        let bridge = Bridge::start(dir.clone(), move |ask: Ask| async move {
+            assert_eq!(ask.kind.as_deref(), Some(POLICY_KIND));
+            match ask.input["command"].as_str() {
+                Some("git push origin main") => Decision::Deny("Denied by the Sidefleet policy \"Push to protected branches\".".into()),
+                Some("psql") => Decision::Allow,
+                _ => Decision::Defer,
+            }
+        })
+        .unwrap();
+        let socket = bridge.socket.clone();
+        let call = move |cmd: &'static str| {
+            let socket = socket.clone();
+            tokio::task::spawn_blocking(move || run_hook(&json!({"tool_name": "Bash", "tool_input": {"command": cmd}}).to_string(), &socket))
+        };
+        assert_eq!(call("ls").await.unwrap(), HookReply::Defer);
+        assert_eq!(call("psql").await.unwrap(), HookReply::Allow("Approved on Sidefleet".into()));
+        assert!(matches!(call("git push origin main").await.unwrap(), HookReply::Deny(m) if m.contains("Push to protected branches")));
+    }
+
+    #[test]
+    fn hook_settings_run_this_binary_before_every_tool() {
+        let s: Value = serde_json::from_str(&hook_settings(Path::new("/opt/side fleet/sidefleet"), Path::new("/tmp/sf-ask-1/a.sock"), Duration::from_secs(900))).unwrap();
+        let h = &s["hooks"]["PreToolUse"][0];
+        assert_eq!(h["matcher"], "*");
+        assert_eq!(h["hooks"][0]["command"], "'/opt/side fleet/sidefleet' policy-hook --socket '/tmp/sf-ask-1/a.sock'");
+        assert_eq!(h["hooks"][0]["timeout"], 960);
     }
 
     #[test]

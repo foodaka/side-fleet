@@ -904,20 +904,35 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
     let permission_mode = run.permission_mode.clone().unwrap_or_else(|| cfg.permission_mode.clone());
     let stop_rx = stop_tx.subscribe();
 
-    // "Ask me": Claude Code's permission prompts come to us over a socket and go to the page.
+    // Claude Code's tool calls come to us over a socket: each one from the policy hook (the
+    // org's policies, checked with the control plane) and, with "Ask me", its permission
+    // prompts, which go to the page.
     let mut bridge = None;
-    if run.agent == Agent::Claude && permission_mode == ASK_MODE {
-        match start_approvals(client, cfg, run_id, &stop_tx) {
+    if run.agent == Agent::Claude && cfg.approval_exe.is_some() {
+        match start_approvals(client, cfg, run_id, &stop_tx, &cwd) {
             Ok(b) => bridge = Some(b),
             Err(e) => {
-                let msg = format!("could not set up \"Ask me\" ({e:#}); tool calls that need approval are refused, as with Read & edit files");
+                let msg = if permission_mode == ASK_MODE {
+                    format!("could not set up \"Ask me\" or the policy check ({e:#}); only reads go ahead, other tool calls are refused")
+                } else {
+                    format!("could not set up the policy check ({e:#}); only reads go ahead, other tool calls are refused")
+                };
                 tracing::warn!(run_id = %run_id, "{msg}");
                 let _ = client.post_events(run_id, vec![NewEvent { kind: "error".into(), payload: json!({"message": msg}) }]).await;
             }
         }
     }
     let approval = match (&bridge, &cfg.approval_exe) {
-        (Some(b), Some(exe)) => Some(ApprovalHook { exe: exe.clone(), socket: b.socket.clone(), timeout: cfg.approval_timeout }),
+        (Some(b), Some(exe)) if permission_mode == ASK_MODE => Some(ApprovalHook { exe: exe.clone(), socket: b.socket.clone(), timeout: cfg.approval_timeout }),
+        _ => None,
+    };
+    // Without a bridge the hook finds no worker on the socket and fails closed.
+    let policy_hook = match (run.agent, &cfg.approval_exe) {
+        (Agent::Claude, Some(exe)) => Some(ApprovalHook {
+            exe: exe.clone(),
+            socket: bridge.as_ref().map_or_else(|| approval::socket_dir(run_id).join("a.sock"), |b| b.socket.clone()),
+            timeout: cfg.approval_timeout,
+        }),
         _ => None,
     };
 
@@ -942,6 +957,7 @@ async fn execute_run(client: &ControlClient, cfg: &WorkerConfig, run: Run, repo_
         images,
         files,
         approval,
+        policy_hook,
     };
 
     let (event_tx, mut event_rx) = mpsc::channel::<NewEvent>(256);
@@ -1242,12 +1258,19 @@ impl LiveText {
     }
 }
 
-fn start_approvals(client: &ControlClient, cfg: &WorkerConfig, run_id: Uuid, stop: &watch::Sender<bool>) -> Result<Bridge> {
+fn start_approvals(client: &ControlClient, cfg: &WorkerConfig, run_id: Uuid, stop: &watch::Sender<bool>, workdir: &Path) -> Result<Bridge> {
     anyhow::ensure!(cfg.approval_exe.is_some(), "this worker does not know its own executable");
     let (client, timeout, stop) = (client.clone(), cfg.approval_timeout, stop.subscribe());
+    let workdir = workdir.to_string_lossy().to_string();
     let bridge = Bridge::start(approval::socket_dir(run_id), move |ask| {
-        let (client, stop) = (client.clone(), stop.clone());
-        async move { approval::ask_page(&client, run_id, &ask, timeout, stop).await }
+        let (client, stop, workdir) = (client.clone(), stop.clone(), workdir.clone());
+        async move {
+            if ask.kind.as_deref() == Some(approval::POLICY_KIND) {
+                approval::check_policy(&client, run_id, &ask, Some(&workdir), timeout, stop).await
+            } else {
+                approval::ask_page(&client, run_id, &ask, timeout, stop).await
+            }
+        }
     })
     .context("listening for permission prompts")?;
     Ok(bridge)

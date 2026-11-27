@@ -6,6 +6,8 @@
 # the Bash tool call when it is not there yet; "edit" changes README.md and adds
 # notes.txt; "rename" moves notes.txt; "ask" asks the worker's "Ask me" socket
 # from --mcp-config about a Bash call, as Claude Code's permission prompt tool would;
+# "policy" asks the socket from --settings' PreToolUse hook about three Bash calls, as
+# `sidefleet policy-hook` would, and reports each as run or blocked;
 # "jam" leaves a git clean filter that hangs, so snapshotting the tree never ends;
 # "bait" says something a web application firewall takes for an attack).
 # With --include-partial-messages the last message streams as text deltas first.
@@ -17,6 +19,7 @@ while [ $# -gt 0 ]; do
     -p) task="$2"; shift 2;;
     --model) model="$2"; shift 2;;
     --mcp-config) mcp="$2"; shift 2;;
+    --settings) settings="$2"; shift 2;;
     --include-partial-messages) partial=1; shift;;
     *) shift;;
   esac
@@ -57,6 +60,24 @@ print(json.loads(s.makefile().readline())["behavior"])
     else
       printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_ask","content":"The user denied this tool call","is_error":true}]}}'
     fi;;
+esac
+case "$task" in
+  *policy*)
+    python3 -c '
+import json, re, socket, sys
+hook = json.loads(sys.argv[1])["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+sock = re.search(r"--socket \x27([^\x27]*)\x27", hook).group(1)
+for i, cmd in enumerate(["pnpm test", "git push origin main", "psql \"$PROD_DB\" -c \"select 1\""], 1):
+    tu = "tu_p%d" % i
+    print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tu, "name": "Bash", "input": {"command": cmd}}]}}), flush=True)
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock)
+    s.sendall(json.dumps({"tool_name": "Bash", "input": {"command": cmd}, "tool_use_id": tu, "kind": "policy"}).encode() + b"\n")
+    a = json.loads(s.makefile().readline())
+    ran = a["behavior"] in ("allow", "defer")
+    content = "ran (%s)" % a["behavior"] if ran else "blocked: " + a.get("message", "")
+    print(json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu, "content": content, "is_error": not ran}]}}), flush=True)
+' "$settings";;
 esac
 case "$task" in
   *edit*) printf 'demo\nedited by the agent\n' > README.md; printf 'one\ntwo\n' > notes.txt;;

@@ -69,6 +69,9 @@ pub struct AgentSpec {
     pub files: Vec<PathBuf>,
     /// "Ask me" with Claude Code: where its permission prompts go (see [`crate::approval`]).
     pub approval: Option<ApprovalHook>,
+    /// Claude Code: the `PreToolUse` hook that checks every tool call against the org's
+    /// policies. The same socket as `approval`.
+    pub policy_hook: Option<ApprovalHook>,
 }
 
 /// How Claude Code reaches the page for a permission: `exe approval-mcp --socket <socket>`.
@@ -153,6 +156,10 @@ impl AgentSpec {
             a.push(crate::approval::mcp_config(&h.exe, &h.socket));
             a.push("--permission-prompt-tool".into());
             a.push(crate::approval::PROMPT_TOOL.into());
+        }
+        if let Some(h) = &self.policy_hook {
+            a.push("--settings".into());
+            a.push(crate::approval::hook_settings(&h.exe, &h.socket, h.timeout));
         }
         if let Some(e) = self.claude_effort() {
             a.extend(["--effort".to_string(), e.to_string()]);

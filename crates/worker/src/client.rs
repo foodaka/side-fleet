@@ -355,6 +355,14 @@ impl ControlClient {
         Ok(r.json().await?)
     }
 
+    /// Check a tool call against the org's policies (the execution gateway).
+    pub async fn check_policy(&self, run_id: Uuid, req: &serde_json::Value) -> Result<serde_json::Value> {
+        let post = self.http.post(self.url(&format!("/v1/worker/runs/{run_id}/policy?worker_id={}", self.worker_id))).bearer_auth(&self.token);
+        let r = self.body(post, req)?.send().await.context("policy check failed")?;
+        let r = Self::check(r).await.map_err(|e| anyhow!("{e}"))?;
+        Ok(r.json().await?)
+    }
+
     /// An approval as it stands (expired or cancelled once past its deadline or run).
     pub async fn approval(&self, run_id: Uuid, id: Uuid) -> Result<Approval> {
         let r = self

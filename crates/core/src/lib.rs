@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod models;
+pub mod policy;
 pub mod redact;
 pub mod stream;
 pub mod stream_codex;

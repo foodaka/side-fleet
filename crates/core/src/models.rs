@@ -1014,6 +1014,9 @@ pub struct Approval {
     pub expires_at: DateTime<Utc>,
     #[serde(default)]
     pub decided_at: Option<DateTime<Utc>>,
+    /// For an approval a policy asked for: what it is bound to (`policy::action_digest`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 /// The worker asks the page about a tool call.

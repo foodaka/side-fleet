@@ -6,6 +6,7 @@ pub mod attention;
 pub mod auth;
 pub mod chat_updates;
 pub mod claims;
+pub mod control;
 pub mod db;
 pub mod events;
 pub mod fork;

@@ -115,6 +115,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::prefs::router())
         .merge(crate::projects::router())
         .merge(crate::new_repos::router())
+        .merge(crate::control::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_dev));
 
     let worker = Router::new()
@@ -130,6 +131,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/worker/runs/{id}/control", get(run_control))
         .route("/v1/worker/runs/{id}/approvals", post(request_approval))
         .route("/v1/worker/runs/{id}/approvals/{approval}", get(poll_approval))
+        .route("/v1/worker/runs/{id}/policy", post(check_policy))
         .route("/v1/worker/images/{id}", get(worker_get_image))
         .route("/v1/worker/files/{id}", get(worker_get_file))
         .route("/v1/worker/runs/{id}/finish", post(finish_run))
@@ -164,6 +166,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::team::public_router())
         .merge(dev)
         .merge(worker)
+        .merge(crate::control::gateway_router(state.clone()))
         .layer(CorsLayer::permissive())
         // gzip/brotli for the page, assets and JSON; the default predicate skips SSE.
         .layer(tower_http::compression::CompressionLayer::new())
@@ -1199,8 +1202,18 @@ async fn decide_tool(
     body: axum::body::Bytes,
     approve: bool,
 ) -> Result<Json<Approval>, ApiError> {
-    // The tool call runs on the creator's machine, so only they decide it.
-    own_thread(&state, &caller, id).await?;
+    // A policy's approval is decided by those with approval rights (org owners, the agent's
+    // owner); an "Ask me" one by the thread's creator, whose machine runs the tool call.
+    match crate::approvals::get_org(&state.pool, caller.org_id(), approval).await? {
+        Some(a) if a.kind == "policy" => {
+            if !a.decidable_by(caller.user_id(), caller.is_owner()) {
+                return Err(forbidden("only org owners and the agent's owner can decide what a policy holds for approval"));
+            }
+        }
+        _ => {
+            own_thread(&state, &caller, id).await?;
+        }
+    }
     let req: DecideApprovalRequest = if body.iter().all(u8::is_ascii_whitespace) {
         DecideApprovalRequest::default()
     } else {
@@ -1223,6 +1236,10 @@ async fn decide_tool(
         DecideOutcome::RunEnded(_, ev) => {
             ev.into_iter().for_each(|e| state.events.publish(e));
             (StatusCode::CONFLICT, "the run is no longer running".to_string())
+        }
+        // Only approvals without a run end these ways, and this route is a run's.
+        DecideOutcome::DecidedDetached | DecideOutcome::AlreadyDecidedDetached(_) | DecideOutcome::ExpiredDetached => {
+            return Err(ApiError(StatusCode::NOT_FOUND, "approval not found".into()));
         }
     };
     Err(ApiError(status, msg))
@@ -1455,6 +1472,8 @@ async fn register_worker(
     };
     let serves = db::sync_worker(&state.pool, auth.org, &auth.orgs, &req.id, &auth.token_hash, true).await?;
     tracing::info!(worker = %w.id, org = %auth.org, also_in = serves, repos = w.capabilities.repos.len(), "worker registered");
+    // Its agents join the inventory of each org it serves.
+    crate::control::agents::discover_machine(&state.pool, &auth.orgs, &req.id, &req.capabilities).await?;
     for org in &auth.orgs {
         for ev in db::reconcile_worker_runs(&state.pool, *org, &req.id, &req.active_runs).await? {
             tracing::warn!(run_id = %ev.run_id, worker = %req.id, "run lost by worker restart; marked finished");
@@ -1542,8 +1561,14 @@ async fn claim_run(
                 break;
             }
             let max_running = tenancy::org_limits(&state.pool, *org).await?.map(|l| l.parallel_runs);
+            // A suspended agent gets no new tasks: leave its kind out on this machine.
+            let suspended = crate::control::agents::suspended_kinds(&state.pool, *org, &req.worker_id).await?;
+            let org_agents: Vec<String> = agents.iter().filter(|a| !suspended.contains(a)).cloned().collect();
+            if org_agents.is_empty() {
+                continue;
+            }
             let claimed =
-                db::claim_run(&state.pool, *org, &req.worker_id, &req.repos, &req.busy_repos, &agents, req.slots.as_ref(), &kinds, max_running)
+                db::claim_run(&state.pool, *org, &req.worker_id, &req.repos, &req.busy_repos, &org_agents, req.slots.as_ref(), &kinds, max_running)
                     .await?;
             for ev in claimed.failed {
                 tracing::warn!(run_id = %ev.run_id, "queued message had no session to continue; failed");
@@ -1552,6 +1577,7 @@ async fn claim_run(
             if let Some((run, ev)) = claimed.run {
                 state.events.publish(ev);
                 tracing::info!(run_id = %run.id, worker = %req.worker_id, org = %org, "run claimed");
+                run_started(&state, *org, &req.worker_id, &run).await;
                 return Ok(Json(run).into_response());
             }
         }
@@ -1728,7 +1754,15 @@ async fn request_approval(
     }
     worker_is(&state, &auth, &q.worker_id).await?;
     let org = run_org(&state, &auth, id).await?;
-    match crate::approvals::request(&state.pool, org, id, &q.worker_id, &req).await? {
+    let run = db::get_run(&state.pool, org, id).await?.ok_or_else(not_found)?;
+    let agent = crate::control::agents::ensure_discovered(&state.pool, org, &q.worker_id, run.agent, &run.model).await?;
+    let hold = crate::approvals::Hold {
+        kind: "ask",
+        agent_id: Some(agent),
+        context: crate::control::gateway::run_context(&run),
+        ..Default::default()
+    };
+    match crate::approvals::request(&state.pool, org, id, &q.worker_id, &req, &hold).await? {
         RequestOutcome::Created(a, ev) => {
             state.events.publish(ev);
             tracing::info!(run_id = %id, approval = %a.id, tool = %a.tool_name, "tool call waiting for approval");
@@ -1756,6 +1790,86 @@ async fn poll_approval(
     Ok(Json(a))
 }
 
+/// A run started on a machine: its agent is in the inventory and active.
+async fn run_started(state: &AppState, org: Uuid, worker_id: &str, run: &Run) {
+    let agent = match crate::control::agents::ensure_discovered(&state.pool, org, worker_id, run.agent, &run.model).await {
+        Ok(a) => a,
+        Err(e) => return tracing::warn!(error = %e, "recording the run's agent failed"),
+    };
+    let _ = crate::control::agents::touch(&state.pool, agent).await;
+    crate::control::activity::record_quietly(
+        &state.pool,
+        org,
+        crate::control::activity::NewEvent {
+            agent_id: Some(agent),
+            run_id: Some(run.id),
+            kind: "task_started",
+            tool: "task".into(),
+            action: run.task.lines().next().unwrap_or_default().chars().take(300).collect(),
+            context: crate::control::gateway::run_context(run),
+            outcome: "started",
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+async fn run_ended(state: &AppState, org: Uuid, worker_id: &str, run: &Run) {
+    let Ok(Some(agent)) = crate::control::agents::discovered(&state.pool, org, worker_id, run.agent).await else { return };
+    let (kind, outcome) = match run.status {
+        RunStatus::Succeeded => ("task_completed", "succeeded"),
+        RunStatus::Failed => ("execution_failure", "failed"),
+        _ => ("task_completed", "stopped"),
+    };
+    let error = run.result.as_ref().and_then(|r| r.get("error")).and_then(|e| e.as_str()).map(str::to_string);
+    let _ = crate::control::agents::touch(&state.pool, agent.id).await;
+    crate::control::activity::record_quietly(
+        &state.pool,
+        org,
+        crate::control::activity::NewEvent {
+            agent_id: Some(agent.id),
+            run_id: Some(run.id),
+            kind,
+            tool: "task".into(),
+            action: error.unwrap_or_else(|| run.task.lines().next().unwrap_or_default().chars().take(300).collect()),
+            context: crate::control::gateway::run_context(run),
+            outcome,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// The execution gateway for a run's tool call (the worker's `PreToolUse` hook): decide it
+/// under the org's policies for the run's agent, record it, and hold it for approval when
+/// a policy says so.
+async fn check_policy(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkerAuth>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WorkerQuery>,
+    Json(req): Json<crate::control::gateway::CheckRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    worker_is(&state, &auth, &q.worker_id).await?;
+    let org = run_org(&state, &auth, id).await?;
+    let run = db::get_run(&state.pool, org, id).await?.ok_or_else(not_found)?;
+    if run.worker_id.as_deref() != Some(q.worker_id.as_str()) {
+        return Err(ApiError(StatusCode::FORBIDDEN, "run belongs to another worker".into()));
+    }
+    if run.status != RunStatus::Running || run.stop_requested {
+        return Err(ApiError(StatusCode::CONFLICT, "the run is not running".into()));
+    }
+    let agent_id = crate::control::agents::ensure_discovered(&state.pool, org, &q.worker_id, run.agent, &run.model).await?;
+    let agent = crate::control::agents::get(&state.pool, org, agent_id).await?.ok_or_else(not_found)?;
+    let checked = crate::control::gateway::check(&state.pool, org, &agent, Some((&run, q.worker_id.as_str())), &req)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "tool_name must not be empty".into()))?;
+    for ev in checked.events {
+        state.events.publish(ev);
+    }
+    Ok(Json(checked.body))
+}
+
 async fn finish_run(
     State(state): State<AppState>,
     Extension(auth): Extension<WorkerAuth>,
@@ -1778,6 +1892,7 @@ async fn finish_run(
             }
             tracing::info!(run_id = %id, status = run.status.as_str(), "run finished");
             crate::chat_updates::run_finished(&state, org, &run);
+            run_ended(&state, org, &q.worker_id, &run).await;
             Ok(Json(run))
         }
         FinishOutcome::Requeued(run, evs) => {

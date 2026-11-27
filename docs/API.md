@@ -246,6 +246,211 @@ decided within `timeout_secs`, 15 minutes by default, at most 24 hours; a late a
 `410`), or `cancelled` (the run finished, was stopped or was lost first). Anything that goes wrong
 on the way, such as the control plane being unreachable, denies the tool call.
 
+## Control plane: agents, policies, approvals, audit
+
+Every route here is scoped to the caller's org, like the rest of the developer API. Reads are open
+to every member. Changing policies, suspending and reactivating need an org owner (the developer
+key counts as one). Approvals are decided by an org owner or the agent's owner. Anything else
+answers `403`. No API token scope covers these routes yet, so tokens get `403` too.
+
+### Agents
+
+An agent is something that runs work: a Claude Code, Codex or opencode install on a Sidefleet
+machine, or a custom agent that registered itself. Sidefleet-run agents are **discovered**: one per
+org, machine and agent kind (`claude on build-02`), created when the machine registers or claims a
+run, with no owner until someone claims it. Others are **registered** with `POST /v1/agents` and
+get an agent key (`sfk_…`) for the gateway routes below.
+
+An agent as the API returns it:
+
+```json
+{
+  "id": "…", "name": "claude on build-02", "description": "", "kind": "claude",
+  "provider": "Anthropic", "model": "claude-opus-5-5", "runtime": "Sidefleet worker",
+  "host": "build-02", "worker_id": "build-02", "environment": "", "team": "",
+  "owner": {"id": "…", "login": "riley"}, "risk": "unknown", "source": "discovered",
+  "status": "running", "pending_approvals": 0, "credentials": [], "can_cancel": true,
+  "suspension": null, "created_at": "…", "last_active_at": "…"
+}
+```
+
+`status` is `suspended`, else `waiting` (a pending approval), else `running` (a running task, or a
+registered agent that reported `task_started` in the last 10 minutes), else `idle`. `risk` is
+`low`, `medium`, `high` or `unknown`. `credentials` names the Sidefleet-managed credentials the
+agent holds (only registered agents' keys, for now). `can_cancel` says whether a suspension can
+stop its running task: true on a Sidefleet worker, false for a registered agent, whose process
+Sidefleet does not run. `suspension` is `{at, by, reason}` while suspended.
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/agents` | every agent in the org, most recently active first |
+| `POST` | `/v1/agents` `{name, description?, kind?, provider?, model?, runtime?, host?, environment?, team?, risk?, owner_id?}` | register a custom agent (`kind` defaults to `custom`, the owner to the caller). `201 {agent, key}`: the key is shown this once and only its SHA-256 is stored |
+| `GET` | `/v1/agents/:id` | `{agent, permissions, policies, incidents}`: what it may do now (one row per action category with the decision and the policy that made it), the active policies that apply to it, and its suspensions |
+| `PATCH` | `/v1/agents/:id` `{name?, description?, team?, environment?, risk?, owner_id?}` | by an org owner or the agent's owner. Changing the team changes which team policies apply and is audited as `permission.changed` |
+| `POST` | `/v1/agents/:id/claim` | become the owner of an agent nobody owns |
+| `POST` | `/v1/agents/:id/suspend` `{reason, revoke_credentials?, cancel_running?}` | org owners. Blocks new tasks (the agent's machine no longer claims runs for that agent kind) and every tool call at the gateway, cancels its pending approvals, revokes its agent key when `revoke_credentials` (default true), and stops its running tasks when `cancel_running` (default true) and the runtime supports it. `{agent, incident}`; `incident.not_stopped` explains when a running process could not be stopped |
+| `POST` | `/v1/agents/:id/reactivate` | org owners. Revoked keys stay revoked |
+| `POST` | `/v1/agents/:id/key` | issue a new agent key for a registered agent (org owner or its owner; not while suspended). `{key}` once |
+
+### Activity
+
+`GET /v1/activity` lists agent events, newest first. Filters: `agent`, `owner` (user id), `team`,
+`type`, `outcome`, `since`, `until` (RFC 3339), `limit` (default 100, at most 500) and `before`
+(an event id, for the next page). The answer is `{events, counts}`; `counts` is the number of
+events per outcome under the same filters without `outcome`.
+
+```json
+{
+  "id": "…", "at": "…", "agent": {"id": "…", "name": "…"}, "owner": {"id": "…", "login": "…"},
+  "team": "", "run_id": "…", "type": "tool_call", "tool": "shell.exec", "action": "pnpm test",
+  "context": {"task": "…", "repo": "…", "branch": "…"}, "outcome": "allowed",
+  "policy": {"id": "…", "name": "Shell in worktree"}, "decision": "allow", "metadata": {}
+}
+```
+
+`type` is one of `task_started`, `task_completed`, `execution_failure`, `tool_call`,
+`permission_request`, `approval_approved`, `approval_rejected`, `approval_expired`,
+`approval_cancelled`, `agent_suspended`, `agent_reactivated`. `outcome` is one of `started`,
+`succeeded`, `failed`, `stopped`, `allowed`, `approval_required`, `denied`, `approved`,
+`rejected`, `expired`, `cancelled`, `suspended`, `reactivated`. Actions and inputs go through the
+same redaction as run events before they are stored.
+
+### Policies
+
+A policy says what happens when an agent tries a matching action:
+
+```json
+{
+  "id": "…", "name": "Production data access", "description": "…", "scope": "org",
+  "applies_to": "", "tools": ["database.query", "shell.exec: psql, mysql"],
+  "category": "Access production database", "decision": "require_approval",
+  "priority": 10, "active": true, "builtin": false, "updated_at": "…", "updated_by": "riley"
+}
+```
+
+`scope` is `org` (every agent), `team` (`applies_to` is a team name) or `agent` (`applies_to` is
+an agent id). `decision` is `allow`, `require_approval` or `deny`. Each `tools` entry is a tool
+pattern, optionally followed by `:` and comma-separated arguments: `shell.exec`, `deploy.*`,
+`git.push: main, release/*`, `database.write: DELETE, DROP`. A pattern with arguments matches
+when the action (or one of the shell command's parts) starts with one of them, word for word, or
+matches it as a glob.
+
+Tool calls are turned into actions before they are checked. Claude Code's `Read`, `Glob`, `Grep`
+are `fs.read`; `Write`, `Edit`, `MultiEdit`, `NotebookEdit` are `fs.write` inside the task's
+worktree and `fs.write.outside` elsewhere; `Bash` is `shell.exec`, plus `git.push` (with the
+branch it pushes to), `database.query` and `database.write` (`psql`, `mysql` and similar, with
+any `DELETE`, `DROP`, `TRUNCATE`), `secrets.read` (secret-looking environment variables and
+secret manager commands) and `deploy.*` (`kubectl apply`, `helm upgrade`, `terraform apply`, …)
+when the command does those; `WebFetch` and `WebSearch` are `net.fetch`; to-do lists, subagents
+and plans are `agent.*`; MCP tools are `mcp.<server>.<tool>`. Custom agents name the action
+themselves.
+
+For each action the matching active policy with the lowest priority number decides; nothing
+matching means deny. A tool call that is several actions gets the strictest of their decisions.
+A suspended agent gets deny for everything. A new org starts with these policies, all editable:
+Destructive production ops (deny, 1), Push to protected branches (deny, 5), Production data
+access (approval, 10), External credentials (approval, 15), Production deploys (approval, 20),
+Push task branches (allow, 60), Shell in worktree (allow, 90), Agent housekeeping (allow, 95),
+Web access (allow, 96), MCP tools (approval, 97), Project workspace (allow, 100), Temporary files
+(allow, 105) and Default deny (deny, 1000).
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/policies` | every policy, lowest priority first |
+| `POST` | `/v1/policies` `{name, description?, scope, applies_to?, tools, category?, decision, priority, active?}` | org owners; `201` with the policy |
+| `PATCH` | `/v1/policies/:id` | org owners; any of the fields above. Audited as `policy.updated`, or `policy.activated` / `policy.deactivated` |
+| `DELETE` | `/v1/policies/:id` | org owners; the Default deny policy can be turned off but not deleted |
+| `POST` | `/v1/policy/evaluate` `{agent_id?, tool, action}` or `{agent_id?, tool_name, input, workdir?}` | the decision the gateway would make, without acting on it: `{decision, policy, overridden, actions, reason, elapsed_ms}`. `policy` (`{id, name, priority, scope}`, or null for the built-in fallback) decided; `overridden` lists the other policies that matched, with their decisions |
+
+### Approvals
+
+Approvals are the "Ask me" approvals above plus the ones a `require_approval` policy creates.
+A policy approval is bound to the exact action: it stores `digest`, the SHA-256 of the tool name
+and its (redacted) input, and the gateway only lets through the call with that digest. A changed
+call needs a new approval.
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/approvals?status=pending\|resolved` | `{approvals, counts: {pending, resolved}}`, newest first |
+| `POST` | `/v1/approvals/:id/approve` `{message?}` | approve once |
+| `POST` | `/v1/approvals/:id/reject` `{message?}` | reject; the message is what the agent is told |
+
+Each approval has `id`, `kind` (`policy` or `ask`), `status` (`pending`, `approved`, `denied`
+(shown as rejected), `expired`, `cancelled`), `agent`, `owner`, `runtime` (`Claude Code on
+build-02`), `run_id`, `title`, `tool` (the action, `shell.exec`), `tool_name`, `command` (what the
+agent wants to run, redacted), `digest`, `context` `{task, repo, branch}`, `policy`
+`{id, name, scope, applies_to, priority}` (null for "Ask me"), `message`, `decided_by`, `created_at`,
+`expires_at`, `decided_at` and `can_decide` (whether the caller may decide it). Suspending the
+agent cancels its pending approvals.
+
+### Audit log
+
+An append-only record of agent registration and changes, policy changes, permission changes,
+approval requests and decisions, denied actions, task cancellations, suspensions, credential
+revocations and reactivations. The database refuses to update or delete a record. Each record
+stores the SHA-256 of the record before it in the org (`prev_hash`) and its own `hash` over its
+contents and `prev_hash`, so changing or removing one breaks the chain from there on.
+
+```json
+{
+  "id": "…", "seq": 42, "at": "…", "actor": "riley", "actor_kind": "admin",
+  "event": "agent.suspended", "agent_id": "…", "target": "claude on build-02",
+  "detail": "Unexpected writes to the ledger table",
+  "data": {"what": "…", "agent": "…", "owner": "…", "permissions": "…", "policy": "…",
+           "approval": "…", "decided_by": "…", "outcome": "…"},
+  "prev_hash": "…", "hash": "…"
+}
+```
+
+`actor_kind` is `admin` (org owner), `member`, `agent`, `api_key` or `system`.
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/audit` | `{records, total}`, newest first. Filters: `q` (searches actor, event, target and detail), `event`, `agent`, `since`, `until`, `limit` (default 100, at most 500), `before` (a `seq`) |
+| `GET` | `/v1/audit/verify` | walks the whole chain: `{intact, records, broken_at, head, verified_at}`; `broken_at` is the `seq` of the first record that does not fit |
+| `GET` | `/v1/audit/export?format=csv\|jsonl` | the records under the same filters, oldest first, as a download |
+
+### Dashboard
+
+`GET /v1/control/summary` gives the dashboard its numbers: `agents` `{total, teams, unowned,
+running, waiting, suspended}`, `approvals` `{pending, soonest_expiry}`, `decisions_24h` `{total,
+allowed, approval, denied, hours: [{hour, allowed, approval, denied}]}` (24 hourly buckets, oldest
+first), `governed_7d` `{total, governed, no_policy, unattributed}` (tool calls checked against a
+policy other than the default deny and made by an owned agent; matched only the fallback; made by
+an agent without an owner), and `engine` `{p95_ms}`.
+
+### The execution gateway
+
+Policies are enforced where tool calls run, not on the page.
+
+**Claude Code on a Sidefleet machine.** Every Claude Code run gets a `PreToolUse` hook (through
+`--settings`) that runs `sidefleet policy-hook --socket <path>` before each tool call. The hook
+passes the call over the run's Unix socket to the worker, which asks
+`POST /v1/worker/runs/:id/policy?worker_id=…` `{tool_name, input, tool_use_id?, workdir?,
+timeout_secs?}` (input redacted). The control plane evaluates the call for the run's agent,
+records the decision, and answers `{decision, policy, reason, digest, approval}`:
+
+- `deny`: the hook blocks the call and the agent is told why.
+- `require_approval`: `approval` is a new pending approval. The worker waits for it like an
+  "Ask me" approval; approved (with the same digest) lets the call run, anything else blocks it.
+- `allow`: the hook steps aside and Claude Code's own permission mode applies as before.
+
+If the control plane cannot be reached, or the answer is unreadable, only reads (`fs.read`) and
+agent housekeeping (`agent.*`) go ahead: everything else is denied. Codex and opencode have no
+hook Sidefleet can use yet, so their tool calls are not checked; a suspension still stops their
+new tasks and running ones.
+
+**Custom agents** call the gateway themselves with their agent key, `Bearer sfk_…`:
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/gateway/evaluate` `{tool, action}` or `{tool_name, input}`, plus `context?` `{task, repo, branch}` and `timeout_secs?` | `{decision, policy, reason, digest, approval}`, recorded like any tool call. For `require_approval`, poll the approval |
+| `GET` | `/v1/gateway/approvals/:id` | `{id, status, message, digest, expires_at}`; expires once past its deadline |
+| `POST` | `/v1/gateway/events` `{type, tool?, action?, outcome?, context?, metadata?}` | report `task_started`, `task_completed`, `execution_failure` or a `tool_call`; `204` |
+
+A suspended agent's key is revoked (`401` from then on) unless the suspension kept it; with a kept
+key every evaluation answers `deny` with the reason "agent suspended".
+
 ## Worker endpoints
 
 Bearer one of `SIDEFLEET_WORKER_TOKENS` (comma-separated, one per machine if you want to revoke

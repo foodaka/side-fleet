@@ -4,6 +4,12 @@
 	import Boxes from '@lucide/svelte/icons/boxes';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 	import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
+	import Gauge from '@lucide/svelte/icons/gauge';
+	import Bot from '@lucide/svelte/icons/bot';
+	import Activity from '@lucide/svelte/icons/activity';
+	import ShieldCheck from '@lucide/svelte/icons/shield-check';
+	import Scale from '@lucide/svelte/icons/scale';
+	import ScrollText from '@lucide/svelte/icons/scroll-text';
 	import { LayoutGrid, PanelLeftClose, Plus, Search, ServerCog, X } from '#lib/components/movingicons';
 	import Logo from './Logo.svelte';
 	import StatusDot from './StatusDot.svelte';
@@ -11,6 +17,7 @@
 	import AccountMenu from './AccountMenu.svelte';
 	import InboxBell from './InboxBell.svelte';
 	import { fleet } from '../state.svelte';
+	import { control } from '../control.svelte';
 
 	let { path, onClose, drawer = false, closeKeys = '' }: {
 		path: string;
@@ -40,6 +47,17 @@
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
 		{ href: '#/machines', label: 'Machines', icon: ServerCog, on: (p: string) => p.startsWith('/machines') }
 	];
+
+	// The control plane: every agent in the org, what it may do, and what it did.
+	const governance = [
+		{ href: '#/control', label: 'Dashboard', icon: Gauge, on: (p: string) => p === '/control' },
+		{ href: '#/control/agents', label: 'Agents', icon: Bot, on: (p: string) => p.startsWith('/control/agents') },
+		{ href: '#/control/activity', label: 'Activity', icon: Activity, on: (p: string) => p.startsWith('/control/activity') },
+		{ href: '#/control/approvals', label: 'Approvals', icon: ShieldCheck, on: (p: string) => p.startsWith('/control/approvals') },
+		{ href: '#/control/policies', label: 'Policies', icon: Scale, on: (p: string) => p.startsWith('/control/policies') },
+		{ href: '#/control/audit', label: 'Audit log', icon: ScrollText, on: (p: string) => p.startsWith('/control/audit') }
+	];
+	$effect(() => control.use());
 
 	function onkeydown(e: KeyboardEvent) {
 		// `/` jumps to search, unless you're typing somewhere or this copy of the sidebar is hidden.
@@ -104,7 +122,25 @@
 		</label>
 	</div>
 
-	<nav class="mt-1 flex flex-col gap-0.5 px-3" aria-label="Main">
+	{#if control.available}
+		<nav class="mt-1 flex flex-col gap-0.5 px-3" aria-label="Control plane">
+			<div class="px-2.5 pt-2 pb-1 text-[11px] font-semibold tracking-[.04em] text-muted-foreground uppercase">Control plane</div>
+			{#each governance as n (n.href)}
+				<a href={n.href} aria-current={n.on(path) ? 'page' : undefined} class={item(n.on(path))}>
+					<n.icon size={14} />
+					<span class="flex-1">{n.label}</span>
+					{#if n.href === '#/control/agents' && control.agents !== null}
+						<span class="tnum text-[11.5px] font-normal text-muted-foreground">{control.agents}</span>
+					{:else if n.href === '#/control/approvals' && control.pending > 0}
+						<span class="tnum inline-flex h-4.5 min-w-5 items-center justify-center rounded-full bg-queue-soft px-1.5 text-[11px] font-semibold text-queue-ink" aria-label="{control.pending} pending">{control.pending}</span>
+					{/if}
+				</a>
+			{/each}
+			<div class="px-2.5 pt-3 pb-1 text-[11px] font-semibold tracking-[.04em] text-muted-foreground uppercase">Workspace</div>
+		</nav>
+	{/if}
+
+	<nav class="flex flex-col gap-0.5 px-3 {control.available ? '' : 'mt-1'}" aria-label="Main">
 		{#if !drawer}<InboxBell row side="right" />{/if}
 		{#each nav as n (n.href)}
 			<a href={n.href} aria-current={n.on(path) ? 'page' : undefined} class={item(n.on(path))}>

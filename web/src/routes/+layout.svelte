@@ -31,10 +31,19 @@
 	import UsersRound from '@lucide/svelte/icons/users-round';
 	import Boxes from '@lucide/svelte/icons/boxes';
 	import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+	import ShieldCheck from '@lucide/svelte/icons/shield-check';
+	import { control } from '#lib/sf/control.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
 	onMount(() => fleet.start());
+	// Pending approvals show on the sidebar and the collapsed rail.
+	onMount(() => control.use());
+	$effect(() => {
+		const ready = fleet.loaded && !fleet.needsSignIn;
+		void fleet.orgId;
+		if (ready) untrack(() => void control.refresh());
+	});
 	// Signed in with GitHub: your settings follow you to every browser.
 	$effect(() => { if (fleet.me?.user) prefs.connect(); });
 
@@ -99,6 +108,7 @@
 		try { localStorage.setItem(SIDEBAR, collapsed ? 'collapsed' : 'open'); } catch { /* storage blocked */ }
 	}
 	const rail = $derived([
+		...(control.available ? [{ href: '#/control', label: 'Control plane', icon: ShieldCheck, on: (p: string) => p.startsWith('/control') }] : []),
 		{ href: '#/runs', label: 'Overview', icon: LayoutGrid, on: (p: string) => p === '/runs' },
 		{ href: '#/pulls', label: 'Pull requests', icon: GitPullRequest, on: (p: string) => p.startsWith('/pulls') },
 		{ href: '#/rooms', label: 'Rooms', icon: Boxes, on: (p: string) => p.startsWith('/rooms') },
@@ -164,13 +174,16 @@
 										class="mi-hover relative grid size-8 place-items-center rounded-md {n.on(path) ? 'bg-sidebar-accent text-foreground' : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground'}"
 									>
 										<n.icon size={14} />
+										{#if n.href === '#/control' && control.pending > 0}
+											<span class="absolute top-1 right-1 size-2 rounded-full bg-queue" aria-hidden="true"></span>
+										{/if}
 										{#if n.href === '#/machines'}
 											<StatusDot status={fleet.conn === 'unreachable' ? 'failed' : fleet.updatable.length ? 'queued' : fleet.online.length ? 'online' : 'offline'} class="absolute top-1.5 right-1.5" />
 										{/if}
 									</a>
 								{/snippet}
 							</Tooltip.Trigger>
-							<Tooltip.Content side="right">{n.label}{#if n.href === '#/machines' && fleet.updatable.length}: {fleet.updatable.length} can update{/if}</Tooltip.Content>
+							<Tooltip.Content side="right">{n.label}{#if n.href === '#/control' && control.pending}: {control.pending} waiting for approval{/if}{#if n.href === '#/machines' && fleet.updatable.length}: {fleet.updatable.length} can update{/if}</Tooltip.Content>
 						</Tooltip.Root>
 					{/each}
 				</nav>

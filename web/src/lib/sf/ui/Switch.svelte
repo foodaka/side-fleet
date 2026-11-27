@@ -5,6 +5,7 @@
 		onchange: (v: boolean) => void;
 		id?: string;
 		'aria-labelledby'?: string;
+		'aria-label'?: string;
 		'aria-describedby'?: string;
 	} = $props();
 </script>
